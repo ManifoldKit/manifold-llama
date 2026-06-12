@@ -1,0 +1,33 @@
+{
+  "originHash" : "79f520f83f194558fac1eb29e41ce0a9c8741609313386995a15e8ca1623097a",
+  "pins" : [
+    {
+      "identity" : "llama.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/llama.swift",
+      "state" : {
+        "revision" : "b369d80eb8135060a9d0d87692af001bfc2bc2fa",
+        "version" : "2.9553.0"
+      }
+    },
+    {
+      "identity" : "manifoldkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/roryford/ManifoldKit",
+      "state" : {
+        "branch" : "main",
+        "revision" : "bfd08a83eb226bae7168837c6c743d70f0f141f2"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    }
+  ],
+  "version" : 3
+}
