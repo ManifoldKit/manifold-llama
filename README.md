@@ -4,7 +4,7 @@ llama.cpp (GGUF) inference backend for [ManifoldKit](https://github.com/roryford
 
 It wraps llama.cpp (via the prebuilt [`mattt/llama.swift`](https://github.com/mattt/llama.swift) xcframework, exact-pinned) behind ManifoldKit's `InferenceBackend` contract: GGUF model loading, streaming generation, KV-cache persistence/reuse, embeddings, reranking, grammar/DRY/XTC/Mirostat sampling, and GGUF tool-call parsing.
 
-> **Temporary module name — pre-0.48 only.** Until ManifoldKit's C2 removal PR deletes the in-core `ManifoldLlama` target, SwiftPM's graph-wide target-name uniqueness forces this package to ship the module as **`ManifoldLlamaKit`**. It is renamed to `ManifoldLlama` in one commit before the first `0.1.0` tag (see the `NOTE(C2)` in `Package.swift`). If you are reading this after a 0.1.0 tag exists and still see `Kit` names, file an issue.
+> **Temporary module name — pre-0.48 only.** Until ManifoldKit's C2 removal PR deletes the in-core `ManifoldLlama` target, SwiftPM's graph-wide target-name uniqueness forces this package to ship the module as **`ManifoldLlama`**. It is renamed to `ManifoldLlama` in one commit before the first `0.1.0` tag (see the `NOTE(C2)` in `Package.swift`). If you are reading this after a 0.1.0 tag exists and still see `Kit` names, file an issue.
 
 ## Install
 
@@ -17,30 +17,18 @@ dependencies: [
 targets: [
     .target(name: "MyApp", dependencies: [
         .product(name: "ManifoldKit", package: "ManifoldKit"),
-        .product(name: "ManifoldLlamaKit", package: "manifold-llama"), // ManifoldLlama after 0.1.0
+        .product(name: "ManifoldLlama", package: "manifold-llama"),
     ]),
 ]
 ```
 
-Register the backend with your `InferenceService` (the registrar seam shipped in core's B2 work):
+Register the backend via the `LlamaBackends` registrar (the seam shipped in core's B2 work; the registrar moved here in core's C2 split):
 
 ```swift
 import ManifoldKit
-import ManifoldLlamaKit  // import ManifoldLlama after 0.1.0
+import ManifoldLlama
 
-// TODO(C2): once core's C2 PR moves the `LlamaBackends` registrar enum from
-// ManifoldKit's ManifoldBackendsUmbrella into this package, this becomes
-//     try await ManifoldKit.quickStart(backends: [LlamaBackends.self])
-// Until then, register through the same public seam the registrar uses:
-await MainActor.run {
-    service.registerBackendFactory { modelType in
-        switch modelType {
-        case .gguf: return LlamaBackend()
-        default:    return nil
-        }
-    }
-    service.declareSupport(for: .gguf)
-}
+let kit = try await ManifoldKit.quickStart(backends: [LlamaBackends.self])
 ```
 
 ## Compatibility

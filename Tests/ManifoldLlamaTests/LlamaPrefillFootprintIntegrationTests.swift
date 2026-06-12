@@ -1,9 +1,12 @@
 import XCTest
 import ManifoldInference
 import ManifoldHardware
+// GGUFKVCacheEstimator was promoted to @_spi(BackendInternals) public in
+// core's C2 PR so this suite can reference it symbolically.
+@_spi(BackendInternals) import ManifoldHardware
 import ManifoldTestSupport
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 
 /// Real-model coverage for adaptive prefill footprint learning (issue #1592).
 ///
@@ -67,12 +70,7 @@ final class LlamaPrefillFootprintIntegrationTests: XCTestCase {
                 memoryStrategy: .external,
                 requestedContextSize: 1_000_000_000,
                 trainedContextLength: nil,
-                // Inlined value of GGUFKVCacheEstimator.legacyFallbackBytesPerToken:
-                // the estimator is `package`-visibility in core's ManifoldHardware,
-                // invisible out-of-package. TODO(C2): promote GGUFKVCacheEstimator
-                // (or this constant) to public/@_spi(BackendInternals) in core and
-                // restore the symbolic reference.
-                kvBytesPerToken: 8_192,
+                kvBytesPerToken: GGUFKVCacheEstimator.legacyFallbackBytesPerToken,
                 availableMemoryBytes: 1_000_000_000,
                 physicalMemoryBytes: 16 * 1_073_741_824,
                 absoluteContextCeiling: 128_000,

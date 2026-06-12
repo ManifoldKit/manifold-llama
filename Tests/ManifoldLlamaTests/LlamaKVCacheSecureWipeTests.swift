@@ -1,6 +1,6 @@
 import XCTest
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 import ManifoldInference
 
 // Tests for LlamaBackend.secureWipe().

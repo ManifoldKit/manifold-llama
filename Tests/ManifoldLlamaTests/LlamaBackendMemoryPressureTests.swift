@@ -168,8 +168,8 @@ final class MemoryPressureCallbackAPITests: XCTestCase {
     }
 }
 
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 import ManifoldTestSupport
 
 // MARK: - Hardware-gated tests

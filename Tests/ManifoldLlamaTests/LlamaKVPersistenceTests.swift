@@ -1,8 +1,8 @@
 import XCTest
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 
 /// Tests for KV-cache prefix reuse across consecutive turns in `LlamaBackend`.
 ///

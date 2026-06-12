@@ -1,8 +1,8 @@
 import XCTest
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 
 /// Regression tests for the `parse_special: true` fix in `LlamaTokenization.tokenize`
 /// and `LlamaBackend.countTokens`.

@@ -1,7 +1,7 @@
 import XCTest
 import ManifoldInference
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 
 /// Tests for `LlamaBackend.capabilities.supportsToolCalling` and
 /// the Gemma 4 tool-aware prompt template format.

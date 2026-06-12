@@ -1,7 +1,7 @@
 import XCTest
 import ManifoldInference
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 
 /// Test shim driving the unified `ToolCallTransform` (configured with
 /// `LlamaToolMarkers.markers()`) through the old `LlamaToolCallParser`-shaped
