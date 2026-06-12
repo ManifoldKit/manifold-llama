@@ -4,8 +4,8 @@ import ManifoldRuntime
 import ManifoldPersistenceSwiftData
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 // BackendInternals SPI: seam published for the companion split (#1749).
 @_spi(BackendInternals) import ManifoldContract
 

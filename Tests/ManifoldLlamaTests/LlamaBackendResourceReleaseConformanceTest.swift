@@ -1,6 +1,6 @@
 #if DEBUG
 import XCTest
-@_spi(Testing) import ManifoldLlamaKit
+@_spi(Testing) import ManifoldLlama
 
 /// Behavioral proof that dropping a `LlamaBackend` releases its process-lifecycle
 /// claim (#1623 class C — "asymmetric sibling").

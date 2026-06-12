@@ -1,16 +1,11 @@
 // swift-tools-version: 6.1
 import PackageDescription
 
-// NOTE(C2): the target/product/module is TEMPORARILY named `ManifoldLlamaKit`.
-// Core (roryford/ManifoldKit) still declares a target named `ManifoldLlama`
-// until the C2 removal PR merges, and SwiftPM requires target names to be
-// unique across the package graph — module aliasing cannot dissolve a
-// root-vs-dependency conflict (verified empirically at C1 bootstrap).
-// The moment C2 lands on core main, flip in ONE commit, before any 0.1.0 tag:
-//   1. product + target name `ManifoldLlamaKit` -> `ManifoldLlama`
-//   2. `sed -i '' 's/import ManifoldLlamaKit/import ManifoldLlama/' Tests/**/*.swift`
-// Paths (`Sources/ManifoldLlama`) are already the final layout — the
-// ManifoldBackendTestKit #filePath upwalk depends on them; do not move them.
+// NOTE(C2, resolved): the target/product/module carried a temporary `Kit`
+// suffix while core still declared a `ManifoldLlama` target (SwiftPM requires
+// target names to be unique across the package graph). Core's C2 removal PR
+// deletes that target; this branch restores the canonical `ManifoldLlama`
+// name and merges immediately after core's C2.
 let package = Package(
     name: "manifold-llama",
     platforms: [
@@ -18,7 +13,7 @@ let package = Package(
         .macOS(.v15),
     ],
     products: [
-        .library(name: "ManifoldLlamaKit", targets: ["ManifoldLlamaKit"]),
+        .library(name: "ManifoldLlama", targets: ["ManifoldLlama"]),
     ],
     dependencies: [
         // TODO(C3): switch to .upToNextMinor(from: "0.48.0") at the release train.
@@ -42,7 +37,7 @@ let package = Package(
         // Imported-From commit trailer); the `#if Llama` / `#if HuggingFace`
         // trait gates were stripped at import — both are always-on here.
         .target(
-            name: "ManifoldLlamaKit",
+            name: "ManifoldLlama",
             dependencies: [
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 // ManifoldHardware provides BackendCapabilities, GGUFParser, and
@@ -60,7 +55,7 @@ let package = Package(
         .testTarget(
             name: "ManifoldLlamaTests",
             dependencies: [
-                "ManifoldLlamaKit",
+                "ManifoldLlama",
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "ManifoldHardware", package: "ManifoldKit"),
                 .product(name: "ManifoldRuntime", package: "ManifoldKit"),

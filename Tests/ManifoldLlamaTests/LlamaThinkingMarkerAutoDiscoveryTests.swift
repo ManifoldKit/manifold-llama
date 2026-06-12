@@ -1,7 +1,7 @@
 import XCTest
 import ManifoldInference
-import ManifoldLlamaKit
-@_spi(Testing) import ManifoldLlamaKit
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 import ManifoldTestSupport
 
 /// Auto-discovery tests for `LlamaBackend`'s thinking-marker plumbing.

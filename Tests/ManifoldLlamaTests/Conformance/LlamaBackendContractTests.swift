@@ -2,8 +2,8 @@ import XCTest
 import ManifoldInference
 import ManifoldBackendTestKit
 import ManifoldTestSupport
-import ManifoldLlamaKit
-import ManifoldLlamaKit
+import ManifoldLlama
+import ManifoldLlama
 
 /// LlamaBackend conformance against the universal backend contract.
 ///
