@@ -79,5 +79,69 @@ final class LlamaBackendProcessLifecycleTests: XCTestCase {
             "Latch must stay true even when refcount returns to baseline — this is the #1319 invariant"
         )
     }
+
+    // MARK: - Log level get/set
+
+    /// Tests for the ``InferenceService/llamaLogLevel`` forwarding layer.
+    /// ``InferenceService.llamaLogLevel`` is a thin `@MainActor` wrapper around
+    /// ``LlamaBackendProcessLifecycle/setLogLevel(_:)`` / ``currentLogLevel``;
+    /// exercising the lifecycle methods directly covers the full contract.
+
+    func test_setLogLevel_silent_roundtrips() {
+        LlamaBackendProcessLifecycle.setLogLevel(.silent)
+        assertCurrentLevel(is: .silent)
+    }
+
+    func test_setLogLevel_warning_roundtrips() {
+        LlamaBackendProcessLifecycle.setLogLevel(.warning)
+        assertCurrentLevel(is: .warning)
+    }
+
+    func test_setLogLevel_info_roundtrips() {
+        LlamaBackendProcessLifecycle.setLogLevel(.info)
+        assertCurrentLevel(is: .info)
+    }
+
+    func test_setLogLevel_verbose_roundtrips() {
+        LlamaBackendProcessLifecycle.setLogLevel(.verbose)
+        assertCurrentLevel(is: .verbose)
+    }
+
+    func test_setLogLevel_allLevelsInSequence_eachPersistsUntilNextSet() {
+        let sequence: [LlamaLogLevel] = [.silent, .warning, .verbose, .info, .silent]
+        for level in sequence {
+            LlamaBackendProcessLifecycle.setLogLevel(level)
+            assertCurrentLevel(is: level, "after setLogLevel to \(level)")
+        }
+        // Restore default so other tests see .info.
+        LlamaBackendProcessLifecycle.setLogLevel(.info)
+    }
+
+    // MARK: - Helpers
+
+    /// Pattern-match assertion for ``LlamaLogLevel``.
+    /// Uses a switch rather than `XCTAssertEqual` so no `Equatable` conformance
+    /// is required — the switch exhaustively covers all four cases.
+    private func assertCurrentLevel(
+        is expected: LlamaLogLevel,
+        _ message: String = "",
+        file: StaticString = #file,
+        line: UInt = #line
+    ) {
+        let actual = LlamaBackendProcessLifecycle.currentLogLevel
+        let matches: Bool
+        switch (actual, expected) {
+        case (.silent,  .silent),
+             (.warning, .warning),
+             (.info,    .info),
+             (.verbose, .verbose):
+            matches = true
+        default:
+            matches = false
+        }
+        XCTAssertTrue(matches,
+                      "Expected log level \(expected) but got \(actual)\(message.isEmpty ? "" : " — \(message)")",
+                      file: file, line: line)
+    }
 }
 #endif
