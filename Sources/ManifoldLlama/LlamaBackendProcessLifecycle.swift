@@ -19,7 +19,7 @@ import os
 /// The default is ``LlamaLogLevel/info``, which preserves the behaviour
 /// that existed before this API was added (all llama.cpp output reaches stderr
 /// unchanged).
-public enum LlamaLogLevel: Sendable, Equatable {
+public enum LlamaLogLevel: Sendable {
     /// Suppress all llama.cpp / ggml output. Nothing reaches stderr.
     case silent
     /// Only WARN and ERROR messages reach stderr.
