@@ -19,7 +19,7 @@ import os
 /// The default is ``LlamaLogLevel/info``, which preserves the behaviour
 /// that existed before this API was added (all llama.cpp output reaches stderr
 /// unchanged).
-public enum LlamaLogLevel: Sendable {
+public enum LlamaLogLevel: Sendable, Equatable {
     /// Suppress all llama.cpp / ggml output. Nothing reaches stderr.
     case silent
     /// Only WARN and ERROR messages reach stderr.
@@ -79,7 +79,7 @@ private func _llamaWarnOnlyCallback(
     private static let lock = NSLock()
 
     /// Thread-safe read of the current log level.
-    static var currentLogLevel: LlamaLogLevel {
+    @_spi(Testing) public static var currentLogLevel: LlamaLogLevel {
         lock.lock()
         defer { lock.unlock() }
         return _currentLogLevel
@@ -112,7 +112,7 @@ private func _llamaWarnOnlyCallback(
     /// and takes effect immediately. Set this before the first ``retain()`` call
     /// (i.e. before ``InferenceService/loadModel(from:plan:)``) to also suppress
     /// the initialisation log burst.
-    static func setLogLevel(_ level: LlamaLogLevel) {
+    @_spi(Testing) public static func setLogLevel(_ level: LlamaLogLevel) {
         lock.lock()
         defer { lock.unlock() }
         _currentLogLevel = level
@@ -153,7 +153,7 @@ private func _llamaWarnOnlyCallback(
         return refCount
     }
 
-    static var _currentLogLevelForTesting: LlamaLogLevel {
+    public static var _currentLogLevelForTesting: LlamaLogLevel {
         lock.lock()
         defer { lock.unlock() }
         return _currentLogLevel

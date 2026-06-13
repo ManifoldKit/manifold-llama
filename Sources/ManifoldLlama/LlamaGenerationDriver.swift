@@ -787,7 +787,7 @@ import ManifoldHardware
 
     /// Returns true when the tail of `window` contains `minRepeats` consecutive
     /// identical phrases of length `phraseLen`.
-    private static func tailRepeats(_ window: [String], phraseLen: Int, minRepeats: Int) -> Bool {
+    @_spi(Testing) public static func tailRepeats(_ window: [String], phraseLen: Int, minRepeats: Int) -> Bool {
         let needed = phraseLen * minRepeats
         guard window.count >= needed else { return false }
         let n = window.count
