@@ -124,9 +124,14 @@ import ManifoldHardware
     ///   - context: Live `llama_context *` snapshot captured under `stateLock`.
     ///   - vocab: Live `llama_vocab *` snapshot captured under `stateLock`.
     ///   - tokens: Tokenized prompt (including BOS) — computed before the Task.
-    ///   - reuseLen: Number of leading prompt tokens whose KV state was preserved
-    ///     from the previous turn by the caller. When > 0, the driver skips
-    ///     re-decoding those tokens and emits `.kvCacheReuse(promptTokensReused:)`.
+    ///   - reuseLen: Number of leading prompt tokens that *matched* the previous
+    ///     turn's KV state (the detected shared-prefix length). When > 0 the driver
+    ///     emits `.kvCacheReuse(promptTokensReused:)` as an observability signal.
+    ///     It does NOT change the decode: the prompt is always re-decoded in full
+    ///     from position 0 so the sampling-position batch shape is bit-identical
+    ///     across turns (greedy determinism, ManifoldKit#1677). A tail-only
+    ///     re-decode would be a different batch shape and flip the argmax on
+    ///     near-tied logits for non-Qwen architectures.
     ///   - maxTokens: Maximum number of new tokens to generate.
     ///   - config: Sampling parameters (temperature, topP, repeatPenalty).
     ///   - markers: Thinking markers for the active template, or nil to disable ThinkingTransform.
@@ -181,11 +186,29 @@ import ManifoldHardware
 
         // MARK: KV cache clear / reuse
 
-        // When reuseLen > 0 the caller (LlamaBackend.generate) has already trimmed
-        // the KV tail beyond the shared prefix via llama_memory_seq_rm — so the
-        // reused tokens are already decoded at their correct positions and we must
-        // NOT clear them. Only do a full clear when there is nothing to reuse.
-        if reuseLen == 0, let memory = llama_get_memory(context) {
+        // Batch-shape determinism (ManifoldKit#1677). A partial re-decode of a
+        // KV-reuse tail is, by construction, a *different batch shape* than the
+        // first turn's full-prompt decode. Metal attention kernels pick their
+        // parallel-reduction strategy from the batch token count, so the
+        // FP-accumulation order at the sampling position (N-1) differs between a
+        // tail-only re-decode and the original full-prompt batch — which flips
+        // the greedy argmax on near-tied logits. The -2 tail cap (PR #966) only
+        // happened to align the reduction path for Qwen-family models; it does
+        // not generalise.
+        //
+        // To guarantee greedy determinism across *all* architectures we re-decode
+        // the entire prompt from position 0 using the identical `batchSize`
+        // chunking the cold path uses, so the position-(N-1) logits are produced
+        // by a bit-identical kernel path on every turn. This means a full KV clear
+        // every turn (the trimmed prefix can no longer be reused for decode), so
+        // the only cost is re-decoding the shared prefix — a correctness-over-perf
+        // trade the issue explicitly asks for.
+        //
+        // `reuseLen` is still surfaced as `.kvCacheReuse(promptTokensReused:)`: it
+        // is the *detected* shared-prefix length, an observability signal that a
+        // matching prefix existed this turn even though we re-decode it for
+        // determinism. Decode itself ignores it (see `promptPos = 0` below).
+        if let memory = llama_get_memory(context) {
             llama_memory_clear(memory, false)
         }
 
@@ -420,8 +443,11 @@ import ManifoldHardware
         // the final chunk has `logits = 1` — that's the one we sample from
         // to kick off generation.
         //
-        // Start at `reuseLen` to skip the prefix whose KV state was preserved
-        // by the caller. When reuseLen == 0 this is equivalent to starting at 0.
+        // Always start at position 0 and re-decode the full prompt with the same
+        // `batchSize` chunking as the cold path, so the sampling-position batch
+        // shape is bit-identical across turns (ManifoldKit#1677). We do NOT start
+        // at `reuseLen`: a tail-only re-decode is a different batch shape and
+        // flips the greedy argmax on near-tied logits for non-Qwen architectures.
         // Adaptive per-model footprint, learned across this prompt's chunks.
         // Stays dormant (guard returns false, estimate nil) until the first
         // accepted sample, so a single-chunk prompt behaves exactly as before.
@@ -429,7 +455,7 @@ import ManifoldHardware
         var prefillAborted = false
 
         var promptDecodeFailed = false
-        var promptPos = reuseLen
+        var promptPos = 0
         while promptPos < tokens.count {
             if isCancelled() { break }
 
@@ -761,7 +787,7 @@ import ManifoldHardware
         // time the generation loop exits (EOG, cancellation, or token budget),
         // the GPU may still be executing the last batch.  If the caller
         // immediately starts a new `generate()` call, the KV-cache clear
-        // (`llama_memory_clear` / `llama_memory_seq_rm`) at the top of the next
+        // (`llama_memory_clear`) at the top of the next
         // run enqueues *new* Metal operations before the previous command buffers
         // have committed.  That ordering violation trips llama.cpp's internal
         // render-set assertion:

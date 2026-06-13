@@ -397,42 +397,29 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             )
         }
 
-        // Compute how many leading tokens match the previous turn's KV state so
-        // the driver can skip re-decoding that prefix. We read sessionKVState
-        // here (before the isGenerating flip) because stopGeneration() never
-        // clears it — only unloadModel() and resetConversation() do — so there
-        // is no race between this read and those two paths under stateLock.
+        // Compute how many leading tokens match the previous turn's KV state.
+        // We read sessionKVState here (before the isGenerating flip) because
+        // stopGeneration() never clears it — only unloadModel() and
+        // resetConversation() do — so there is no race between this read and
+        // those two paths under stateLock.
+        //
+        // `reuseLen` is now a *detection* signal only — the count of matching
+        // leading tokens, surfaced as `.kvCacheReuse(promptTokensReused:)`. It no
+        // longer drives a partial re-decode: greedy determinism across non-Qwen
+        // architectures (ManifoldKit#1677) requires the driver to re-decode the
+        // whole prompt with the same batch shape as the first turn, so the
+        // sampling-position (N-1) logits come from a bit-identical Metal reduction
+        // path every turn. A tail-only re-decode (the old -2-cap path from PR #966)
+        // is a different batch shape and flips the argmax on near-tied logits for
+        // architectures whose kernels reduce differently across batch sizes.
+        //
+        // Consequently we no longer trim the KV tail with `llama_memory_seq_rm`
+        // here: the driver issues a full `llama_memory_clear` and re-decodes from
+        // position 0 (see LlamaGenerationDriver). The detected prefix is reported,
+        // not reused for decode — correctness over the saved prefix decodes, the
+        // trade the issue asks for.
         let previousTokens = withStateLock { sessionKVState?.tokens ?? [] }
-        let commonPrefixLen = zip(tokens, previousTokens).prefix(while: { $0.0 == $0.1 }).count
-        // Cap reuse at tokens.count - 2 so the driver always re-decodes the last
-        // *two* prompt tokens as a 2-token batch. Why two and not one: Metal's
-        // attention kernels select different parallel-reduction strategies for
-        // 1-token vs N-token decode batches. A 1-token re-decode of position
-        // N-1 would take a different reduction path than Turn 1 (which decoded
-        // the prompt as one batched call) and the resulting FP-accumulation
-        // drift can flip the argmax on near-tied tokens (e.g. Qwen3-0.6B
-        // splitting between "," and "." after " Paris"). Re-decoding the last
-        // two tokens batched matches Turn 1's kernel path for position N-1,
-        // restoring greedy determinism. KV reuse for positions 0..N-3 is
-        // preserved, so the perf cost is exactly one extra token decode per
-        // reuse turn. See #966. The `max(0, …)` floor handles short prompts
-        // (tokens.count < 2) where the cap would go negative — in that case
-        // reuse is not viable anyway and the driver decodes the whole prompt.
-        let reuseLen = max(0, min(commonPrefixLen, tokens.count - 2))
-
-        // Trim the KV cache tail beyond the reuse prefix before flipping
-        // isGenerating. The C KV mutation must run *inside* stateLock, not after
-        // a snapshot-then-release: unloadModel()/secureWipe() nil and free
-        // `context` under the same lock, so a snapshot read followed by an
-        // unlocked `llama_memory_seq_rm` could touch a freed context
-        // (use-after-free) if teardown raced in between.
-        if reuseLen > 0 {
-            withStateLock {
-                if let ctx = context, let mem = llama_get_memory(ctx) {
-                    llama_memory_seq_rm(mem, 0, Int32(reuseLen), -1)
-                }
-            }
-        }
+        let reuseLen = zip(tokens, previousTokens).prefix(while: { $0.0 == $0.1 }).count
 
         // Reset the cancellation flag and flip isGenerating atomically under the
         // same lock that stopGeneration() holds when it touches generationTask.

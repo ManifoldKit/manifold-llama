@@ -362,16 +362,17 @@ final class LlamaKVPersistenceTests: XCTestCase {
             "Turn 2 must emit .kvCacheReuse — without it this determinism check is vacuous"
         )
 
-        // FIXME: https://github.com/roryford/ManifoldKit/issues/1677 — enforce same batch shape
-        // on KV-reuse re-decode to guarantee greedy determinism.
-        // Metal attention kernels use different parallel-reduction strategies for batches of
-        // different sizes. When KV prefix reuse re-decodes only the last 2 prompt tokens (a
-        // 2-token batch), the FP accumulation order differs from Turn 1's full-prompt batch,
-        // and the argmax can flip on near-tied logits. The -2 cap introduced in PR #966 fixes
-        // this for Qwen-family models but does not generalise to all architectures. Until the
-        // implementation enforces the same batch shape on both turns, this test is expected to
-        // fail on models where first-turn and KV-reuse-turn logits diverge.
-        XCTExpectFailure("KV-reuse greedy determinism not yet guaranteed across all model architectures — see FIXME above")
+        // ManifoldKit#1677 (fixed): KV-reuse re-decode now enforces an identical batch
+        // shape to the first turn. Metal attention kernels pick their parallel-reduction
+        // strategy from the batch token count, so a tail-only re-decode (the old PR #966
+        // -2-cap path) used a different FP-accumulation order than Turn 1's full-prompt
+        // batch and could flip the greedy argmax on near-tied logits for non-Qwen
+        // architectures. The driver now issues a full KV clear and re-decodes the whole
+        // prompt from position 0 with the same `n_batch` chunking as the cold path, so the
+        // position-(N-1) logits come from a bit-identical kernel path every turn. The
+        // `.kvCacheReuse` event still reports the detected shared-prefix length (asserted
+        // above) — reuse is detected and surfaced, just not used for a shape-divergent
+        // partial decode. This assertion must now hold across all architectures.
         XCTAssertEqual(
             turn1Tokens, turn2Tokens,
             "Greedy output must be deterministic across KV-reuse turns — "

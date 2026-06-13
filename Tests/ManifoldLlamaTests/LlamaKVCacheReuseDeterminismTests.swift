@@ -38,9 +38,11 @@ final class LlamaKVCacheReuseDeterminismTests: XCTestCase {
     /// argmax path deterministic, so any divergence means the reuse path's KV
     /// state was not equivalent to a full prefill — exactly the hazard class.
     ///
-    /// The `LlamaBackend` re-decodes the final two prompt tokens as a batched
-    /// pair (#966) so the warm path's Metal reduction order matches the cold
-    /// path's; this test is the regression guard for that determinism.
+    /// The `LlamaBackend` re-decodes the *entire* prompt from position 0 with the
+    /// same `n_batch` chunking as the cold path (ManifoldKit#1677, superseding the
+    /// #966 last-two-token cap), so the warm path's Metal parallel-reduction
+    /// strategy at the sampling position is bit-identical to the cold path's; this
+    /// test is the regression guard for that determinism.
     ///
     /// Skips cleanly off-device or with no model — never faked.
     func test_llama_warmReuseTurnMatchesColdTurnByteForByte() async throws {
@@ -94,8 +96,10 @@ final class LlamaKVCacheReuseDeterminismTests: XCTestCase {
             "Warm (KV-reuse) and cold (full-prefill) second turns must produce byte-identical greedy output — a mismatch is the #1382 non-exact-reuse hazard"
         )
 
-        // Sabotage: removing the #966 last-two-token batched re-decode in
-        // LlamaBackend.generate (capping reuse at tokens.count - 1 instead of
-        // - 2) flips the argmax on near-tied logits and diverges warmText.
+        // Sabotage: in LlamaGenerationDriver, start the prompt-decode loop at
+        // `reuseLen` instead of 0 (a tail-only re-decode). That changes the
+        // sampling-position batch shape vs the cold path's full-prompt batch,
+        // flips the argmax on near-tied logits for non-Qwen architectures, and
+        // diverges warmText (ManifoldKit#1677).
     }
 }
