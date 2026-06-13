@@ -403,21 +403,21 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         // resetConversation() do — so there is no race between this read and
         // those two paths under stateLock.
         //
-        // `reuseLen` is now a *detection* signal only — the count of matching
-        // leading tokens, surfaced as `.kvCacheReuse(promptTokensReused:)`. It no
-        // longer drives a partial re-decode: greedy determinism across non-Qwen
-        // architectures (ManifoldKit#1677) requires the driver to re-decode the
-        // whole prompt with the same batch shape as the first turn, so the
-        // sampling-position (N-1) logits come from a bit-identical Metal reduction
-        // path every turn. A tail-only re-decode (the old -2-cap path from PR #966)
-        // is a different batch shape and flips the argmax on near-tied logits for
-        // architectures whose kernels reduce differently across batch sizes.
+        // `reuseLen` is the full count of matching leading tokens. It is surfaced
+        // as `.kvCacheReuse(promptTokensReused:)` AND drives genuine prefix reuse —
+        // but the driver only reuses the prefix up to a `batchSize` boundary so the
+        // chunk producing the sampling-position (N-1) logits keeps a batch shape
+        // bit-identical to the first turn's. That is what guarantees greedy
+        // determinism across non-Qwen architectures (ManifoldKit#1677): the old
+        // -2-cap path (PR #966) could resume mid-chunk, a different batch shape that
+        // flips the argmax on near-tied logits for kernels that reduce differently
+        // across batch sizes. Batch-aligned reuse keeps O(new-tokens) prefill while
+        // remaining deterministic.
         //
-        // Consequently we no longer trim the KV tail with `llama_memory_seq_rm`
-        // here: the driver issues a full `llama_memory_clear` and re-decodes from
-        // position 0 (see LlamaGenerationDriver). The detected prefix is reported,
-        // not reused for decode — correctness over the saved prefix decodes, the
-        // trade the issue asks for.
+        // The KV tail trim (`llama_memory_seq_rm`) and the full-clear-vs-keep
+        // decision now both live in the driver, which owns `batchSize`
+        // (`llama_n_batch`) and runs inside the generation Task already serialized
+        // with unloadModel(). See LlamaGenerationDriver.
         let previousTokens = withStateLock { sessionKVState?.tokens ?? [] }
         let reuseLen = zip(tokens, previousTokens).prefix(while: { $0.0 == $0.1 }).count
 

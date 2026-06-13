@@ -363,16 +363,17 @@ final class LlamaKVPersistenceTests: XCTestCase {
         )
 
         // ManifoldKit#1677 (fixed): KV-reuse re-decode now enforces an identical batch
-        // shape to the first turn. Metal attention kernels pick their parallel-reduction
-        // strategy from the batch token count, so a tail-only re-decode (the old PR #966
-        // -2-cap path) used a different FP-accumulation order than Turn 1's full-prompt
-        // batch and could flip the greedy argmax on near-tied logits for non-Qwen
-        // architectures. The driver now issues a full KV clear and re-decodes the whole
-        // prompt from position 0 with the same `n_batch` chunking as the cold path, so the
-        // position-(N-1) logits come from a bit-identical kernel path every turn. The
-        // `.kvCacheReuse` event still reports the detected shared-prefix length (asserted
-        // above) — reuse is detected and surfaced, just not used for a shape-divergent
-        // partial decode. This assertion must now hold across all architectures.
+        // shape to the first turn while keeping genuine prefix reuse. Metal attention
+        // kernels pick their parallel-reduction strategy from the batch token count, so a
+        // mid-chunk re-decode (the old PR #966 -2-cap path) used a different
+        // FP-accumulation order than Turn 1 for the sampling-position chunk and could flip
+        // the greedy argmax on near-tied logits for non-Qwen architectures. The driver now
+        // reuses the matching KV prefix only up to a `n_batch` boundary and resumes the
+        // re-decode at that aligned position, so the chunk producing the position-(N-1)
+        // logits has a bit-identical kernel path every turn. The `.kvCacheReuse` event
+        // still reports the full detected shared-prefix length (asserted above), and reuse
+        // is genuinely used for decode (O(new-tokens) prefill). This assertion must now
+        // hold across all architectures.
         XCTAssertEqual(
             turn1Tokens, turn2Tokens,
             "Greedy output must be deterministic across KV-reuse turns — "
