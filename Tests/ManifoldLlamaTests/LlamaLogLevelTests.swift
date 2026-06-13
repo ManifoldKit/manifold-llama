@@ -1,4 +1,5 @@
 import XCTest
+import ManifoldLlamaKit
 @_spi(Testing) import ManifoldLlamaKit
 
 /// Tests for ``LlamaBackendProcessLifecycle`` log-level get/set.
