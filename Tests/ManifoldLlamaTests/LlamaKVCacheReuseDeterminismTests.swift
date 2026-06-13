@@ -38,9 +38,13 @@ final class LlamaKVCacheReuseDeterminismTests: XCTestCase {
     /// argmax path deterministic, so any divergence means the reuse path's KV
     /// state was not equivalent to a full prefill — exactly the hazard class.
     ///
-    /// The `LlamaBackend` re-decodes the final two prompt tokens as a batched
-    /// pair (#966) so the warm path's Metal reduction order matches the cold
-    /// path's; this test is the regression guard for that determinism.
+    /// The `LlamaBackend` reuses the matching KV prefix but only up to a `n_batch`
+    /// boundary, resuming the re-decode at that aligned position (ManifoldKit#1677,
+    /// superseding the #966 last-two-token cap). Because the resume point is a
+    /// multiple of `n_batch`, the chunk that produces the sampling-position logits
+    /// has the same Metal parallel-reduction path as the cold turn's, so the warm
+    /// output is bit-identical; this test is the regression guard for that
+    /// determinism. Genuine prefix reuse is preserved (O(new-tokens) prefill).
     ///
     /// Skips cleanly off-device or with no model — never faked.
     func test_llama_warmReuseTurnMatchesColdTurnByteForByte() async throws {
@@ -94,8 +98,10 @@ final class LlamaKVCacheReuseDeterminismTests: XCTestCase {
             "Warm (KV-reuse) and cold (full-prefill) second turns must produce byte-identical greedy output — a mismatch is the #1382 non-exact-reuse hazard"
         )
 
-        // Sabotage: removing the #966 last-two-token batched re-decode in
-        // LlamaBackend.generate (capping reuse at tokens.count - 1 instead of
-        // - 2) flips the argmax on near-tied logits and diverges warmText.
+        // Sabotage: in LlamaGenerationDriver, set the decode start to the raw
+        // `reuseLen` instead of the batch-aligned `alignedReuseLen` (i.e. resume
+        // mid-chunk). That changes the sampling-position chunk's batch shape vs the
+        // cold path's, flips the argmax on near-tied logits for non-Qwen
+        // architectures, and diverges warmText (ManifoldKit#1677).
     }
 }

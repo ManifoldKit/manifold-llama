@@ -124,9 +124,14 @@ import ManifoldHardware
     ///   - context: Live `llama_context *` snapshot captured under `stateLock`.
     ///   - vocab: Live `llama_vocab *` snapshot captured under `stateLock`.
     ///   - tokens: Tokenized prompt (including BOS) — computed before the Task.
-    ///   - reuseLen: Number of leading prompt tokens whose KV state was preserved
-    ///     from the previous turn by the caller. When > 0, the driver skips
-    ///     re-decoding those tokens and emits `.kvCacheReuse(promptTokensReused:)`.
+    ///   - reuseLen: Number of leading prompt tokens that *matched* the previous
+    ///     turn's KV state (the detected shared-prefix length). When > 0 the driver
+    ///     emits `.kvCacheReuse(promptTokensReused:)` as an observability signal.
+    ///     The driver reuses the prefix's KV cells but only up to a `batchSize`
+    ///     boundary (`alignedReuseLen`): it resumes the re-decode at that aligned
+    ///     position so the chunk producing the sampling-position (N-1) logits has a
+    ///     batch shape bit-identical to the cold turn's, preserving greedy
+    ///     determinism (ManifoldKit#1677) while keeping genuine prefix reuse.
     ///   - maxTokens: Maximum number of new tokens to generate.
     ///   - config: Sampling parameters (temperature, topP, repeatPenalty).
     ///   - markers: Thinking markers for the active template, or nil to disable ThinkingTransform.
@@ -181,12 +186,59 @@ import ManifoldHardware
 
         // MARK: KV cache clear / reuse
 
-        // When reuseLen > 0 the caller (LlamaBackend.generate) has already trimmed
-        // the KV tail beyond the shared prefix via llama_memory_seq_rm — so the
-        // reused tokens are already decoded at their correct positions and we must
-        // NOT clear them. Only do a full clear when there is nothing to reuse.
-        if reuseLen == 0, let memory = llama_get_memory(context) {
-            llama_memory_clear(memory, false)
+        // Batch-shape determinism (ManifoldKit#1677) WITHOUT abandoning KV reuse.
+        //
+        // The hazard: a partial re-decode of a KV-reuse tail can be a *different
+        // batch shape* than the first turn's full-prompt decode. Metal attention
+        // kernels pick their parallel-reduction strategy from the batch token
+        // count, so if the chunk that contains the sampling position (N-1) has a
+        // different start/size than it did on the cold turn, the FP-accumulation
+        // order at N-1 differs and the greedy argmax can flip on near-tied logits.
+        // The old -2 tail cap (PR #966) only happened to align the reduction path
+        // for Qwen-family models; it did not generalise.
+        //
+        // The fix: keep genuine prefix reuse, but only reuse a prefix that ends on
+        // a `batchSize` boundary. The prompt is decoded in `[0,B), [B,2B), …`
+        // chunks; the chunk containing N-1 starts at `floor((N-1)/B)*B`. If we
+        // resume the re-decode at *any* batch-aligned position ≤ that boundary,
+        // every subsequent chunk — including the final one that produces the N-1
+        // logits — has byte-identical start, size, and positions to the cold path,
+        // so the Metal reduction path is bit-identical every turn.
+        //
+        // Aligning the reused prefix down to a batch boundary is also what makes
+        // the *cached* KV bit-identical: those cells were produced on a previous
+        // turn by the same batched `[0,B), [B,2B), …` calls at the same positions
+        // as the cold path would issue, so reusing whole aligned chunks is exact.
+        // (A reuse boundary mid-chunk would leave the next chunk a partial-shape
+        // decode, reintroducing the hazard — hence the floor to `batchSize`.)
+        //
+        // `alignedReuseLen` drives the actual decode start; `reuseLen` (the full
+        // detected shared-prefix length) is still surfaced as
+        // `.kvCacheReuse(promptTokensReused:)` as the observability signal.
+        //
+        // We also cap the reuse below the *final* chunk's start. The sampling
+        // position N-1 lives in the chunk beginning at `finalChunkStart`; that
+        // chunk MUST be re-decoded so its last token carries `logits = 1`. If the
+        // whole prompt matched the previous turn and `tokens.count` is a multiple
+        // of `batchSize`, an un-capped floor would equal `tokens.count`, the decode
+        // loop would never run, and there would be no logits to sample. Capping at
+        // `finalChunkStart` guarantees we always re-decode the N-1 chunk (which is
+        // also where the determinism fix lives).
+        let finalChunkStart = tokens.isEmpty ? 0 : ((tokens.count - 1) / batchSize) * batchSize
+        let alignedReuseLen = min((reuseLen / batchSize) * batchSize, finalChunkStart)
+
+        if let memory = llama_get_memory(context) {
+            if alignedReuseLen > 0 {
+                // Keep the batch-aligned reused prefix's KV cells; trim only the
+                // tail beyond it. Running this here (inside the generation Task) is
+                // lifecycle-safe: all context-touching work in this driver is
+                // serialized with unloadModel() via the task install (see the
+                // pointer re-read in LlamaBackend.generate), exactly as the full
+                // `llama_memory_clear` path is.
+                llama_memory_seq_rm(memory, 0, Int32(alignedReuseLen), -1)
+            } else {
+                llama_memory_clear(memory, false)
+            }
         }
 
         if reuseLen > 0 {
@@ -420,8 +472,15 @@ import ManifoldHardware
         // the final chunk has `logits = 1` — that's the one we sample from
         // to kick off generation.
         //
-        // Start at `reuseLen` to skip the prefix whose KV state was preserved
-        // by the caller. When reuseLen == 0 this is equivalent to starting at 0.
+        // Start at `alignedReuseLen` (the reused prefix floored to a `batchSize`
+        // boundary), NOT at the raw `reuseLen`. Because the resume position is a
+        // multiple of `batchSize`, the chunk boundaries from here on coincide
+        // exactly with the cold path's `[0,B), [B,2B), …` chunking, so the chunk
+        // that produces the sampling-position (N-1) logits has bit-identical
+        // start/size/positions every turn (ManifoldKit#1677). A mid-chunk resume
+        // (raw `reuseLen`) would be a different batch shape and flip the greedy
+        // argmax on near-tied logits for non-Qwen architectures. When
+        // `alignedReuseLen == 0` this is equivalent to a full re-decode from 0.
         // Adaptive per-model footprint, learned across this prompt's chunks.
         // Stays dormant (guard returns false, estimate nil) until the first
         // accepted sample, so a single-chunk prompt behaves exactly as before.
@@ -429,7 +488,7 @@ import ManifoldHardware
         var prefillAborted = false
 
         var promptDecodeFailed = false
-        var promptPos = reuseLen
+        var promptPos = alignedReuseLen
         while promptPos < tokens.count {
             if isCancelled() { break }
 
