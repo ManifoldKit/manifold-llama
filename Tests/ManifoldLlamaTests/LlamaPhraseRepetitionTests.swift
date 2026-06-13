@@ -1,4 +1,5 @@
 import XCTest
+import ManifoldInference
 import ManifoldLlamaKit
 @_spi(Testing) import ManifoldLlamaKit
 

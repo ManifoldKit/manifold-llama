@@ -1,5 +1,6 @@
 import XCTest
 import ManifoldInference
+import ManifoldLlamaKit
 @_spi(Testing) import ManifoldLlamaKit
 
 /// Error-path and boundary-condition tests for ``LlamaReranker``.
