@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/roryford/manifold-llama/compare/v0.2.1...v0.2.2) (2026-06-14)
+
+### Highlights
+
+**Tracks ManifoldKit 0.51** ([#12](https://github.com/roryford/manifold-llama/issues/12)) — the core pin moves to `.upToNextMinor(from: "0.51.0")`, building against the 0.51 release (grammar-constrained tool calling derived from `config.tools`, per-tool parameter-schema GBNF lowering, model-capability flags, and the pre-1.0 Contract wire-type freeze). `v0.2.1` still pinned `0.50.0`, which **excludes** 0.51 — so this is the release to take if you're on ManifoldKit 0.51.0. No source changes are required — bump and rebuild.
+
+**Model-family grammar conformance suite** ([#11](https://github.com/roryford/manifold-llama/issues/11)) — a hardware-gated, skips-empty test suite that exercises GBNF grammars across model families (Llama / Qwen / Mistral / Gemma / Phi): digit, JSON-object, alternation, leading-space, and tool-call envelope cases, plus the Gemma grammar carve-out and the thinking-phase grammar gate (ManifoldKit #1595). Test-only — no runtime change.
+
 ## [0.2.1](https://github.com/roryford/manifold-llama/compare/v0.2.0...v0.2.1) (2026-06-13)
 
 ### Highlights
