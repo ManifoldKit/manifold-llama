@@ -74,6 +74,18 @@ final class LlamaThinkingGrammarTests: XCTestCase {
         return config
     }
 
+    /// Polls `isGenerating` until false or a 3-second deadline. Draining the stream to its end
+    /// does not guarantee the backend's `defer { isGenerating = false }` has run (it clears only
+    /// after `LlamaGenerationDriver.run` returns, while `continuation.finish()` ends the drain
+    /// loop from inside `run`). Mirrors `LlamaKVReuseTests.waitForGeneratingFalse`.
+    private func waitForGeneratingFalse(_ backend: LlamaBackend) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while backend.isGenerating && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(backend.isGenerating, "isGenerating must settle false after draining the stream")
+    }
+
     // MARK: - Assertion 1: grammar + thinking DISABLED ⇒ constrained
 
     /// The contract callers can rely on: with a strict grammar AND thinking forced off
@@ -96,6 +108,7 @@ final class LlamaThinkingGrammarTests: XCTestCase {
         for try await event in stream.events {
             if case .token(let t) = event { output += t }
         }
+        try await waitForGeneratingFalse(backend)
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertTrue(["yes", "no"].contains(trimmed),
                       "thinking-disabled: a strict grammar must constrain the final output to {yes,no}; "
@@ -125,9 +138,15 @@ final class LlamaThinkingGrammarTests: XCTestCase {
     func test_grammar_thinkingEnabled_permissiveDuringThinking_strictAfter() async throws {
         let backend = try await loadQwenBackend()
 
-        guard backend.capabilities.supportsThinking else {
-            print("[thinking-grammar][qwen] model reports supportsThinking == false "
-                + "(GGUF advertised no thinking markers) — phase-gate sub-case is informational-only; "
+        // Read the per-model flag, NOT `capabilities.supportsThinking`: the latter is hardcoded
+        // `true` on `LlamaBackend.capabilities`. `manifest.supportsThinking` reflects whether THIS
+        // loaded GGUF auto-detected thinking markers from its chat template (set by
+        // `LlamaBackend.loadModel` to `autoDetectedThinkingMarkers != nil`). Without this, a
+        // "qwen"-matched GGUF lacking thinking markers would run the phase-gate assertions against
+        // a model that can never open `<think>`, exercising nothing.
+        guard backend.manifest?.supportsThinking == true else {
+            print("[thinking-grammar][qwen] loaded GGUF advertised no thinking markers "
+                + "(manifest.supportsThinking == false) — phase-gate sub-case is informational-only; "
                 + "the constrained-output invariant is covered by test_grammar_thinkingDisabled_constrainsOutput")
             throw XCTSkip("Loaded GGUF is not thinking-capable; the #1595 phase gate cannot be exercised.")
         }
@@ -150,6 +169,7 @@ final class LlamaThinkingGrammarTests: XCTestCase {
             default:                     break
             }
         }
+        try await waitForGeneratingFalse(backend)
 
         if !reasoning.isEmpty {
             // Permissive phase: reasoning is FREE TEXT routed to `.thinkingToken`, not grammar-pruned.

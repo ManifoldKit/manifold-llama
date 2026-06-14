@@ -145,12 +145,31 @@ final class LlamaGrammarConformanceTests: XCTestCase {
 
     /// Drains a stream into plain `.token` text. Thinking tokens are excluded so callers
     /// asserting on grammar-constrained *output* see only the post-`</think>` payload.
-    private func drainTokens(_ stream: GenerationStream) async throws -> String {
+    ///
+    /// Settles `isGenerating` before returning. Draining the AsyncStream to its end does NOT
+    /// guarantee the backend's generation Task has run its `defer { isGenerating = false }`
+    /// block — `continuation.finish()` (which ends this loop) fires from inside
+    /// `LlamaGenerationDriver.run`, but the flag clears only after `run` returns. Without the
+    /// settle, the suite's back-to-back `generate` calls (C1→C2→…→C5→thinking on one backend)
+    /// race the flag and the next `generate` throws `.alreadyGenerating`. Mirrors the
+    /// drain-then-poll pattern in `LlamaKVReuseTests`/`LlamaGrammarSamplerTests`.
+    private func drainTokens(_ stream: GenerationStream, _ backend: LlamaBackend) async throws -> String {
         var text = ""
         for try await event in stream.events {
             if case .token(let chunk) = event { text += chunk }
         }
+        try await waitForGeneratingFalse(backend)
         return text
+    }
+
+    /// Polls `isGenerating` until false or a 3-second deadline. See `drainTokens` for why this
+    /// is required between sequential `generate` calls on a shared backend.
+    private func waitForGeneratingFalse(_ backend: LlamaBackend) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while backend.isGenerating && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(backend.isGenerating, "isGenerating must settle false before the next generate call")
     }
 
     // MARK: - Per-family entry points
@@ -234,7 +253,7 @@ final class LlamaGrammarConformanceTests: XCTestCase {
     private func runC1(_ family: GrammarFamily, _ backend: LlamaBackend) async throws {
         let stream = try backend.generate(prompt: "Give me a random number.", systemPrompt: nil,
                                           config: grammarConfig(GrammarFixtures.digits, maxTokens: 16))
-        let text = try await drainTokens(stream)
+        let text = try await drainTokens(stream, backend)
         XCTAssertFalse(text.isEmpty, "[\(family.id)] C1: grammar-constrained generation must emit at least one token")
         XCTAssertTrue(text.allSatisfy { $0.isNumber },
                       "[\(family.id)] C1: 'root ::= [0-9]+' must constrain output to digits; got \(text.debugDescription)")
@@ -249,7 +268,7 @@ final class LlamaGrammarConformanceTests: XCTestCase {
     private func runC2(_ family: GrammarFamily, _ backend: LlamaBackend) async throws {
         let stream = try backend.generate(prompt: "Report the weather as JSON.", systemPrompt: nil,
                                           config: grammarConfig(GrammarFixtures.jsonObject, maxTokens: 64))
-        let text = try await drainTokens(stream)
+        let text = try await drainTokens(stream, backend)
         XCTAssertTrue(GrammarFixtures.isJSONObject(text, requiredKeys: GrammarFixtures.jsonObjectRequiredKeys),
                       "[\(family.id)] C2: grammar must yield a JSON object with keys "
                     + "\(GrammarFixtures.jsonObjectRequiredKeys.sorted()); got \(text.debugDescription)")
@@ -262,7 +281,7 @@ final class LlamaGrammarConformanceTests: XCTestCase {
     private func runC3(_ family: GrammarFamily, _ backend: LlamaBackend) async throws {
         let stream = try backend.generate(prompt: "Answer yes or no: is the sky blue?", systemPrompt: nil,
                                           config: grammarConfig(GrammarFixtures.alternation, maxTokens: 8))
-        let text = try await drainTokens(stream).trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = try await drainTokens(stream, backend).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertTrue(["yes", "no"].contains(text),
                       "[\(family.id)] C3: alternation must constrain output to {yes,no}; got \(text.debugDescription)")
     }
@@ -280,12 +299,14 @@ final class LlamaGrammarConformanceTests: XCTestCase {
 
         let plain = try await drainTokens(
             try backend.generate(prompt: prompt, systemPrompt: nil,
-                                 config: grammarConfig(GrammarFixtures.alternationNoLeadingSpace, maxTokens: 8))
+                                 config: grammarConfig(GrammarFixtures.alternationNoLeadingSpace, maxTokens: 8)),
+            backend
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 
         let spaced = try await drainTokens(
             try backend.generate(prompt: prompt, systemPrompt: nil,
-                                 config: grammarConfig(GrammarFixtures.alternationLeadingSpace, maxTokens: 8))
+                                 config: grammarConfig(GrammarFixtures.alternationLeadingSpace, maxTokens: 8)),
+            backend
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 
         XCTAssertTrue(["yes", "no"].contains(plain),
@@ -315,7 +336,7 @@ final class LlamaGrammarConformanceTests: XCTestCase {
     private func runC5(_ family: GrammarFamily, _ backend: LlamaBackend) async throws {
         let stream = try backend.generate(prompt: "Call the get_weather tool.", systemPrompt: nil,
                                           config: grammarConfig(GrammarFixtures.toolCallEnvelope, maxTokens: 48))
-        let text = try await drainTokens(stream).trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = try await drainTokens(stream, backend).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard let open = text.range(of: "<tool_call>"),
               let close = text.range(of: "</tool_call>") else {
@@ -352,9 +373,16 @@ final class LlamaGrammarConformanceTests: XCTestCase {
     /// reasoning prose gets grammar-pruned and either surfaces as grammar-mangled `.token`
     /// text or the post-think tail stops satisfying the grammar.
     private func runThinking(_ family: GrammarFamily, _ backend: LlamaBackend) async throws {
-        guard backend.capabilities.supportsThinking else {
-            print("[grammar-conformance][\(family.id)] thinking: model reports supportsThinking == false "
-                + "(GGUF advertised no thinking markers) — thinking sub-case is informational-only")
+        // Read the per-model flag, NOT `capabilities.supportsThinking`: the latter is hardcoded
+        // `true` on `LlamaBackend.capabilities` (it advertises the family's *potential*), whereas
+        // `manifest.supportsThinking` reflects whether THIS loaded GGUF auto-detected thinking
+        // markers from its chat template (`LlamaBackend.loadModel` sets it to
+        // `autoDetectedThinkingMarkers != nil`). A "qwen"-matched GGUF with no thinking markers
+        // must degrade to informational, not run the phase-gate sub-case against a model that
+        // can never open `<think>`.
+        guard backend.manifest?.supportsThinking == true else {
+            print("[grammar-conformance][\(family.id)] thinking: loaded GGUF advertised no thinking "
+                + "markers (manifest.supportsThinking == false) — thinking sub-case is informational-only")
             return
         }
         var config = grammarConfig(GrammarFixtures.alternation, maxTokens: 96)
@@ -375,6 +403,7 @@ final class LlamaGrammarConformanceTests: XCTestCase {
             default:                        break
             }
         }
+        try await waitForGeneratingFalse(backend)
 
         if sawThinkingCompleted {
             // Gate flipped strict: the constrained tail MUST satisfy the grammar.
