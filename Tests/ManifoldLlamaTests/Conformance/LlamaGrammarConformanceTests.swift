@@ -90,11 +90,21 @@ final class LlamaGrammarConformanceTests: XCTestCase {
 
         /// C2: JSON object with required keys `city` and `temp`. The Gemma stall class —
         /// open `{`, whitespace-loop to EOG. Required keys for the key-presence assertion.
+        ///
+        /// **Bounded fields (issue #20).** The earlier rules had unbounded repetition
+        /// (`string ::= "\"" ([a-zA-Z ]*) "\""`, `number ::= "-"? [0-9]+ ("." [0-9]+)?`):
+        /// the grammar IS followed, but a small/degenerate model (mistral 7B observed) keeps
+        /// emitting fractional digits and never reaches the closing `}` within `maxOutputTokens`,
+        /// so C2 fails by *truncation* rather than by grammar violation. We bound every
+        /// repeating run to a small upper count so a well-behaved model can always close the
+        /// object inside the token budget while still proving the grammar constrains structure.
+        ///   - city string: 0–24 letters/spaces
+        ///   - integer part: 1–3 digits; fractional part: optional `.` + 1–2 digits
         static let jsonObjectRequiredKeys: Set<String> = ["city", "temp"]
         static let jsonObject = #"""
         root   ::= "{" ws "\"city\"" ws ":" ws string ws "," ws "\"temp\"" ws ":" ws number ws "}"
-        string ::= "\"" ([a-zA-Z ]*) "\""
-        number ::= "-"? [0-9]+ ("." [0-9]+)?
+        string ::= "\"" [a-zA-Z ]{0,24} "\""
+        number ::= "-"? [0-9]{1,3} ("." [0-9]{1,2})?
         ws     ::= [ \t\n]*
         """#
 
@@ -110,10 +120,23 @@ final class LlamaGrammarConformanceTests: XCTestCase {
         /// C5: tool-call envelope. Literal `<tool_call>{json}</tool_call>` constraining to a
         /// `{"name": ...}` body. Scoped (see `runC5` / class doc): we assert the inner JSON
         /// parses with a `name` key rather than driving the full transform.
+        ///
+        /// **Bounded name (issue #20).** The earlier `string ::= "\"" ([a-zA-Z_]+) "\""` rule
+        /// let the tool name grow without limit. The grammar IS followed (a valid `<tool_call>`
+        /// opens), but small models degenerate — mistral/qwen 7B were observed emitting names
+        /// like `get_weather_tool_call_example_response_json_v_one_zero_zero…` that never close
+        /// the quote, so the closing `</tool_call>` is never reached inside `maxOutputTokens`
+        /// and C5 fails by *truncation*. Capping the name at 1–32 chars lets a well-behaved
+        /// model always close the envelope while still proving the grammar constrains structure.
+        ///
+        /// NOTE: this envelope is a **hand-authored test fixture**, not output of production
+        /// `ToolGrammarBuilder` (which lives in ManifoldKit's `ManifoldInference` and is
+        /// compile-validated separately by `LlamaToolGrammarCompileTests`). So bounding it here
+        /// is the right layer; there is no production grammar-generation gap behind this failure.
         static let toolCallEnvelope = #"""
         root   ::= "<tool_call>" ws obj ws "</tool_call>"
         obj    ::= "{" ws "\"name\"" ws ":" ws string ws "}"
-        string ::= "\"" ([a-zA-Z_]+) "\""
+        string ::= "\"" [a-zA-Z_]{1,32} "\""
         ws     ::= [ \t\n]*
         """#
 
@@ -334,8 +357,11 @@ final class LlamaGrammarConformanceTests: XCTestCase {
     /// disable the sampler) — the output stops matching the envelope and JSON-with-`name`
     /// extraction fails.
     private func runC5(_ family: GrammarFamily, _ backend: LlamaBackend) async throws {
+        // 64-token cap (was 48): even when a model fills the now-bounded 32-char name to its
+        // limit, the literal `<tool_call>…</tool_call>` wrapper plus quoting needs headroom to
+        // emit the closing marker within budget. See `toolCallEnvelope` re issue #20.
         let stream = try backend.generate(prompt: "Call the get_weather tool.", systemPrompt: nil,
-                                          config: grammarConfig(GrammarFixtures.toolCallEnvelope, maxTokens: 48))
+                                          config: grammarConfig(GrammarFixtures.toolCallEnvelope, maxTokens: 64))
         let text = try await drainTokens(stream, backend).trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard let open = text.range(of: "<tool_call>"),
