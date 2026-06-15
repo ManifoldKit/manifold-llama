@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.3](https://github.com/roryford/manifold-llama/compare/v0.2.2...v0.2.3) (2026-06-15)
+
+### Highlights
+
+**Tracks ManifoldKit 0.52** ([#17](https://github.com/roryford/manifold-llama/issues/17)) — the core pin moves to `.upToNextMinor(from: "0.52.0")`, building against the 0.52 release (opt-in rendered-prompt observability via `GenerationConfig.captureRenderedPrompt`, batteries-included context-compression policies, idle model auto-unload, and headless model selection). No source changes required — bump and rebuild.
+
 ## [0.2.2](https://github.com/roryford/manifold-llama/compare/v0.2.1...v0.2.2) (2026-06-14)
 
 ### Highlights
