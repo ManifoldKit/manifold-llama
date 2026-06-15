@@ -39,6 +39,12 @@ final class LlamaModernSamplerIntegrationTests: XCTestCase {
             maxOutputTokens: 24
         )
         config.seed = 42
+        // Disable thinking: `findGGUFModel()` may pick a reasoning model (Qwen3-0.6B)
+        // whose longer thinking phase both widens the back-to-back generation window
+        // and adds a reasoning stream. The determinism property under test is about
+        // the seeded sampler, not the thinking transform — keep the compared output
+        // to the visible stream so the assertion is model-shape independent.
+        config.maxThinkingTokens = 0
 
         let outputA = try await collectTokens(backend: backend, prompt: "Tell me a fact:", config: config)
         backend.resetConversation()
@@ -62,6 +68,9 @@ final class LlamaModernSamplerIntegrationTests: XCTestCase {
             maxOutputTokens: 24
         )
         config.seed = 1_337
+        // See test_xtc_sameSeed_isDeterministic: disable thinking so the compared
+        // streams are the seeded visible output, independent of which model is smallest.
+        config.maxThinkingTokens = 0
 
         let outputA = try await collectTokens(backend: backend, prompt: "Tell me a fact:", config: config)
         backend.resetConversation()
@@ -85,6 +94,16 @@ final class LlamaModernSamplerIntegrationTests: XCTestCase {
                 text += chunk
             }
         }
+        // The stream's terminal element fires from `continuation.finish()`, but
+        // `LlamaBackend` clears `isGenerating` in the generation task's `defer`,
+        // which has no happens-before relationship with this consumer loop exiting.
+        // Draining the stream is NOT sufficient to guarantee the next generate()
+        // won't race the defer and throw `.alreadyGenerating` — observed when a
+        // longer (thinking-capable) model widens the window. Await the in-flight
+        // task to settle so the defer has run and `isGenerating == false` before
+        // the caller starts the second generation. This mirrors the documented
+        // contract on `awaitGenerationSettled()` and LlamaSeedDeterminismTests.
+        await backend.awaitGenerationSettled()
         return text
     }
 }
