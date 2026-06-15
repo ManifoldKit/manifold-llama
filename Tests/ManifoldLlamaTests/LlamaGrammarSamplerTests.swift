@@ -49,6 +49,16 @@ final class LlamaGrammarSamplerTests: XCTestCase {
 
         var config = GenerationConfig(temperature: 0.1, maxOutputTokens: 16)
         config.grammar = digitsOnlyGrammar
+        // `findGGUFModel()` picks the SMALLEST GGUF on disk, which may be a thinking
+        // model (e.g. Qwen3-0.6B). With thinking enabled the driver would emit
+        // reasoning text via the pre-`</think>` chain, which this test would capture
+        // as `.token` events and the digit-only assertion would fail on prose
+        // ("I need to choose a number…"). Grammar constrains only the *visible*
+        // post-thinking output (#1595 two-chain gate). Disable thinking entirely so
+        // the captured stream is exactly the grammar-constrained output, regardless
+        // of which model is smallest. See LlamaGrammarConformanceTests for the same
+        // deliberate `maxThinkingTokens = 0` on its constraint cases.
+        config.maxThinkingTokens = 0
 
         let stream = try backend.generate(
             prompt: "Give me a random number.",

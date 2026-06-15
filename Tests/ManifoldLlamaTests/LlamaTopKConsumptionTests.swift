@@ -39,6 +39,12 @@ final class LlamaTopKConsumptionTests: XCTestCase {
 
         var configA = GenerationConfig(temperature: 1.0, topK: 1, maxOutputTokens: 24)
         configA.seed = 42
+        // Disable thinking: `findGGUFModel()` may pick a reasoning model (Qwen3-0.6B)
+        // whose longer thinking phase widens the back-to-back generation window. The
+        // greedy property under test (topK=1 ⇒ identical streams across seeds) is
+        // about sampler selection, not the thinking transform — keep the compared
+        // output to the visible stream so the assertion is model-shape independent.
+        configA.maxThinkingTokens = 0
         var configB = configA
         configB.seed = 1337
 
@@ -67,6 +73,16 @@ final class LlamaTopKConsumptionTests: XCTestCase {
                 text += chunk
             }
         }
+        // The stream's terminal element fires from `continuation.finish()`, but
+        // `LlamaBackend` clears `isGenerating` in the generation task's `defer`,
+        // which has no happens-before relationship with this consumer loop exiting.
+        // Draining the stream is NOT sufficient to guarantee the next generate()
+        // won't race the defer and throw `.alreadyGenerating` — observed when a
+        // longer (thinking-capable) model widens the window. Await the in-flight
+        // task to settle so the defer has run and `isGenerating == false` before
+        // the caller starts the second generation. This mirrors the documented
+        // contract on `awaitGenerationSettled()` and LlamaSeedDeterminismTests.
+        await backend.awaitGenerationSettled()
         return text
     }
 }
