@@ -1,0 +1,163 @@
+name: Model Tests
+
+# Model-bearing nightly lane (#25).
+#
+# The repo's marquee guarantees — grammar conformance, tool-grammar rule names,
+# thinking grammar, top-k consumption, architecture preflight, and the live
+# local-backend contract — are all gated behind "a GGUF is on disk" plus
+# `isAppleSilicon` / `isPhysicalDevice`. The default CI lane (ci.yml) provisions
+# no model, so every one of those suites throws `XCTSkip` and asserts nothing.
+# This lane downloads a small pinned GGUF (Qwen3-0.6B), points the suites at it,
+# and then *fails loudly if everything skipped* — so a model-bound guarantee can
+# never silently cover zero behavior again.
+#
+# Runs nightly (cron) + on demand (workflow_dispatch). It is NOT a PR gate: the
+# download + real generation is too slow/flaky to block merges, and the GitHub
+# macos-15 runner is Apple Silicon + physical, satisfying the hardware gates.
+
+on:
+  schedule:
+    # 14:00 UTC daily — off-peak, well clear of the nightly release-please window.
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: model-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned small chat GGUF. Qwen3-0.6B is tiny (~0.5 GB Q8) and its path contains
+  # "qwen", which the conformance suite requires to light up the `qwen` family.
+  MODEL_URL: 'https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf'
+  MODEL_FILE: 'Qwen3-0.6B-Q8_0.gguf'
+
+jobs:
+  model-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Select newest Xcode 26 toolchain
+        # Same toolchain rationale as ci.yml: Swift 6.3 (Xcode 26.3) prunes the
+        # AnyLanguageModel trait-disabled mlx-swift-lm edge correctly.
+        run: |
+          # Glob into an array and version-sort (avoids parsing `ls`); pick newest.
+          xcodes=( /Applications/Xcode_26*.app )
+          newest=$(printf '%s\n' "${xcodes[@]}" | sort -V | tail -1)
+          sudo xcode-select -s "$newest/Contents/Developer"
+          swift --version
+
+      - name: Cache SwiftPM dependency material
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          # Dependency material only (clones, registries, prebuilt binary
+          # artifacts). Own-module .build/debug objects are deliberately NOT
+          # cached: SwiftPM embeds absolute paths in module fingerprints, so
+          # restored objects go stale on miss (same lesson as ci.yml).
+          path: |
+            ~/.swiftpm
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      - name: Cache pinned GGUF
+        id: model-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/manifold-models
+          # Keyed on the exact model URL so a pin bump invalidates cleanly.
+          key: gguf-${{ hashFiles('.github/workflows/model-tests.yml') }}-${{ env.MODEL_FILE }}
+
+      - name: Download pinned GGUF
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/manifold-models"
+          echo "Downloading $MODEL_URL"
+          curl -fL --retry 3 --retry-delay 5 \
+            -o "$HOME/.cache/manifold-models/$MODEL_FILE" \
+            "$MODEL_URL"
+          # Size sanity print (find avoids shellcheck SC2012 on ls).
+          find "$HOME/.cache/manifold-models" -name "$MODEL_FILE" -type f -exec du -h {} +
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Run model-gated suites
+        env:
+          # findGGUFModel(nameContains:) honors LLAMA_TEST_MODEL directly; the
+          # path contains "qwen" so the conformance `qwen` family matches.
+          MANIFOLD_DISCOVER_LOCAL_MODELS: '1'
+          RUN_SLOW_TESTS: '1'
+        run: |
+          set -uo pipefail
+
+          # Point the gated suites at the cached/downloaded GGUF. Absolute path so
+          # the conformance "qwen" family fragment match is unambiguous.
+          export LLAMA_TEST_MODEL="$HOME/.cache/manifold-models/$MODEL_FILE"
+          if [ ! -f "$LLAMA_TEST_MODEL" ]; then
+            echo "::error::Pinned GGUF missing at $LLAMA_TEST_MODEL"
+            exit 1
+          fi
+          echo "Using model: $LLAMA_TEST_MODEL"
+
+          # Model-gated suites (issue #25). NO --parallel: BackendContractChecks'
+          # claims registry is process-global and races under explicit parallelism.
+          SUITES="\
+          LlamaGrammarConformanceTests \
+          LlamaToolGrammarCompileTests \
+          LlamaThinkingGrammarTests \
+          LlamaTopKConsumptionTests \
+          LlamaGrammarSamplerTests \
+          LlamaArchitecturePreflightTests \
+          LlamaLocalBackendContractTests"
+
+          FILTER=""
+          for s in $SUITES; do
+            if [ -z "$FILTER" ]; then
+              FILTER="$s"
+            else
+              FILTER="$FILTER|$s"
+            fi
+          done
+          echo "Filter: $FILTER"
+
+          LOG="$RUNNER_TEMP/model-tests.log"
+          # Tee so the all-skipped guard can inspect the result while CI still
+          # streams the live output. Capture swift test's exit via PIPESTATUS.
+          swift test --filter "$FILTER" 2>&1 | tee "$LOG"
+          SWIFT_EXIT=${PIPESTATUS[0]}
+          echo "swift test exit: $SWIFT_EXIT"
+
+          # --- "all-skipped is a failure" guard --------------------------------
+          # XCTest prints one "Test Case '...' passed" line per executed (non-
+          # skipped) test, and "Test Case '...' skipped" for each XCTSkip. If the
+          # suites ran but NOTHING actually executed a body, there are zero
+          # "passed" Test Case lines — the model gate covered nothing. Treat that
+          # as a hard failure even if swift test exits 0.
+          #
+          # grep -c counts matches; "|| true" because grep exits 1 on zero
+          # matches (the very case we want to detect). Bash 3.2 safe.
+          PASSED=$(grep -cE "Test Case '.*' passed" "$LOG" || true)
+          SKIPPED=$(grep -cE "Test Case '.*' skipped" "$LOG" || true)
+          echo "Executed (passed) test cases: $PASSED"
+          echo "Skipped test cases: $SKIPPED"
+
+          if [ "$PASSED" -eq 0 ]; then
+            echo "::error::Model-bearing lane executed ZERO test bodies (all skipped or none discovered). The model gate is covering nothing — failing loudly per #25."
+            exit 1
+          fi
+
+          # Surface real test failures (non-zero swift test exit) after the guard.
+          if [ "$SWIFT_EXIT" -ne 0 ]; then
+            echo "::error::swift test reported failures (exit $SWIFT_EXIT)."
+            exit "$SWIFT_EXIT"
+          fi
+
+          echo "Model-bearing lane executed $PASSED test case(s); guard satisfied."
