@@ -70,6 +70,25 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { _architecture = architecture }
     }
 
+    // MARK: - Context-window preflight
+
+    /// Pure predicate behind `generate()`'s `.contextExhausted` preflight: does a
+    /// prompt of `promptTokens` plus `maxOutputTokens` of generation headroom fit
+    /// inside `contextSize`?
+    ///
+    /// Extracted as a model-free static so the `< vs <=` boundary can be unit-tested
+    /// without a loaded vocab/context (issue #27). The relation must be `<=`: a
+    /// prompt that exactly fills the window (`promptTokens + maxOutputTokens ==
+    /// contextSize`) is still serviceable — every prompt token and every requested
+    /// output token has a KV slot. A `<` slip would spuriously reject that exact-fit
+    /// case, and callers that retry on `.contextExhausted` would loop or truncate
+    /// needlessly.
+    @_spi(Testing) public static func contextWindowFits(
+        promptTokens: Int, maxOutputTokens: Int, contextSize: Int
+    ) -> Bool {
+        promptTokens + maxOutputTokens <= contextSize
+    }
+
     /// Per-token resident cost (bytes) learned from the most recent prefill via
     /// ``PrefillFootprintEstimator`` (issue #1592), or `nil` if no prefill has
     /// produced a stable sample yet. Callers that rebuild a ``ModelLoadPlan`` for
@@ -444,7 +463,9 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
 
         let maxTokens = config.maxOutputTokens ?? 2048
         let contextSize = Int(withStateLock { _effectiveContextSize })
-        guard tokens.count + maxTokens <= contextSize else {
+        guard Self.contextWindowFits(
+            promptTokens: tokens.count, maxOutputTokens: maxTokens, contextSize: contextSize
+        ) else {
             throw InferenceError.contextExhausted(
                 promptTokens: tokens.count,
                 maxOutputTokens: maxTokens,
