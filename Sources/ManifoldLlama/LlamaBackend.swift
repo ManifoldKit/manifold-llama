@@ -188,6 +188,29 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { sessionKVState?.tokens.count }
     }
 
+    /// Applies the post-decode KV-coherence guard: when the driver reports the KV
+    /// cache is incoherent (a decode failed), the cached prefix must be discarded so
+    /// the next turn does not reuse positions that were never coherently decoded.
+    /// A coherent decode leaves `sessionKVState` untouched.
+    ///
+    /// Factored out of the `generate()` task so the guard can be exercised headlessly
+    /// — `kvCoherent` is otherwise always `true` in tests because no fake context can
+    /// force a real `llama_decode` failure.
+    private func applyKVCoherence(_ kvCoherent: Bool) {
+        if !kvCoherent {
+            withStateLock { sessionKVState = nil }
+        }
+    }
+
+    /// Headless seam over ``applyKVCoherence(_:)`` so the post-decode KV-coherence
+    /// guard can be tested without a live decode loop. Seed a synthetic prefix with
+    /// ``seedSessionKVStateForTesting(tokenCount:)``, drive this with `false`, and
+    /// assert ``sessionKVTokenCountForTesting`` cleared to `nil`; driving it with
+    /// `true` must leave the prefix intact.
+    @_spi(Testing) public func applyKVCoherenceForTesting(_ kvCoherent: Bool) {
+        applyKVCoherence(kvCoherent)
+    }
+
     // MARK: - Multimodal Projector
 
     /// URL of the mmproj companion file, set by ``MultimodalProjectorConfigurable`` before each load.
@@ -538,9 +561,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             // A decode failure leaves the C KV cache in an undefined state.
             // Clear sessionKVState so the next turn does not attempt prefix reuse
             // against positions that were never coherently decoded.
-            if !kvCoherent {
-                self.withStateLock { self.sessionKVState = nil }
-            }
+            self.applyKVCoherence(kvCoherent)
         }
 
         // Assignment and unlock complete the critical section opened above.
