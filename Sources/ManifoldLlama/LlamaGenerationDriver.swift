@@ -577,10 +577,12 @@ import ManifoldHardware
             // command buffers from the prompt chunks that did succeed are
             // flushed.  The next generate() call will clear the KV cache;
             // without this fence that clear can race with in-flight GPU work.
-            llama_synchronize(context)
-            await MainActor.run { generationStream.setPhase(.failed("Failed to decode prompt")) }
-            continuation.finish(throwing: InferenceError.inferenceFailure("Failed to decode prompt"))
-            return false
+            return await Self.finishDecodeFailure(
+                message: "Failed to decode prompt",
+                synchronize: { llama_synchronize(context) },
+                generationStream: generationStream,
+                continuation: continuation
+            )
         }
 
         // Honour cancellation that fired mid-prompt before entering the
@@ -795,10 +797,12 @@ import ManifoldHardware
                 // Synchronize before surfacing the error so the GPU drains any
                 // work that *did* commit before the failure.  Without this, a
                 // subsequent KV-cache clear from a retry can race Metal ops.
-                llama_synchronize(context)
-                await MainActor.run { generationStream.setPhase(.failed("Decode failed during generation")) }
-                continuation.finish(throwing: InferenceError.inferenceFailure("Decode failed during generation"))
-                return false
+                return await Self.finishDecodeFailure(
+                    message: "Decode failed during generation",
+                    synchronize: { llama_synchronize(context) },
+                    generationStream: generationStream,
+                    continuation: continuation
+                )
             }
         }
 
@@ -836,6 +840,38 @@ import ManifoldHardware
         Self.logger.debug("LlamaGenerationDriver run finished")
         continuation.finish()
         return true
+    }
+
+    // MARK: - Decode-failure contract (model-free, seam-tested)
+
+    /// Centralises the decode-failure teardown sequence shared by the prompt-chunk
+    /// and generation-loop decode-error sites. The ordering is load-bearing and is
+    /// the whole reason this is one function instead of two inlined blocks:
+    ///
+    ///   1. `synchronize()` FIRST — drains any Metal command buffers that *did*
+    ///      commit before the failing `llama_decode`. Skipping this lets the next
+    ///      turn's KV-cache clear enqueue new Metal ops while old buffers are still
+    ///      in flight, tripping llama.cpp's render-set assertion and a downstream
+    ///      Swift array bounds crash (see the synchronize comment in `run`).
+    ///   2. set the stream phase to `.failed`.
+    ///   3. finish the continuation with `.inferenceFailure` so the consumer sees
+    ///      a thrown error rather than a silent end-of-stream.
+    ///   4. return `false` so the caller clears `sessionKVState` — the KV cache is
+    ///      undefined after a failed decode and the prefix must not be reused.
+    ///
+    /// `synchronize` is injected so the contract can be exercised headlessly: the
+    /// real call sites pass `{ llama_synchronize(context) }`, tests pass a recorder
+    /// that captures call order without a live `llama_context`.
+    @_spi(Testing) public static func finishDecodeFailure(
+        message: String,
+        synchronize: () -> Void,
+        generationStream: GenerationStream,
+        continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation
+    ) async -> Bool {
+        synchronize()
+        await MainActor.run { generationStream.setPhase(.failed(message)) }
+        continuation.finish(throwing: InferenceError.inferenceFailure(message))
+        return false
     }
 
     // MARK: - Pure decision helpers (model-free, unit-tested)
