@@ -89,6 +89,20 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         promptTokens + maxOutputTokens <= contextSize
     }
 
+    /// Injects a llama.cpp `vocab` pointer for unit tests that exercise the
+    /// production tokenization callsites (``tokenCount(_:)`` /
+    /// ``countTokens(_:)``) against a fixture vocabulary loaded with
+    /// `vocab_only`, without a full Metal-backed ``loadModel(from:plan:)``.
+    ///
+    /// The caller owns the underlying `llama_model` and must keep it alive for
+    /// the duration of the test (the vocab pointer is borrowed, not retained).
+    /// Accessible via `@_spi(Testing) import ManifoldLlama`. Never call this in
+    /// production code — it bypasses the normal `loadModel` lifecycle and the
+    /// vocab-lifetime ownership the loader otherwise guarantees.
+    @_spi(Testing) public func injectVocabForTesting(_ vocab: OpaquePointer?) {
+        withStateLock { self.vocab = vocab }
+    }
+
     /// Per-token resident cost (bytes) learned from the most recent prefill via
     /// ``PrefillFootprintEstimator`` (issue #1592), or `nil` if no prefill has
     /// produced a stable sample yet. Callers that rebuild a ``ModelLoadPlan`` for

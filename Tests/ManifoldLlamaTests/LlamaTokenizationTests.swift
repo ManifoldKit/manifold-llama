@@ -44,7 +44,9 @@ final class LlamaTokenizationTests: XCTestCase {
     /// It does NOT exercise the parameter's `= true` default, nor any production
     /// callsite (e.g. `LlamaBackend.tokenCount` passes `parseSpecial: false`), so
     /// flipping the default or a callsite would not be caught here. Coverage of
-    /// the production callsites is tracked in the deferred tokenization issue.
+    /// the production callsites (`LlamaBackend.tokenCount` parseSpecial:false and
+    /// `countTokens` parse_special:true) is provided headlessly against a fixture
+    /// vocab in `LlamaTokenCountFixtureVocabTests` (#29).
     func test_tokenize_parseSpecial_true_treatsImStartAsSingleToken() async throws {
         guard let modelURL = HardwareRequirements.findGGUFModel() else {
             throw XCTSkip(
