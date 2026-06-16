@@ -156,6 +156,38 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     /// without needing a real model load.
     @_spi(Testing) public var loadOptionsForTesting: BackendLoadOptions { withStateLock { _loadOptions } }
 
+    // MARK: - Test seams (no live model required)
+
+    /// Snapshot of the `cancelled` atomic. Lets a test assert that the
+    /// memory-pressure callback (or `stopGeneration()`) actually flipped the flag
+    /// without driving a real decode loop.
+    @_spi(Testing) public var isCancelledForTesting: Bool {
+        cancelled.load(ordering: .sequentiallyConsistent)
+    }
+
+    /// Fires the registered memory-pressure callback synchronously so tests can
+    /// exercise the `.warning` / `.critical` / `.nominal` dispatch body
+    /// (`registerMemoryPressureCallback`) on an unloaded backend.
+    @_spi(Testing) public func simulateMemoryPressure(_ level: MemoryPressureLevel) {
+        memoryPressure.fireCallbacks(level: level)
+    }
+
+    /// Seeds a synthetic `sessionKVState` so tests can observe that
+    /// `secureWipe()` / `resetConversation()` actually clear the cached prefix —
+    /// the field is otherwise only populated after a real decode.
+    @_spi(Testing) public func seedSessionKVStateForTesting(tokenCount: Int) {
+        withStateLock {
+            sessionKVState = SessionKVState(
+                tokens: Array(repeating: llama_token(0), count: max(0, tokenCount)))
+        }
+    }
+
+    /// Token count of the cached `sessionKVState`, or `nil` when it has been
+    /// cleared. Read side for the seed seam above.
+    @_spi(Testing) public var sessionKVTokenCountForTesting: Int? {
+        withStateLock { sessionKVState?.tokens.count }
+    }
+
     // MARK: - Multimodal Projector
 
     /// URL of the mmproj companion file, set by ``MultimodalProjectorConfigurable`` before each load.

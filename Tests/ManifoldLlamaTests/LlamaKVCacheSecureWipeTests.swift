@@ -17,12 +17,28 @@ final class LlamaKVCacheSecureWipeTests: XCTestCase {
     }
 
     func testSecureWipeClearsSessionKVState() {
-        // Verify the state-level effect (sessionKVState = nil) without
-        // requiring a real model.  Since sessionKVState is not directly
-        // observable from outside, we verify indirectly: calling secureWipe()
-        // then resetConversation() again should not crash (double-free guard).
+        // Seed a synthetic cached prefix (via the @_spi(Testing) seam), then prove
+        // secureWipe() actually nils sessionKVState. The `sessionKVState = nil`
+        // line runs regardless of whether a context is loaded, so this catches a
+        // regression that drops it — without needing a real model.
         let backend = LlamaBackend()
+        backend.seedSessionKVStateForTesting(tokenCount: 12)
+        XCTAssertEqual(backend.sessionKVTokenCountForTesting, 12,
+            "Precondition: seeded session KV state must be observable")
+
         backend.secureWipe()
-        backend.resetConversation()  // Must not crash on double clear
+        XCTAssertNil(backend.sessionKVTokenCountForTesting,
+            "secureWipe() must clear sessionKVState so the next turn won't reuse a stale prefix")
+    }
+
+    func testResetConversationClearsSessionKVState() {
+        // resetConversation() shares the same clearing contract as secureWipe().
+        let backend = LlamaBackend()
+        backend.seedSessionKVStateForTesting(tokenCount: 7)
+        XCTAssertEqual(backend.sessionKVTokenCountForTesting, 7)
+
+        backend.resetConversation()
+        XCTAssertNil(backend.sessionKVTokenCountForTesting,
+            "resetConversation() must clear the cached prefix")
     }
 }

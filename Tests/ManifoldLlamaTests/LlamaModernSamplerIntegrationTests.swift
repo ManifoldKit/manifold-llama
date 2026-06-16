@@ -6,12 +6,16 @@ import ManifoldLlama
 
 /// Integration determinism coverage for the XTC and Mirostat v2 sampler additions.
 ///
-/// Both samplers consume the GenerationConfig seed; two runs at the same seed must
-/// produce identical token streams, while a different seed must change the stream
-/// (the second guard catches a regression where the seed is silently dropped).
+/// Both samplers consume the GenerationConfig seed; two runs at the **same** seed
+/// must produce identical token streams. That is the only invariant asserted here
+/// — these are same-seed determinism checks.
 ///
-/// Sabotage check: hardcode `seed = 0` in `LlamaGenerationDriver.swift` — both
-/// `differentSeeds` cases will then start emitting equal streams and fail.
+/// NOTE: this suite does NOT prove the seed actually *influences* output (a
+/// different-seed-produces-different-stream guard). A regression that silently
+/// drops the seed and always uses 0 would still pass every test below, because
+/// hardcoding the seed keeps same-seed runs identical. The different-seed
+/// divergence guard is tracked separately (needs the model-bearing CI lane) —
+/// see the deferred sampler/determinism issue.
 ///
 /// Requires Apple Silicon and a real GGUF — gated and skipped otherwise.
 final class LlamaModernSamplerIntegrationTests: XCTestCase {

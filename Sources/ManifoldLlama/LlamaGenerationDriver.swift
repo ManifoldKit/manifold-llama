@@ -224,8 +224,8 @@ import ManifoldHardware
         // loop would never run, and there would be no logits to sample. Capping at
         // `finalChunkStart` guarantees we always re-decode the N-1 chunk (which is
         // also where the determinism fix lives).
-        let finalChunkStart = tokens.isEmpty ? 0 : ((tokens.count - 1) / batchSize) * batchSize
-        let alignedReuseLen = min((reuseLen / batchSize) * batchSize, finalChunkStart)
+        let alignedReuseLen = Self.alignedKVReuseLength(
+            tokenCount: tokens.count, reuseLen: reuseLen, batchSize: batchSize)
 
         if let memory = llama_get_memory(context) {
             if alignedReuseLen > 0 {
@@ -357,7 +357,7 @@ import ManifoldHardware
 
             if let model = llama_get_model(context),
                let dry = DRYSamplerDescriptor(config: config, nCtxTrain: llama_model_n_ctx_train(model)) {
-                let drySampler = withCStringArray(dry.options.sequenceBreakers) { breakers in
+                let drySampler = Self.withCStringArray(dry.options.sequenceBreakers) { breakers in
                     var mutableBreakers = breakers
                     return mutableBreakers.withUnsafeMutableBufferPointer { breakerBuffer in
                         llama_sampler_init_dry(
@@ -651,10 +651,13 @@ import ManifoldHardware
         // tests) and a large prompt, the effective budget shrinks accordingly.
         let contextCapacity = Int(llama_n_ctx(context))
         let usedSlots = tokens.count  // prompt occupies this many KV slots already
-        let remainingSlots = max(0, contextCapacity - usedSlots)
-        let rawThinkingBudget = useParser ? (config.maxThinkingTokens ?? maxTokens) : 0
-        let effectiveThinkingBudget = min(rawThinkingBudget, max(0, remainingSlots - maxTokens))
-        let totalLoopBudget = maxTokens + effectiveThinkingBudget
+        let totalLoopBudget = Self.thinkingLoopBudget(
+            contextCapacity: contextCapacity,
+            usedSlots: usedSlots,
+            useParser: useParser,
+            maxThinkingTokens: config.maxThinkingTokens,
+            maxTokens: maxTokens
+        ).totalLoopBudget
 
         // Tool-call parser: active when the config carries at least one tool definition.
         // Processes `.token` events from the thinking layer (or raw decoded text) and
@@ -680,8 +683,7 @@ import ManifoldHardware
         // Repetition-window state: track the last decoded token string and how
         // many times it has appeared consecutively. Exceeding `maxRepeatWindow`
         // triggers an early exit — no need to run the loop all the way to maxTokens.
-        var repeatWindowLast = ""
-        var repeatWindowCount = 0
+        var repeatWindow = RepeatWindow(limit: Self.maxRepeatWindow)
 
         // Phrase-level repetition state: a bounded sliding window (Array, evicted
         // via removeFirst — O(n) but cap=61 so cost is negligible) of the last
@@ -714,14 +716,8 @@ import ManifoldHardware
                 // terminates the loop. Catches small-model repetition loops (e.g.
                 // smollm2-135m emitting " " hundreds of times) before the post-hoc
                 // LoopingDetector has to clean them up.
-                if text == repeatWindowLast {
-                    repeatWindowCount += 1
-                    if repeatWindowCount >= Self.maxRepeatWindow {
-                        break generationLoop
-                    }
-                } else {
-                    repeatWindowLast = text
-                    repeatWindowCount = 1
+                if repeatWindow.observe(text) {
+                    break generationLoop
                 }
 
                 // Phrase-level repetition guard: catch multi-token loops (2–20 tokens)
@@ -842,6 +838,55 @@ import ManifoldHardware
         return true
     }
 
+    // MARK: - Pure decision helpers (model-free, unit-tested)
+
+    /// Batch-aligned KV-reuse floor. The reused prefix is floored to a `batchSize`
+    /// multiple and capped below the final chunk's start so the N-1 chunk is always
+    /// re-decoded (it must carry `logits = 1` for sampling). See the call site for
+    /// the full rationale.
+    @_spi(Testing) public static func alignedKVReuseLength(
+        tokenCount: Int, reuseLen: Int, batchSize: Int
+    ) -> Int {
+        let safeBatch = max(1, batchSize)
+        let finalChunkStart = tokenCount == 0 ? 0 : ((tokenCount - 1) / safeBatch) * safeBatch
+        return min((reuseLen / safeBatch) * safeBatch, finalChunkStart)
+    }
+
+    /// Computes the thinking-token budget and the total decode-loop budget, clamped
+    /// so the loop never runs `llama_decode` past the remaining context window even
+    /// when `maxThinkingTokens` is nil (defaulting to `maxTokens`).
+    @_spi(Testing) public static func thinkingLoopBudget(
+        contextCapacity: Int, usedSlots: Int, useParser: Bool,
+        maxThinkingTokens: Int?, maxTokens: Int
+    ) -> (effectiveThinkingBudget: Int, totalLoopBudget: Int) {
+        let remainingSlots = max(0, contextCapacity - usedSlots)
+        let rawThinkingBudget = useParser ? (maxThinkingTokens ?? maxTokens) : 0
+        let effectiveThinkingBudget = min(rawThinkingBudget, max(0, remainingSlots - maxTokens))
+        return (effectiveThinkingBudget, maxTokens + effectiveThinkingBudget)
+    }
+
+    /// Single-token repetition guard. Tracks the last decoded token string and how
+    /// many times it has appeared consecutively; `observe` returns `true` once the
+    /// run reaches `limit`, signalling the decode loop to break.
+    @_spi(Testing) public struct RepeatWindow {
+        public let limit: Int
+        private var last = ""
+        private var count = 0
+
+        public init(limit: Int) { self.limit = limit }
+
+        public mutating func observe(_ text: String) -> Bool {
+            if text == last {
+                count += 1
+                return count >= limit
+            } else {
+                last = text
+                count = 1
+                return false
+            }
+        }
+    }
+
     // MARK: - Phrase Detection
 
     /// Returns true when the tail of `window` contains `minRepeats` consecutive
@@ -860,7 +905,12 @@ import ManifoldHardware
         return true
     }
 
-    private func withCStringArray<Result>(
+    /// Builds a transient `[UnsafePointer<CChar>?]` for `strings` and hands it to
+    /// `body`, guaranteeing every pointer stays valid for the duration of the call
+    /// via nested `withCString` scopes. Exposed for testing because its
+    /// pointer-lifetime/`defer`-unwind semantics are subtle and otherwise only
+    /// reachable through the live DRY-sampler path (which needs a loaded model).
+    @_spi(Testing) public static func withCStringArray<Result>(
         _ strings: [String],
         _ body: ([UnsafePointer<CChar>?]) -> Result
     ) -> Result {
