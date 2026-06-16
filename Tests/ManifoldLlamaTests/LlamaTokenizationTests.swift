@@ -38,10 +38,13 @@ final class LlamaTokenizationTests: XCTestCase {
     /// as a special token — in that case both calls fragment the string equally
     /// and the comparison is vacuous.
     ///
-    /// Sabotage check: change `parseSpecial: Bool = true` back to `false` in
-    /// `LlamaTokenization.tokenize`, or change the default, or change `parseSpecial`
-    /// in the callsite to `false`. `specialTokens.count` will equal `rawTokens.count`
-    /// and `XCTAssertLessThan` fails — proving the guard catches a revert.
+    /// Scope: this passes `parseSpecial` EXPLICITLY (true and false) and asserts
+    /// the true path fragments `<|im_start|>` into fewer tokens. It therefore
+    /// verifies the explicit-argument behavior of `tokenize` against a real vocab.
+    /// It does NOT exercise the parameter's `= true` default, nor any production
+    /// callsite (e.g. `LlamaBackend.tokenCount` passes `parseSpecial: false`), so
+    /// flipping the default or a callsite would not be caught here. Coverage of
+    /// the production callsites is tracked in the deferred tokenization issue.
     func test_tokenize_parseSpecial_true_treatsImStartAsSingleToken() async throws {
         guard let modelURL = HardwareRequirements.findGGUFModel() else {
             throw XCTSkip(

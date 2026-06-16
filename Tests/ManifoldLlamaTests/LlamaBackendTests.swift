@@ -1063,34 +1063,31 @@ final class LlamaBackendTests: XCTestCase {
 
     // MARK: - Multimodal Projector (supportsVision)
 
-    func test_capabilities_supportsVision_withoutMmproj_isFalse() {
+    /// `supportsVision` is currently hardwired to the constant
+    /// `BackendVisionCapability.llamaSupportsImageInput` (false) and does NOT read
+    /// `_mmprojURL` — the vendored llama.cpp xcframework lacks the CLIP/mtmd APIs
+    /// needed to embed images. This single test honestly documents that the flag
+    /// is constant-false regardless of mmproj state (set / cleared / after unload);
+    /// it is a known-constant guard, NOT a behavioral test of mmproj wiring.
+    ///
+    /// When image embedding is wired, `supportsVision` will become a function of
+    /// `_mmprojURL` and this test must be replaced with real per-state assertions
+    /// (and the mmproj-clearing/unload behavior given its own observable contract).
+    func test_capabilities_supportsVision_isConstantFalseUntilImageEmbeddingWired() {
         let backend = LlamaBackend()
         XCTAssertFalse(backend.capabilities.supportsVision,
-                       "supportsVision must be false when no mmproj URL has been set")
-    }
+                       "no mmproj set")
 
-    func test_capabilities_supportsVision_afterSetMmprojURL_remainsFalseUntilImageEmbeddingIsWired() {
-        let backend = LlamaBackend()
-        let fakeMMProj = URL(fileURLWithPath: "/nonexistent/mmproj-model.gguf")
-        backend.setMmprojURL(fakeMMProj)
-        XCTAssertFalse(backend.capabilities.supportsVision,
-                       "supportsVision must remain false until LlamaBackend can pass image embeddings to llama.cpp")
-    }
-
-    func test_capabilities_supportsVision_afterClearingMmprojURL_isFalse() {
-        let backend = LlamaBackend()
         backend.setMmprojURL(URL(fileURLWithPath: "/nonexistent/mmproj-model.gguf"))
-        backend.setMmprojURL(nil)
         XCTAssertFalse(backend.capabilities.supportsVision,
-                       "supportsVision must remain false after setMmprojURL(nil)")
-    }
+                       "still false after setMmprojURL — the flag is a constant, not derived from the URL")
 
-    func test_capabilities_supportsVision_afterUnload_isFalse() {
-        let backend = LlamaBackend()
+        backend.setMmprojURL(nil)
+        XCTAssertFalse(backend.capabilities.supportsVision, "still false after clearing")
+
         backend.setMmprojURL(URL(fileURLWithPath: "/nonexistent/mmproj-model.gguf"))
         backend.unloadModel()
-        XCTAssertFalse(backend.capabilities.supportsVision,
-                       "unloadModel() must clear the mmproj URL so supportsVision returns false")
+        XCTAssertFalse(backend.capabilities.supportsVision, "still false after unload")
     }
 
     func test_generate_withImageParts_throwsInferenceFailure() {

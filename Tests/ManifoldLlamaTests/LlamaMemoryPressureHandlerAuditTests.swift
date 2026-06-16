@@ -1,4 +1,5 @@
 import XCTest
+@_spi(Testing) import ManifoldLlama
 
 /// Re-homed from core's cross-family `MLXMemoryPressureMissingTests`
 /// (Tests/ManifoldBackendsTests, retired in core PR C2 — ManifoldKit#1749).
@@ -6,29 +7,23 @@ import XCTest
 /// manifold-mlx. If the handler stops being wired up in `LlamaBackend`,
 /// the audit asymmetry the perf-audit plan relies on no longer exists and
 /// the eventual fix-up issue must be re-scoped.
+///
+/// Previously this asserted only that the *source text* contained the substring
+/// "MemoryPressureHandler" — a grep that passed even for a comment and exercised
+/// no runtime behavior. It now drives the wired callback behaviorally: an idle
+/// `LlamaBackend` must respond to a `.warning` pressure event by cancelling
+/// generation. If the handler is no longer registered in `init`, the event is a
+/// no-op and `isCancelledForTesting` stays false.
 final class LlamaMemoryPressureHandlerAuditTests: XCTestCase {
 
-    private func sourcePath(fileName: String) -> String {
-        let testFileURL = URL(fileURLWithPath: #filePath)
-        let packageRoot = testFileURL
-            .deletingLastPathComponent()  // Tests/ManifoldLlamaTests
-            .deletingLastPathComponent()  // Tests
-            .deletingLastPathComponent()  // package root
-        return packageRoot
-            .appendingPathComponent("Sources")
-            .appendingPathComponent("ManifoldLlama")
-            .appendingPathComponent(fileName)
-            .path
-    }
+    func test_llamaBackend_respondsToMemoryPressure() {
+        let backend = LlamaBackend()
+        XCTAssertFalse(backend.isCancelledForTesting,
+            "Precondition: a fresh backend is not cancelled")
 
-    func test_llamaBackend_hasMemoryPressureHandler() throws {
-        let source = try String(
-            contentsOfFile: sourcePath(fileName: "LlamaBackend.swift"),
-            encoding: .utf8
-        )
-        XCTAssertTrue(
-            source.contains("MemoryPressureHandler"),
-            "LlamaBackend.swift no longer references 'MemoryPressureHandler' (#415) — the audit asymmetry has dissolved; revisit the perf-audit plan."
-        )
+        backend.simulateMemoryPressure(.warning)
+
+        XCTAssertTrue(backend.isCancelledForTesting,
+            "LlamaBackend must register a memory-pressure callback in init (#415) that stops generation on .warning — a no-op here means the handler is no longer wired")
     }
 }
