@@ -77,11 +77,48 @@ import ManifoldInference
     /// `llama_model_params.progress_callback` is a C function pointer — it cannot capture Swift
     /// context directly. We store the handler in this class, pass an `Unmanaged` retain into
     /// `progress_callback_user_data`, then release it after `llama_model_load_from_file` returns.
-    private final class ProgressCallbackContext: @unchecked Sendable {
-        let handler: @Sendable (Double) async -> Void
-        init(_ handler: @escaping @Sendable (Double) async -> Void) {
+    // @_spi(Testing): the box type itself must be reachable so the ABI
+    // round-trip helper below can be unit-tested without loading a model.
+    @_spi(Testing) public final class ProgressCallbackContext: @unchecked Sendable {
+        @_spi(Testing) public let handler: @Sendable (Double) async -> Void
+        @_spi(Testing) public init(_ handler: @escaping @Sendable (Double) async -> Void) {
             self.handler = handler
         }
+    }
+
+    /// The retain/release-balanced `Unmanaged` round-trip used to smuggle a
+    /// Swift `ProgressCallbackContext` through llama.cpp's `@convention(c)`
+    /// `progress_callback_user_data` pointer.
+    ///
+    /// Extracted from `initializeModel` so the ARC contract — exactly one
+    /// `passRetained` balanced by exactly one `release`, with the boxed value
+    /// surviving the opaque-pointer round-trip in between — can be exercised
+    /// headlessly (no GGUF, no `llama_*` call). `initializeModel` inlines the
+    /// same three steps because it must interleave them with `modelParams`
+    /// mutation and the C load call; this helper is the canonical, tested
+    /// statement of the contract.
+    ///
+    /// `body` receives the opaque pointer that would be stored in
+    /// `progress_callback_user_data`; whatever it returns is forwarded. The
+    /// retained box is released exactly once when `body` returns (or throws).
+    @_spi(Testing) public static func withProgressCallbackBox<R>(
+        _ context: ProgressCallbackContext,
+        _ body: (UnsafeMutableRawPointer) throws -> R
+    ) rethrows -> R {
+        let ref = Unmanaged.passRetained(context)
+        defer { ref.release() }
+        return try body(ref.toOpaque())
+    }
+
+    /// Recovers the boxed context from an opaque pointer the way the
+    /// `@convention(c)` progress callback does — `fromOpaque` +
+    /// `takeUnretainedValue`, which does NOT touch the retain count. Exposed so
+    /// the round-trip test can assert the recovered instance is the same object
+    /// that was boxed.
+    @_spi(Testing) public static func progressContext(
+        fromOpaque ptr: UnsafeMutableRawPointer
+    ) -> ProgressCallbackContext {
+        Unmanaged<ProgressCallbackContext>.fromOpaque(ptr).takeUnretainedValue()
     }
 
     /// Synchronous wrapper that holds `loadSerializationLock` while calling the
@@ -130,7 +167,7 @@ import ManifoldInference
                 // for the Task's lifetime. The Unmanaged retain managed by the outer defer
                 // in `loadModel` is separate and only responsible for keeping the context
                 // alive during the synchronous C load call.
-                let ctx = Unmanaged<ProgressCallbackContext>.fromOpaque(ptr).takeUnretainedValue()
+                let ctx = LlamaModelLoader.progressContext(fromOpaque: ptr)
                 let value = Double(progress)
                 Task { await ctx.handler(value) }
                 return true
@@ -154,9 +191,7 @@ import ManifoldInference
         // Throwing here gives callers a typed error instead of a mid-stream crash.
         // modelHandle owns `rawModel`; throwing lets its deinit call `llama_model_free`.
         let architecture = Self.readArchitectureMetadata(model: rawModel)
-        if let architecture, Self.isUnsupportedArchitecture(architecture) {
-            throw InferenceError.unsupportedModelArchitecture(architecture)
-        }
+        try Self.preflightArchitecture(architecture)
 
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(effectiveContextSize)
@@ -268,6 +303,22 @@ import ManifoldInference
     /// Returns true when `architecture` is on the non-LM denylist.
     @_spi(Testing) public static func isUnsupportedArchitecture(_ architecture: String) -> Bool {
         unsupportedArchitectures.contains(architecture.lowercased())
+    }
+
+    /// The wired preflight throw extracted from `initializeModel`: given the
+    /// `general.architecture` string read from a loaded GGUF (or `nil` when the
+    /// key is absent), throws `InferenceError.unsupportedModelArchitecture`
+    /// for denylisted non-LM architectures and returns normally otherwise.
+    ///
+    /// Extracted so the metadata→`isUnsupportedArchitecture`→throw *wiring*
+    /// (not just the predicate, which `LlamaArchitecturePreflightTests` already
+    /// covers) can be driven headlessly — no GGUF, no `llama_*` call. A `nil`
+    /// architecture means "unknown, assume supported" to avoid false positives
+    /// on exotic-but-legitimate LM GGUFs.
+    @_spi(Testing) public static func preflightArchitecture(_ architecture: String?) throws {
+        if let architecture, Self.isUnsupportedArchitecture(architecture) {
+            throw InferenceError.unsupportedModelArchitecture(architecture)
+        }
     }
 
     /// Reads `tokenizer.chat_template` from the loaded GGUF model's metadata.
