@@ -101,6 +101,20 @@ final class LlamaGrammarFixtureBoundsTests: XCTestCase {
                        "C5 name string must not use an unbounded '+' run (the truncation cause); got grammar:\n\(g)")
     }
 
+    /// C5: the whitespace rule must be length-bounded too. The local real-model sweep
+    /// found mistral still truncated with a bounded name because `ws ::= [ \t\n]*` was
+    /// unbounded — mistral spent the token budget on newline indentation before reaching
+    /// `</tool_call>`. Unbounded `ws` is the same truncation class as an unbounded name.
+    ///
+    /// Sabotage check: revert to `ws ::= [ \t\n]*` — the `{0,4}` bound vanishes and this fails.
+    func test_C5_whitespaceRule_boundsLength() {
+        let g = Fixtures.toolCallEnvelope
+        XCTAssertTrue(g.contains(#"ws     ::= [ \t\n]{0,4}"#),
+                      "C5 ws rule must be length-bounded ({0,4}); got grammar:\n\(g)")
+        XCTAssertFalse(g.contains(#"[ \t\n]*"#),
+                       "C5 ws must not use an unbounded '*' run (a truncation cause); got grammar:\n\(g)")
+    }
+
     /// Both fixtures must still END with their closing delimiter in the root rule —
     /// bounding the inner runs must not have removed the structure the cases assert.
     func test_fixtures_retainClosingDelimiters() {

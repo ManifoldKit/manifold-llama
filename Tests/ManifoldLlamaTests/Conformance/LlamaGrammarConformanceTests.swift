@@ -133,11 +133,21 @@ final class LlamaGrammarConformanceTests: XCTestCase {
         /// `ToolGrammarBuilder` (which lives in ManifoldKit's `ManifoldInference` and is
         /// compile-validated separately by `LlamaToolGrammarCompileTests`). So bounding it here
         /// is the right layer; there is no production grammar-generation gap behind this failure.
+        ///
+        /// **Bounded whitespace (issue #20, local-sweep follow-up).** The local real-model
+        /// sweep found mistral C5 still truncated even with the 32-char name cap: the
+        /// `ws ::= [ \t\n]*` rule was *unbounded*, so mistral emitted verbose newline
+        /// indentation (`<tool_call>\n\n    {\n        "name": …`) that, combined with a
+        /// budget-filling 32-char name, exhausted `maxOutputTokens` before `</tool_call>`.
+        /// Unbounded `ws` is the same truncation class as the original unbounded name/number
+        /// rules, so it is bounded to `{0,4}` — enough whitespace for any well-behaved model,
+        /// not enough for a degenerate one to blow the budget. qwen/llama/phi (already passing)
+        /// emit minimal whitespace and are unaffected.
         static let toolCallEnvelope = #"""
         root   ::= "<tool_call>" ws obj ws "</tool_call>"
         obj    ::= "{" ws "\"name\"" ws ":" ws string ws "}"
         string ::= "\"" [a-zA-Z_]{1,32} "\""
-        ws     ::= [ \t\n]*
+        ws     ::= [ \t\n]{0,4}
         """#
 
         /// Drained-output predicate helpers.
