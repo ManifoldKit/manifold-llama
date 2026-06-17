@@ -19,7 +19,7 @@ let package = Package(
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.52.0")),
+        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.53.0")),
         // Pinned EXACT to 2.9505.0 (Package.resolved rev 11efdff6cfadc8ed2f998dc6f50d68d3e35237f9).
         // Wraps llama.cpp as a pre-built xcframework binary. mattt/llama.swift auto-tags a new
         // version per upstream commit; a floating `from:` lets CI resolution drift to the newest
