@@ -2,7 +2,7 @@
 
 llama.cpp (GGUF) inference backend for [ManifoldKit](https://github.com/roryford/ManifoldKit) — the `ManifoldLlama` module, split out of the core package as part of the v0.48 packaging release (ManifoldKit#1749) so that `swift build` of core never drags the llama.cpp xcframework, and heavy backends are one `.package` line away.
 
-It wraps llama.cpp (via the prebuilt [`mattt/llama.swift`](https://github.com/mattt/llama.swift) xcframework, exact-pinned) behind ManifoldKit's `InferenceBackend` contract: GGUF model loading, streaming generation, KV-cache persistence/reuse, embeddings, reranking, grammar/DRY/XTC/Mirostat sampling, and GGUF tool-call parsing.
+It wraps llama.cpp (via the prebuilt xcframework from the upstream [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp) releases, pinned by `url` + `checksum` in a local `.binaryTarget`) behind ManifoldKit's `InferenceBackend` contract: GGUF model loading, streaming generation, KV-cache persistence/reuse, embeddings, reranking, grammar/DRY/XTC/Mirostat sampling, and GGUF tool-call parsing.
 
 > **Temporary module name — pre-0.48 only.** Until ManifoldKit's C2 removal PR deletes the in-core `ManifoldLlama` target, SwiftPM's graph-wide target-name uniqueness forces this package to ship the module as **`ManifoldLlama`**. It is renamed to `ManifoldLlama` in one commit before the first `0.1.0` tag (see the `NOTE(C2)` in `Package.swift`). If you are reading this after a 0.1.0 tag exists and still see `Kit` names, file an issue.
 

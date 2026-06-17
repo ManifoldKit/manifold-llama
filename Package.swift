@@ -20,14 +20,6 @@ let package = Package(
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
         .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.53.0")),
-        // Pinned EXACT to 2.9505.0 (Package.resolved rev 11efdff6cfadc8ed2f998dc6f50d68d3e35237f9).
-        // Wraps llama.cpp as a pre-built xcframework binary. mattt/llama.swift auto-tags a new
-        // version per upstream commit; a floating `from:` lets CI resolution drift to the newest
-        // tag, and the cached SwiftPM clone can land in an `unable to read tree` state for a
-        // just-pushed revision — breaking every CI run repo-wide regardless of the lockfile. Exact
-        // pinning keeps resolution deterministic. Bump intentionally (and re-verify the C API
-        // contract) per docs/LLAMA_CONTRACT.md's upgrade procedure.
-        .package(url: "https://github.com/mattt/llama.swift", exact: "2.9553.0"),
     ],
     targets: [
         // llama.cpp (GGUF) inference, generation driver, process-lifecycle
@@ -47,9 +39,30 @@ let package = Package(
                 // @_spi(BackendInternals) import in LlamaBackend.swift requires
                 // the direct product edge.
                 .product(name: "ManifoldContract", package: "ManifoldKit"),
-                .product(name: "LlamaSwift", package: "llama.swift"),
+                "LlamaSwift",
             ],
             path: "Sources/ManifoldLlama"
+        ),
+        // llama.cpp consumed straight from the upstream ggml-org release asset
+        // (no third-party wrapper, no git-tag resolution). `url` + `checksum`
+        // pin the exact pre-built xcframework deterministically — there is no
+        // clone phase to drift, so the "unable to read tree" CI flake that
+        // floating wrapper tags caused cannot occur. Bump the build (and
+        // re-verify the C API contract) per docs/LLAMA_CONTRACT.md's upgrade
+        // procedure, which also points at the upstream release URL + checksum.
+        .binaryTarget(
+            name: "llama-cpp",
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b9553/llama-b9553-xcframework.zip",
+            checksum: "8d7d15297300c2724d4630c855d5eb7d92a4eca6c3fd037cdb28b55854e49a67"
+        ),
+        // Thin re-export shim: `@_exported @preconcurrency import llama` so the
+        // ManifoldLlama sources keep importing `LlamaSwift` unchanged, and the
+        // `@preconcurrency` keeps the C symbols quiet under Swift 6 strict
+        // concurrency.
+        .target(
+            name: "LlamaSwift",
+            dependencies: ["llama-cpp"],
+            path: "Sources/LlamaSwift"
         ),
         .testTarget(
             name: "ManifoldLlamaTests",

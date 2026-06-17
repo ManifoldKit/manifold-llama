@@ -6,7 +6,10 @@ invariants, capacity limits, ownership semantics, and known failure modes. It
 is generated from a careful read of `LlamaBackend.swift`,
 `LlamaGenerationDriver.swift`, `LlamaModelLoader.swift`,
 `LlamaEmbeddingBackend.swift`, and the vendored `docs/vendor/llama.h` (llama.cpp
-build **b9101**, exposed through `mattt/llama.swift` **2.9101.0**).
+build **b9553**). The xcframework is consumed **directly from the upstream
+`ggml-org/llama.cpp` GitHub releases** via a local `.binaryTarget(url:checksum:)`
+in `Package.swift` — there is no `mattt/llama.swift` wrapper in the dependency
+graph anymore (see *Binary vs. Vendored Source* below).
 
 Use this document when upgrading the xcframework pin: diff `docs/vendor/llama.h`
 against the new version's header, then review every section below for contract
@@ -15,7 +18,7 @@ changes before merging.
 ## Symbol coverage
 
 `grep llama_ Sources/ManifoldLlama/*.swift | grep -oE "llama_[a-z_]+" | sort -u`
-enumerates **51 distinct symbols**. Section coverage below is grouped by
+enumerates **56 distinct symbols**. Section coverage below is grouped by
 subsystem; every called symbol must have a row in one of the tables. The
 "Sampling" section in particular covers the full chain — `dry`, `xtc`,
 `mirostat_v2`, `greedy`, and `grammar` are configurable stages, not legacy
@@ -653,7 +656,7 @@ are unaffected because Invariant #1 kicks in.
 | Affected symbol | `llama_sampler_init_grammar` → internal `llama_grammar_advance_stack()` |
 | Vulnerability | A buffer overflow in the grammar stack-advance logic allowed a crafted GBNF grammar string (or a JSON Schema with certain constructs) to overflow an internal stack buffer, enabling potential arbitrary code execution. |
 | Fixed in | llama.cpp build **b8774** |
-| Vendored build | **b9101** (via `mattt/llama.swift` 2.9101.0) — **fix is included** |
+| Vendored build | **b9553** (upstream `ggml-org/llama.cpp` release) — **fix is included** (b9553 ≫ b8774) |
 | Status | ✅ **Mitigated in the vendored binary.** |
 
 #### Defence in depth
@@ -674,27 +677,31 @@ just the CVE PoC shapes:
 
 Callers that pass a GBNF string directly via `GenerationConfig.grammar` (not
 via tool definitions) are still not covered by the pre-validator. Those
-strings are now safe against the CVE on the b9101 binary, but a malformed
+strings are now safe against the CVE on the b9553 binary, but a malformed
 GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 (see Violation #6).
 
-#### Upgrade procedure when re-pinning `mattt/llama.swift`
+#### Upgrade procedure when re-pinning the xcframework
 
-1. Bump the `from:` constraint in `Package.swift` and run `swift package
-   resolve`.
-2. Read the `url:` line from the resolved `mattt/llama.swift`
-   `Package.swift` — it points at
-   `llama-b<NNNN>-xcframework.zip` and gives the exact build tag.
+1. Pick the target upstream build `b<NNNN>` from the
+   [`ggml-org/llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases).
+   The release asset is `llama-b<NNNN>-xcframework.zip`.
+2. In `Package.swift`, update the `.binaryTarget(name: "llama-cpp", …)` `url`
+   to that asset and refresh its `checksum`. The checksum is SwiftPM's package
+   checksum of the zip — `swift package compute-checksum llama-b<NNNN>-xcframework.zip`
+   on a local download (the same value SwiftPM verifies at resolve time). Then
+   run `swift package resolve`.
 3. Refresh `docs/vendor/llama.h` from the resolved xcframework
-   (`.build/artifacts/llama.swift/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Headers/llama.h`).
+   (`.build/artifacts/manifold-llama/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/Headers/llama.h`).
    Prepend the four-line `Read-only reference copy.` banner with the new
-   version, build, and `xcframework checksum` from the resolved Package.swift.
+   build tag and the `xcframework checksum` from step 2.
 4. In `GBNFSchemaPreValidator.swift`, update `CVEAuditRecord.vendoredBuild`
    to the new tag. The validation rules stay; they are not CVE-specific.
 5. Diff `docs/vendor/llama.h` against the previous revision and review every
    changed symbol against the tables above.
-6. Run `swift test --filter ManifoldBackendsTests --traits Llama` on Apple
-   Silicon before opening the PR.
+6. Run `swift test` on Apple Silicon before opening the PR (set
+   `MANIFOLD_DISCOVER_LOCAL_MODELS=1` or `LLAMA_TEST_MODEL=<path>` to exercise
+   the real-model suites).
 
 ---
 
@@ -702,10 +709,17 @@ GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 
 ### Decision
 
-`LlamaSwift` is consumed as a **pre-built xcframework binary** — specifically
-`llama-b9101-xcframework.zip` distributed from the `ggml-org/llama.cpp` GitHub
-releases and wrapped by `mattt/llama.swift`. ManifoldKit does **not** compile
-llama.cpp from source.
+The llama.cpp xcframework is consumed as a **pre-built binary, straight from
+the upstream `ggml-org/llama.cpp` GitHub releases** — `Package.swift` declares a
+local `.binaryTarget(name: "llama-cpp", url:checksum:)` pointing at
+`llama-b<NNNN>-xcframework.zip` (currently **b9553**), and a one-file local
+`LlamaSwift` target (`Sources/LlamaSwift/Llama.swift`:
+`@_exported @preconcurrency import llama`) re-exports the C module so the
+`ManifoldLlama` sources keep importing `LlamaSwift` unchanged. This package does
+**not** compile llama.cpp from source, and **no longer depends on the
+`mattt/llama.swift` wrapper** — it was dropped in favour of pinning the same
+upstream asset directly (url + checksum, no git-tag resolution), which removes
+the wrapper's auto-tag CI-drift hazard.
 
 ### Tradeoffs
 
@@ -736,29 +750,30 @@ The opacity of binary diffs is mitigated by two practices:
 
 ### Upgrade procedure
 
-1. Update the `from:` constraint in `Package.swift` for `mattt/llama.swift`
-   and run `swift package resolve`.
-2. Read the resolved upstream `Package.swift` to find the exact build tag
-   and checksum the wrapper points at:
-   ```
-   curl -s "https://raw.githubusercontent.com/mattt/llama.swift/<tag>/Package.swift" \
-     | grep -E "llama-b[0-9]+|checksum"
-   ```
+1. Pick the target upstream build `b<NNNN>` from the
+   [`ggml-org/llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases);
+   the asset is `llama-b<NNNN>-xcframework.zip`. Update the
+   `.binaryTarget(name: "llama-cpp", …)` `url` to it in `Package.swift`.
+2. Refresh the `.binaryTarget` `checksum`. It is SwiftPM's package checksum of
+   the zip — download the asset and run
+   `swift package compute-checksum llama-b<NNNN>-xcframework.zip` (the value
+   SwiftPM verifies at resolve). Then run `swift package resolve`.
 3. Copy the new `llama.h` from the resolved xcframework:
    ```
-   cp .build/artifacts/llama.swift/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Headers/llama.h \
+   cp .build/artifacts/manifold-llama/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/Headers/llama.h \
       docs/vendor/llama.h
    ```
    Then prepend the four-line `Read-only reference copy.` banner referencing
-   the new wrapper version, build tag, and xcframework checksum from step 2.
+   the new build tag and the xcframework checksum from step 2.
 4. Diff `docs/vendor/llama.h` against the previous version and review every
    changed symbol against the tables in this document.
 5. Update `GBNFSchemaPreValidator.cveStatus.vendoredBuild` in
    `Sources/ManifoldInference/Services/GBNFSchemaPreValidator.swift`. Flip
    `isFixed`/`fixedAtBuild` only if a new CVE-fix boundary is crossed.
 6. Update every section in this document (`LLAMA_CONTRACT.md`) that
-   references the version number or whose contract has changed according to
+   references the build number or whose contract has changed according to
    the `llama.h` diff from step 4. Commit `LLAMA_CONTRACT.md` in the same PR
    as the pin bump.
-7. Run `swift test --filter ManifoldBackendsTests --traits Llama` locally on
-   Apple Silicon before opening the PR.
+7. Run `swift test` locally on Apple Silicon before opening the PR (set
+   `MANIFOLD_DISCOVER_LOCAL_MODELS=1` or `LLAMA_TEST_MODEL=<path>` to exercise
+   the real-model suites).
