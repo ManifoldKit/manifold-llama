@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.4](https://github.com/roryford/manifold-llama/compare/v0.2.3...v0.2.4) (2026-06-17)
+
+### Highlights
+
+**Tracks ManifoldKit 0.53** ([#39](https://github.com/roryford/manifold-llama/issues/39)) — the core pin moves to `.upToNextMinor(from: "0.53.0")`, building against the 0.53 release. No source changes required — bump and rebuild.
+
+**llama.cpp now comes straight from upstream** ([#40](https://github.com/roryford/manifold-llama/issues/40)) — the `mattt/llama.swift` wrapper is dropped; the xcframework is pinned directly from the `ggml-org/llama.cpp` releases via a local `.binaryTarget(url:checksum:)` (build b9553) plus a one-line `LlamaSwift` re-export shim. The binary is bit-identical, so `ManifoldLlama` sources are unchanged — but resolution is now deterministic (`url` + `checksum`, no git-tag resolution), removing the wrapper's auto-tag CI-drift hazard. Ships a vendored `docs/vendor/llama.h` and an updated upgrade procedure in the C-API contract doc.
+
+**Weak models now close the C5 grammar envelope** ([#38](https://github.com/roryford/manifold-llama/issues/38), [#20](https://github.com/roryford/manifold-llama/issues/20)) — the C5 tool-call fixture's whitespace rule was unbounded, so small models (mistral 7B) spent the token budget on newline indentation before reaching `</tool_call>`. Bounding `ws` to `{0,4}` keeps output compact enough to close, with a headless tripwire guarding the bound.
+
+**Model-bearing nightly test lane** ([#31](https://github.com/roryford/manifold-llama/issues/31), [#25](https://github.com/roryford/manifold-llama/issues/25)) — a scheduled CI lane runs the hardware-gated real-model suites against on-disk GGUFs nightly, so the skips-empty model tests actually execute on a cadence instead of only locally.
+
 ## [0.2.3](https://github.com/roryford/manifold-llama/compare/v0.2.2...v0.2.3) (2026-06-15)
 
 ### Highlights
