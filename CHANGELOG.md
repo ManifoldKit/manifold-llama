@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.6](https://github.com/roryford/manifold-llama/compare/v0.2.5...v0.2.6) (2026-06-20)
+
+
+### Features
+
+* emit .usage(TokenUsage) at end-of-turn for local generation ([#44](https://github.com/roryford/manifold-llama/issues/44)) ([#49](https://github.com/roryford/manifold-llama/issues/49)) ([b928d99](https://github.com/roryford/manifold-llama/commit/b928d9945449e7ab011a8138ea7081372303674d))
+* emit prefillProgress events, surface truncated tool calls, claim supportsParallelToolCalls ([#45](https://github.com/roryford/manifold-llama/issues/45) prep) ([#50](https://github.com/roryford/manifold-llama/issues/50)) ([3e98afb](https://github.com/roryford/manifold-llama/commit/3e98afb71c87d48d2ba65e924782ca2eeb9de893))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.55.0 ([#46](https://github.com/roryford/manifold-llama/issues/46)) ([8db0627](https://github.com/roryford/manifold-llama/commit/8db0627c5afcd086e9c281ec5462a33dfbc63543))
+* **llama:** drain GPU before freeing embedding context; repair model lane and CI teardown crashes ([#53](https://github.com/roryford/manifold-llama/issues/53)) ([7bcce66](https://github.com/roryford/manifold-llama/commit/7bcce66b8604b2ad21ae80d8c99a21e2162b5c82))
+
 ## [0.2.5](https://github.com/roryford/manifold-llama/compare/v0.2.4...v0.2.5) (2026-06-18)
 
 ### Highlights
