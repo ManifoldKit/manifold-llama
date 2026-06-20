@@ -2,6 +2,7 @@ import XCTest
 @_spi(Testing) import ManifoldLlama
 @_spi(BackendInternals) import ManifoldContract
 import ManifoldInference
+import ManifoldTestSupport
 
 /// Headless coverage for the `.usage(TokenUsage)` emission contract (issue #44).
 ///
@@ -43,22 +44,19 @@ final class LlamaTokenUsageTests: XCTestCase {
     ///   1. A `.usage(TokenUsage)` event is emitted at end-of-stream.
     ///   2. `backend.lastUsage` reflects the same prompt + completion counts.
     ///
-    /// Skipped unless `RUN_SLOW_TESTS=1` is set **and** a `.gguf` file exists at
-    /// the path in `LLAMA_TEST_MODEL_PATH` — both must be present for the test to
-    /// run. This keeps CI green without a model while allowing local verification
-    /// on Apple Silicon.
+    /// Skipped unless a `.gguf` is discoverable via `findGGUFModel()`
+    /// (`LLAMA_TEST_MODEL` / `~/Documents/Models`) on Apple Silicon — the same
+    /// gate every model-bound suite uses, so this runs in the model-bearing lane.
+    /// This keeps CI green without a model while allowing local verification.
     func test_generate_emitsUsageEvent_andPopulatesLastUsage() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_SLOW_TESTS"] == "1" else {
-            throw XCTSkip("Set RUN_SLOW_TESTS=1 to run model-gated tests")
+        guard let url = HardwareRequirements.findGGUFModel() else {
+            throw XCTSkip("No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test.")
         }
-        guard let modelPath = ProcessInfo.processInfo.environment["LLAMA_TEST_MODEL_PATH"] else {
-            throw XCTSkip("Set LLAMA_TEST_MODEL_PATH to a .gguf file to run this test")
-        }
+        try XCTSkipUnless(HardwareRequirements.isPhysicalDevice && HardwareRequirements.isAppleSilicon,
+                          "LlamaBackend requires Apple Silicon + Metal (unavailable in simulator)")
 
         let backend = LlamaBackend()
-        let url = URL(fileURLWithPath: modelPath)
-        let plan = ModelLoadPlan(url: url, availableMemory: UInt64.max)
-        try await backend.loadModel(from: url, plan: plan)
+        try await backend.loadModel(from: url, plan: .testStub(effectiveContextSize: 512))
         defer { backend.unloadModel() }
 
         let stream = try backend.generate(

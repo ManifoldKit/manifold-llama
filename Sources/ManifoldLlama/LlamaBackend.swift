@@ -277,6 +277,27 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         }
     }
 
+    /// Clears the sentinel state armed by ``armFakeLoadedStateForTesting()`` WITHOUT
+    /// invoking any llama.cpp C API. A test that arms fake state MUST disarm before
+    /// the backend deinits: otherwise `deinit` → ``unloadModel()`` captures the addr-1
+    /// sentinel `context` and schedules a `Task.detached` that calls
+    /// `llama_synchronize(ctx)` / `llama_free(ctx)` on it — dereferencing address 1
+    /// and crashing the process with SIGSEGV. Because that cleanup is detached, the
+    /// crash surfaces asynchronously (often after the test bundle reports all tests
+    /// passed), making it a flaky exit-time segfault. Niling the pointers here makes
+    /// `unloadModel()`'s `capturedContext != nil` guard early-return with no C call.
+    /// See #54.
+    ///
+    /// ONLY call this from test targets. Never call in production code.
+    @_spi(Testing) public func disarmFakeLoadedStateForTesting() {
+        withStateLock {
+            model        = nil
+            context      = nil
+            vocab        = nil
+            isModelLoaded = false
+        }
+    }
+
     /// Directly sets `isGenerating` under `stateLock`. Lets headless tests put the
     /// backend into a simulated mid-generation state so the `alreadyGenerating` guard
     /// can be exercised without a real decode loop.

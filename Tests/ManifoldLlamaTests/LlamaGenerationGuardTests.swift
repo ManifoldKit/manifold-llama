@@ -31,6 +31,12 @@ final class LlamaGenerationGuardTests: XCTestCase {
     func test_generate_throwsAlreadyGenerating_whenIsGeneratingTrue() throws {
         let backend = LlamaBackend()
         backend.armFakeLoadedStateForTesting()
+        // Disarm before deinit: otherwise unloadModel() schedules a detached
+        // llama_synchronize/llama_free on the addr-1 sentinel context and crashes
+        // the process asynchronously (flaky exit-time SIGSEGV). See #54. The
+        // teardown closure keeps `backend` alive until after disarm runs, so the
+        // subsequent deinit finds nil pointers and does no C cleanup.
+        addTeardownBlock { backend.disarmFakeLoadedStateForTesting() }
         backend.setIsGeneratingForTesting(true)
 
         XCTAssertThrowsError(
@@ -62,6 +68,9 @@ final class LlamaGenerationGuardTests: XCTestCase {
     func test_generate_doesNotThrowAlreadyGenerating_whenNotGenerating() throws {
         let backend = LlamaBackend()
         backend.armFakeLoadedStateForTesting()
+        // Disarm before deinit to avoid the detached sentinel-pointer cleanup crash
+        // (#54); see the sibling test above.
+        addTeardownBlock { backend.disarmFakeLoadedStateForTesting() }
         // isGenerating is false by default — do NOT call setIsGeneratingForTesting(true)
 
         // Verify the guard precondition directly. Calling generate() is unsafe here
