@@ -121,6 +121,31 @@ import ManifoldInference
         Unmanaged<ProgressCallbackContext>.fromOpaque(ptr).takeUnretainedValue()
     }
 
+    /// The typed error thrown when `llama_init_from_model` returns nil while the
+    /// model itself loaded — an allocator failure at the requested context size,
+    /// distinct (code -2) from the model-load failure (code -1).
+    ///
+    /// Extracted from `initializeModel`'s nil-context guard so the contract — the
+    /// `LlamaBackend` domain, the -2 code, and the size-bearing message — can be
+    /// asserted headlessly. Forcing `llama_init_from_model` to return nil while
+    /// `llama_model_load_from_file` succeeded cannot be triggered reliably from a
+    /// config, so this seam stands in for that branch the way `finishDecodeFailure`
+    /// stands in for the decode-error teardown. The real guard throws exactly this.
+    @_spi(Testing) public static func contextCreationFailure(
+        effectiveContextSize: Int32
+    ) -> InferenceError {
+        InferenceError.modelLoadFailed(underlying: NSError(
+            domain: "LlamaBackend",
+            code: -2,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Failed to create llama context at \(effectiveContextSize) tokens. "
+                    + "The memory estimate did not account for an allocator failure at this size. "
+                    + "Retry with a smaller requested context size.",
+            ]
+        ))
+    }
+
     /// Synchronous wrapper that holds `loadSerializationLock` while calling the
     /// C-level model init. Called from a detached task so the lock/unlock stays
     /// in a synchronous context (required by Swift 6.3 strict concurrency).
@@ -240,16 +265,7 @@ import ManifoldInference
         // smaller plan rather than silently allocating half of what was asked for.
         guard let ctx = llama_init_from_model(rawModel, ctxParams) else {
             // modelHandle goes out of scope here → llama_model_free called automatically
-            throw InferenceError.modelLoadFailed(underlying: NSError(
-                domain: "LlamaBackend",
-                code: -2,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Failed to create llama context at \(effectiveContextSize) tokens. "
-                        + "The memory estimate did not account for an allocator failure at this size. "
-                        + "Retry with a smaller requested context size.",
-                ]
-            ))
+            throw Self.contextCreationFailure(effectiveContextSize: effectiveContextSize)
         }
 
         let contextHandle = LlamaContextHandle(

@@ -142,6 +142,7 @@ jobs:
           LlamaTopKConsumptionTests \
           LlamaGrammarSamplerTests \
           LlamaArchitecturePreflightTests \
+          LlamaModelLoaderKVQuantizationTests \
           LlamaLocalBackendContractTests \
           LlamaSeedDeterminismTests \
           LlamaModernSamplerIntegrationTests \
