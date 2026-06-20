@@ -107,6 +107,44 @@ struct CLI {
     }
 }
 
+/// Builds a `ToolRegistry` containing only the tools a scenario actually
+/// requires.
+///
+/// The harness previously advertised all six reference tools to the model for
+/// every scenario. Small GGUF models degrade sharply past ~5 advertised tools,
+/// so a 6-tool prompt confounds tool-dispatch results: a miss could be the
+/// model, or just tool overload. Scoping each request to `scenario.requiredTools`
+/// removes that confound. An empty `requiredTools` (e.g. the tool-free
+/// `structured-json-extraction` scenario) correctly yields an empty registry.
+///
+/// The file/dir tools read against the resolved (bundled or overridden) fixture
+/// root rather than ManifoldTools' default, which points at a non-existent
+/// ManifoldKit test path here.
+@MainActor
+func makeRegistry(for scenario: Scenario, fixturesRoot: URL) -> ToolRegistry {
+    let registry = ToolRegistry()
+    for name in scenario.requiredTools {
+        switch name {
+        case "now":
+            registry.register(NowTool.makeExecutor())
+        case "calc":
+            registry.register(CalcTool.makeExecutor())
+        case "read_file":
+            registry.register(ReadFileTool.makeExecutor(root: fixturesRoot))
+        case "list_dir":
+            registry.register(ListDirTool.makeExecutor(root: fixturesRoot))
+        case "sample_repo_search":
+            registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
+        case "http_get_fixture":
+            registry.register(HttpGetFixtureTool.makeExecutor())
+        default:
+            FileHandle.standardError.write(Data(
+                "manifold-tools-llama: scenario '\(scenario.id)' lists unknown required tool '\(name)' — skipping\n".utf8))
+        }
+    }
+    return registry
+}
+
 /// Loads the bundled tool-calling scenarios.
 ///
 /// `ScenarioLoader.loadBuiltIn()` is unusable here: it resolves a ManifoldKit
@@ -201,17 +239,6 @@ func runCLI() async -> Int32 {
     }
     print("Logging to \(logger.destination.path)")
 
-    // Register all six reference tools. The file/dir tools read against the
-    // resolved (bundled or overridden) fixture root rather than ManifoldTools'
-    // default, which points at a non-existent ManifoldKit test path here.
-    let registry = ToolRegistry()
-    registry.register(NowTool.makeExecutor())
-    registry.register(CalcTool.makeExecutor())
-    registry.register(ReadFileTool.makeExecutor(root: fixturesRoot))
-    registry.register(ListDirTool.makeExecutor(root: fixturesRoot))
-    registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
-    registry.register(HttpGetFixtureTool.makeExecutor())
-
     // Load the GGUF once and reuse the backend across every scenario — model
     // load dominates wall-clock and llama.cpp uses a process-global backend.
     let backend = LlamaBackend()
@@ -229,6 +256,10 @@ func runCLI() async -> Int32 {
     var allPassed = true
     for scenario in filtered {
         print("\n── \(scenario.id) (\(scenario.description)) ──")
+        // Build a fresh registry scoped to this scenario's required tools so the
+        // model is only ever advertised what the scenario actually needs.
+        let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot)
+        print("  advertising \(registry.definitions.count) tool(s): \(scenario.requiredTools.joined(separator: ", "))")
         do {
             let runner = ScenarioRunner(backend: backend, registry: registry, logger: logger)
             let outcome = try await runner.run(scenario)
