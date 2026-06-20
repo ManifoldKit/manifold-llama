@@ -31,6 +31,9 @@ private func toolCalls(from events: [GenerationEvent]) -> [ToolCall] {
 final class LlamaGemma4MarkerInventoryTests: XCTestCase {
 
     func test_markers_containsGemma4NativeOpenTag() {
+        // Sabotage: change `LlamaToolMarkers.gemma4OpenTag` in LlamaToolMarkers.swift
+        // to "<|tool_call|>" (trailing pipe) and this test fails — binding the fixture
+        // to the real constant so any drift is immediately surfaced.
         let markers = LlamaToolMarkers.markers()
         let openTags = markers.map(\.open)
         XCTAssertTrue(openTags.contains("<|tool_call>"),
@@ -90,6 +93,9 @@ final class LlamaGemma4ToolCallParserE2ETests: XCTestCase {
         // tool-call *parsing* is done by `ToolCallTransform` in the driver.
         // This test simulates the exact token stream the driver sees when
         // gemma-4's chat template emits a native tool call.
+        //
+        // Sabotage: remove the gemma-4 marker pair from `LlamaToolMarkers.markers()`
+        // and `calls.count` drops to 0, failing the XCTAssertEqual below.
         var parser = Parser()
         let chunk = "<|tool_call>\ncall:get_weather{city:<|\"|>Paris<|\"|>}\n<|end_of_turn>"
         let events = parser.process(chunk)
@@ -146,6 +152,11 @@ final class LlamaGemma4TruncationTests: XCTestCase {
     func test_gemma4_incompleteBlock_withSurfaceTruncated_emitsToolCallTruncated() {
         // Open tag present, body starts, but the model was cut off before the
         // close tag — simulates token-limit truncation mid-tool-call.
+        //
+        // Sabotage: remove `surfaceTruncatedToolBody: true` (or change it to `false`)
+        // and `truncated` will be empty, failing the XCTAssertFalse below. This guards
+        // the PR #50 wiring — a ToolCallTransform constructed without the flag silently
+        // discards the partial body and the test must catch that regression.
         var transform = ToolCallTransform(
             markers: LlamaToolMarkers.markers(),
             surfaceTruncatedToolBody: true)
@@ -206,6 +217,11 @@ final class LlamaGemma4TruncationTests: XCTestCase {
 final class LlamaBackendStructuredHistoryStorageTests: XCTestCase {
 
     func test_setStructuredHistory_storesMessages() {
+        // Sabotage: remove the `withStateLock` guard from `structuredHistoryForTesting`
+        // (or from `setStructuredHistory`) and this test still passes functionally —
+        // but the guard is exercised by the concurrent-access sanitiser (TSan). To catch
+        // the lock removal structurally, change `_structuredHistory = []` to not store
+        // the value and `stored.count` drops to 0, failing the XCTAssertEqual below.
         let backend = LlamaBackend()
         let messages: [StructuredMessage] = [
             StructuredMessage(role: "user", content: "What is the weather in Tokyo?"),
