@@ -286,6 +286,13 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { isGenerating = value }
     }
 
+    /// Snapshot of the structured history most recently supplied via
+    /// ``StructuredHistoryReceiver/setStructuredHistory(_:)``. Lets headless tests
+    /// assert that the value was stored without running a real decode.
+    @_spi(Testing) public var structuredHistoryForTesting: [StructuredMessage] {
+        withStateLock { _structuredHistory }
+    }
+
     // MARK: - Multimodal Projector
 
     /// URL of the mmproj companion file, set by ``MultimodalProjectorConfigurable`` before each load.
