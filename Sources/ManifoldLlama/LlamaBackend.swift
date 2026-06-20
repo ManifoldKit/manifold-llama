@@ -113,6 +113,12 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
 
     public var lastMeasuredBytesPerToken: UInt64? { withStateLock { _lastMeasuredBytesPerToken } }
 
+    /// Token usage reported by the most recently completed local generation turn,
+    /// or `nil` before the first successful turn. Populated by the `onUsage`
+    /// callback fired by `LlamaGenerationDriver.run()` just before it finishes the
+    /// stream. Guarded by `stateLock`.
+    private var _lastUsage: (promptTokens: Int, completionTokens: Int)?
+
     public var capabilities: BackendCapabilities {
         let ctxSize = withStateLock { _effectiveContextSize }
         let architecture = withStateLock { _architecture }
@@ -591,6 +597,11 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 continuation: continuation,
                 onPrefillEstimate: { [self] measured in
                     self.withStateLock { self._lastMeasuredBytesPerToken = measured }
+                },
+                onUsage: { [self] promptTokens, completionTokens in
+                    self.withStateLock {
+                        self._lastUsage = (promptTokens: promptTokens, completionTokens: completionTokens)
+                    }
                 }
             )
             // A decode failure leaves the C KV cache in an undefined state.
@@ -906,5 +917,19 @@ extension LlamaBackend: StructuredHistoryReceiver {
     /// can detect image parts and surface a clear error when they are present.
     public func setStructuredHistory(_ messages: [StructuredMessage]) {
         withStateLock { _structuredHistory = messages }
+    }
+}
+
+// MARK: - TokenUsageProvider
+
+extension LlamaBackend: TokenUsageProvider {
+    /// Token usage from the most recently completed local-generation turn.
+    ///
+    /// Populated by `LlamaGenerationDriver.run()` firing the `onUsage` callback just
+    /// before finishing the stream. Mirrors the contract that cloud backends satisfy so
+    /// `InferenceService` can surface `promptTokens`/`completionTokens` for local turns.
+    /// Returns `nil` before the first successful generation on this instance.
+    public var lastUsage: (promptTokens: Int, completionTokens: Int)? {
+        withStateLock { _lastUsage }
     }
 }

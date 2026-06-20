@@ -170,7 +170,8 @@ import ManifoldHardware
         prefillFootprintSampler: @Sendable () -> UInt64? = { AppMemoryUsage.currentBytes() },
         prefillHeadroomSampler: @Sendable () -> UInt64? = { DeviceCapabilityService.queryAvailableMemory() },
         prefillSafetyFactor: Double = 1.5,
-        onPrefillEstimate: (@Sendable (UInt64) -> Void)? = nil
+        onPrefillEstimate: (@Sendable (UInt64) -> Void)? = nil,
+        onUsage: (@Sendable (Int, Int) -> Void)? = nil
     ) async -> Bool {
         Self.logger.debug("LlamaGenerationDriver run started")
 
@@ -838,6 +839,8 @@ import ManifoldHardware
 
         await MainActor.run { generationStream.setPhase(.done) }
         Self.logger.debug("LlamaGenerationDriver run finished")
+        onUsage?(tokens.count, visibleTokenCount)
+        continuation.yield(.usage(TokenUsage(promptTokens: tokens.count, completionTokens: visibleTokenCount)))
         continuation.finish()
         return true
     }
