@@ -90,6 +90,9 @@ let package = Package(
                 "ManifoldLlama",
             ],
             path: "Sources/manifold-tools-llama",
+            // README lives inside the target dir; exclude it so SwiftPM doesn't
+            // emit an "unhandled resource" warning for it.
+            exclude: ["README.md"],
             resources: [
                 .copy("Fixtures/manifold-tools"),
                 // The bundled scenario JSONs are vendored here too:

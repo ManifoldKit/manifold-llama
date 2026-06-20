@@ -130,10 +130,14 @@ func resolveFixturesRoot(_ override: URL?) -> URL {
     if let override {
         return override
     }
+    // SwiftPM's `.copy("Fixtures/manifold-tools")` flattens to the trailing
+    // path component, so the tree lands at the bundle root as `manifold-tools/`
+    // — there is no `Fixtures/` subdirectory in the built bundle. Look it up at
+    // the root (no `subdirectory:`); passing `subdirectory: "Fixtures"` returns
+    // nil and would wrongly exit(2) on every real run.
     guard let bundled = Bundle.module.url(
         forResource: "manifold-tools",
-        withExtension: nil,
-        subdirectory: "Fixtures")
+        withExtension: nil)
     else {
         FileHandle.standardError.write(Data(
             "manifold-tools-llama: bundled fixtures not found — pass --fixtures-root <dir>\n".utf8))
@@ -218,7 +222,9 @@ func runCLI() async -> Int32 {
         FileHandle.standardError.write(Data("failed to load model: \(error)\n".utf8))
         return 1
     }
-    defer { Task { await backend.unloadAndWait() } }
+    // Teardown must be awaited before `exit()` reclaims the process, so a fire-
+    // and-forget `Task` in `defer` would race the exit and routinely never run.
+    // Run the scenarios, then await `unloadAndWait()` on every exit path below.
 
     var allPassed = true
     for scenario in filtered {
@@ -239,6 +245,8 @@ func runCLI() async -> Int32 {
             print("  ERROR \(error)")
         }
     }
+
+    await backend.unloadAndWait()
 
     if allPassed {
         print("\nAll scenarios passed.")

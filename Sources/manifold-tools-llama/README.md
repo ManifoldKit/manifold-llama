@@ -22,6 +22,12 @@ that do not travel with the library product:
   `ReadFileTool.defaultRoot()` resolves to a ManifoldKit test path; we pass the
   bundled root (or a `--fixtures-root` override) explicitly.
 
+> **These are vendored copies and can drift from ManifoldKit.** The scenario
+> JSONs and fixtures are hand-copied from ManifoldKit's `Sources/ManifoldTools/`
+> (no remote fetch — vendoring is deliberate). If ManifoldKit changes the
+> bundled scenarios or fixtures, re-copy them here. Do not de-duplicate via a
+> network fetch.
+
 ## Usage
 
 ```sh
