@@ -488,6 +488,7 @@ import ManifoldHardware
         var prefillAborted = false
 
         var promptDecodeFailed = false
+        var prefillStart: ContinuousClock.Instant? = nil
         var promptPos = alignedReuseLen
         while promptPos < tokens.count {
             if isCancelled() { break }
@@ -555,6 +556,18 @@ import ManifoldHardware
             )
 
             promptPos += chunkSize
+
+            // Emit a prefill-progress heartbeat so the orchestrator can surface
+            // progress bars and compute time-to-first-token estimates.
+            if prefillStart == nil { prefillStart = ContinuousClock.now }
+            let elapsed = ContinuousClock.now - prefillStart!
+            let elapsedSeconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+            let tps = elapsedSeconds > 0 ? Double(promptPos) / elapsedSeconds : 0
+            continuation.yield(.prefillProgress(
+                tokensProcessed: promptPos,
+                tokensTotal: tokens.count,
+                tokensPerSecond: tps
+            ))
         }
 
         // A pre-chunk abort already finished the continuation with a thrown
@@ -678,7 +691,7 @@ import ManifoldHardware
             stages.append(.thinking(ThinkingTransform(markers: markers ?? .qwen3)))
         }
         if useToolParser {
-            stages.append(.tool(ToolCallTransform(markers: LlamaToolMarkers.markers())))
+            stages.append(.tool(ToolCallTransform(markers: LlamaToolMarkers.markers(), surfaceTruncatedToolBody: true)))
         }
         var session = OutputParserSession(stages)
 

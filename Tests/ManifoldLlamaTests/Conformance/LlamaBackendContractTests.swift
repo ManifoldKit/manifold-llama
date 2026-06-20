@@ -77,6 +77,10 @@ final class LlamaBackendContractTests: XCTestCase,
             backendName: contractBackendName,
             flag: "supportsGrammarConstrainedSampling"
         )
+        BackendContractChecks.claimWithoutBehaviouralAssertion(
+            backendName: contractBackendName,
+            flag: "supportsParallelToolCalls"
+        )
 
         BackendContractChecks.assertCapabilityMetaContract(
             backendName: contractBackendName,
