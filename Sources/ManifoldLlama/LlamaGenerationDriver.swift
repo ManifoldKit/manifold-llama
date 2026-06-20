@@ -170,7 +170,8 @@ import ManifoldHardware
         prefillFootprintSampler: @Sendable () -> UInt64? = { AppMemoryUsage.currentBytes() },
         prefillHeadroomSampler: @Sendable () -> UInt64? = { DeviceCapabilityService.queryAvailableMemory() },
         prefillSafetyFactor: Double = 1.5,
-        onPrefillEstimate: (@Sendable (UInt64) -> Void)? = nil
+        onPrefillEstimate: (@Sendable (UInt64) -> Void)? = nil,
+        onUsage: (@Sendable (Int, Int) -> Void)? = nil
     ) async -> Bool {
         Self.logger.debug("LlamaGenerationDriver run started")
 
@@ -636,6 +637,9 @@ import ManifoldHardware
         var thinkingTokenCount = 0
         // Flag set when maxThinkingTokens is reached so we can break the outer loop cleanly.
         var thinkingLimitReached = false
+        // Flag set when the generation loop exits due to cancellation. Usage must NOT
+        // be emitted for cancelled turns — no complete turn happened.
+        var exitedDueToCancellation = false
         // Visible-output token counter. Thinking tokens do NOT count toward maxTokens —
         // maxOutputTokens governs visible output budget, and maxThinkingTokens governs the
         // reasoning budget separately. Without this split, a reasoning model that thinks for
@@ -695,7 +699,7 @@ import ManifoldHardware
         phraseWindow.reserveCapacity(Self.phraseWindowCap + 1)
 
         generationLoop: for iteration in 0..<totalLoopBudget {
-            if isCancelled() { break }
+            if isCancelled() { exitedDueToCancellation = true; break }
 
             // First iteration samples from the final prompt chunk's logits,
             // which llama.cpp exposes at index -1 ("last available").
@@ -791,7 +795,7 @@ import ManifoldHardware
             genBatch.n_tokens = 1
             nCur += 1
 
-            if isCancelled() { break }
+            if isCancelled() { exitedDueToCancellation = true; break }
 
             if llama_decode(context, genBatch) != 0 {
                 // Synchronize before surfacing the error so the GPU drains any
@@ -838,6 +842,12 @@ import ManifoldHardware
 
         await MainActor.run { generationStream.setPhase(.done) }
         Self.logger.debug("LlamaGenerationDriver run finished")
+        // Emit usage only on a complete turn — not when the loop exited due to
+        // cancellation (user-initiated stop mid-stream is not a finished turn).
+        if !exitedDueToCancellation {
+            onUsage?(tokens.count, visibleTokenCount)
+            continuation.yield(.usage(TokenUsage(promptTokens: tokens.count, completionTokens: visibleTokenCount)))
+        }
         continuation.finish()
         return true
     }
