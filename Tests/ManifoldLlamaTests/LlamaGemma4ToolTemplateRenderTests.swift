@@ -34,6 +34,13 @@ import ManifoldInference
 /// `function` + flat-alias tool dictionaries, the per-message `tool_calls` /
 /// `tool_call_id` threading, `add_generation_prompt`, an empty `documents`),
 /// so the render assertion is faithful to what `JinjaPromptRenderer` emits.
+///
+/// ## Scope: model-free half of #45 only
+/// This covers the model-free render deliverable the issue's Notes call out. The
+/// full live gemma-4 GGUF round-trip E2E (issue #45 deliverables 1–2, driven via
+/// `LlamaGemma4ToolRenderE2ETests`) remains OPEN: it is gated on the gemma-4 GGUF
+/// loading on the pinned llama.cpp — currently BLOCKED (see issue #62 /
+/// ManifoldKit#1981). Re-enable once that load path is fixed.
 final class LlamaGemma4ToolTemplateRenderTests: XCTestCase {
 
     // MARK: - Vendored gemma-4 native-tool chat template fixture
@@ -118,7 +125,13 @@ final class LlamaGemma4ToolTemplateRenderTests: XCTestCase {
         let jinjaMessages: [[String: Any]] = messages.map { Self.jinjaMessage(from: $0) }
         let toolsContext: [[String: Any]] = tools.map { Self.jinjaTool(from: $0) }
 
-        let template = try Template(Self.gemma4NativeToolTemplate)
+        // Same whitespace semantics as the production renderer: `JinjaPromptRenderer`
+        // builds its `Template` with `.init(lstripBlocks: true, trimBlocks: true)`
+        // to match Hugging Face `apply_chat_template`. Mirror it here so the
+        // model-free render is faithful to what the real seam emits.
+        let template = try Template(
+            Self.gemma4NativeToolTemplate,
+            with: .init(lstripBlocks: true, trimBlocks: true))
         return try template.render([
             "messages": try Value(any: jinjaMessages),
             "tools": try Value(any: toolsContext),
