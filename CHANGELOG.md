@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.7](https://github.com/roryford/manifold-llama/compare/v0.2.6...v0.2.7) (2026-06-20)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to 0.56.0 (lands toolChoice-aware tool-grammar fix, [#55](https://github.com/roryford/manifold-llama/issues/55)) ([#59](https://github.com/roryford/manifold-llama/issues/59)) ([bad6d71](https://github.com/roryford/manifold-llama/commit/bad6d71a013808e58f4139c7c9f600fd88f77a59))
+* bump ManifoldKit pin to v0.56.0 ([#57](https://github.com/roryford/manifold-llama/issues/57)) ([e66f2a1](https://github.com/roryford/manifold-llama/commit/e66f2a127f732aa0c085f832d39b9aa7b6680d68))
+
 ## [0.2.6](https://github.com/roryford/manifold-llama/compare/v0.2.5...v0.2.6) (2026-06-20)
 
 
