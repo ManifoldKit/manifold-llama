@@ -19,7 +19,7 @@ let package = Package(
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.55.0")),
+        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.56.0")),
     ],
     targets: [
         // llama.cpp (GGUF) inference, generation driver, process-lifecycle
