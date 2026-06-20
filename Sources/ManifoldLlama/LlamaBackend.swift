@@ -735,6 +735,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         _manifest = nil
         _mmprojURL = nil
         _structuredHistory = []
+        _lastUsage = nil
         stateLock.unlock()
 
         capturedTask?.cancel()
