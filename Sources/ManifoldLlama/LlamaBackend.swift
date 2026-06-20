@@ -251,6 +251,41 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         applyKVCoherence(kvCoherent)
     }
 
+    /// Installs sentinel (non-nil) model/context/vocab pointers and sets
+    /// `isModelLoaded = true` so headless tests can reach guards that fire
+    /// BEFORE any C API call is made on those pointers.
+    ///
+    /// The sentinel value (`OpaquePointer(bitPattern: 1)!`) is never passed to
+    /// any llama.cpp C function in the guarded paths — the `alreadyGenerating`
+    /// guard fires before tokenization, which is the first site that
+    /// dereferences a pointer. Calling any C API on this backend after arming
+    /// this seam will crash.
+    ///
+    /// The sentinel is a bit-pattern integer cast, not a heap allocation, so
+    /// there is nothing to free. Not calling `llama_free` / `llama_free_model`
+    /// on it is intentional — `unloadModel()` would crash if it tried to free
+    /// address 1.
+    ///
+    /// ONLY call this from test targets. Never call in production code.
+    @_spi(Testing) public func armFakeLoadedStateForTesting() {
+        withStateLock {
+            let sentinel = OpaquePointer(bitPattern: 1)!
+            model        = sentinel
+            context      = sentinel
+            vocab        = sentinel
+            isModelLoaded = true
+        }
+    }
+
+    /// Directly sets `isGenerating` under `stateLock`. Lets headless tests put the
+    /// backend into a simulated mid-generation state so the `alreadyGenerating` guard
+    /// can be exercised without a real decode loop.
+    ///
+    /// ONLY call this from test targets. Never call in production code.
+    @_spi(Testing) public func setIsGeneratingForTesting(_ value: Bool) {
+        withStateLock { isGenerating = value }
+    }
+
     // MARK: - Multimodal Projector
 
     /// URL of the mmproj companion file, set by ``MultimodalProjectorConfigurable`` before each load.
