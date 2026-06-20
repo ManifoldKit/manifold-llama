@@ -51,39 +51,13 @@ final class LlamaSeedDeterminismTests: XCTestCase {
                      + "got A=\(outputA.debugDescription) B=\(outputB.debugDescription)")
     }
 
-    /// Different seeds with non-zero temperature produce distinct outputs.
-    ///
-    /// This guards against the trivial implementation that ignores the seed and
-    /// always uses the same internal state — it would silently make the previous
-    /// test pass by emitting identical streams regardless of the seed value.
-    ///
-    /// Sabotage check: hardcode the seed in `LlamaGenerationDriver.run` to a constant
-    /// (e.g. `42`) instead of reading from `config.seed`. Both runs use the same
-    /// internal seed and this assertion will fail.
-    func test_differentSeeds_produceDifferentOutput() async throws {
-        guard let modelURL = HardwareRequirements.findGGUFModel() else {
-            throw XCTSkip("No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test.")
-        }
-
-        let backend = LlamaBackend()
-        addTeardownBlock { await backend.unloadAndWait() }
-        try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
-
-        var configA = GenerationConfig(temperature: 1.0, maxOutputTokens: 24)
-        configA.seed = 42
-        var configB = configA
-        configB.seed = 1337
-
-        let outputA = try await collectTokens(backend: backend, prompt: "Tell me a fact:", config: configA)
-        backend.resetConversation()
-        let outputB = try await collectTokens(backend: backend, prompt: "Tell me a fact:", config: configB)
-
-        XCTAssertFalse(outputA.isEmpty)
-        XCTAssertFalse(outputB.isEmpty)
-        XCTAssertNotEqual(outputA, outputB,
-                          "Different seeds at temperature=1.0 should diverge; "
-                        + "got matching streams: \(outputA.debugDescription)")
-    }
+    /// Different-seed divergence — the seed-pinned-to-constant guard — lives in
+    /// `LlamaModernSamplerIntegrationTests.test_differentSeeds_divergeOverLongStream`,
+    /// which uses a tolerant oracle (long stream + retry across distinct seed
+    /// pairs). It is deliberately NOT duplicated here as a single-pair
+    /// `XCTAssertNotEqual` over a short stream: distinct seeds at temperature 1.0
+    /// can legitimately coincide on a short prefix, so that form is flaky. See
+    /// that test for the divergence assertion and its tolerance rationale.
 
     // MARK: - Helpers
 

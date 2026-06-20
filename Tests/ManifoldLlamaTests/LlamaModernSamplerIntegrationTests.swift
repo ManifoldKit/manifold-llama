@@ -10,12 +10,11 @@ import ManifoldLlama
 /// must produce identical token streams. That is the only invariant asserted here
 /// — these are same-seed determinism checks.
 ///
-/// NOTE: this suite does NOT prove the seed actually *influences* output (a
-/// different-seed-produces-different-stream guard). A regression that silently
-/// drops the seed and always uses 0 would still pass every test below, because
-/// hardcoding the seed keeps same-seed runs identical. The different-seed
-/// divergence guard is tracked separately (needs the model-bearing CI lane) —
-/// see the deferred sampler/determinism issue.
+/// The same-seed checks below do NOT prove the seed actually *influences* output.
+/// A regression that silently drops the seed and always uses 0 would still pass
+/// them, because hardcoding the seed keeps same-seed runs identical. That gap is
+/// closed by `test_differentSeeds_divergeOverLongStream` (#29): a tolerant
+/// different-seed divergence guard that a seed-pinned-to-0 regression must fail.
 ///
 /// Requires Apple Silicon and a real GGUF — gated and skipped otherwise.
 final class LlamaModernSamplerIntegrationTests: XCTestCase {
@@ -82,6 +81,105 @@ final class LlamaModernSamplerIntegrationTests: XCTestCase {
 
         XCTAssertFalse(outputA.isEmpty, "Mirostat v2 must still produce tokens")
         XCTAssertEqual(outputA, outputB, "Same seed + same Mirostat config must produce identical streams")
+    }
+
+    // MARK: - Different-seed divergence (the seed-pinned-to-0 guard)
+
+    /// Two **distinct** seeds at `temperature = 1.0` must produce divergent token
+    /// streams. This is the guard the same-seed determinism tests cannot provide:
+    /// a regression that silently pins the internal seed to 0 (or any constant)
+    /// keeps same-seed runs identical AND makes every different-seed run identical
+    /// too — so only an *inequality* across seeds catches it. With a working seed,
+    /// two different seeds drive `llama_sampler_init_dist` from different RNG state
+    /// and the sampled streams diverge.
+    ///
+    /// ## Tolerant oracle (why this is not a single `XCTAssertNotEqual`)
+    ///
+    /// Distinct seeds do NOT *guarantee* divergence on every prefix: at temp 1.0 a
+    /// peaked distribution can sample the same argmax token for several positions,
+    /// and on a *short* stream two seeds can legitimately coincide entirely (a real
+    /// collision, not a bug). A naive `assertNotEqual` over a few tokens would be
+    /// flaky. Two tolerances make this robust while still failing a pinned seed:
+    ///
+    ///   1. **Long stream.** We request many tokens (`maxOutputTokens` below). The
+    ///      probability that two independent RNG streams agree on *every* sampled
+    ///      position falls off geometrically with length, so a long stream makes a
+    ///      legitimate full-collision vanishingly rare while a pinned seed collides
+    ///      with probability 1.
+    ///   2. **Retry across seed pairs.** Even a long stream can coincide by chance
+    ///      (greedy-ish prompt, early EOG). We try several *distinct* seed pairs and
+    ///      pass as soon as ANY pair diverges. A correctly-seeded backend only needs
+    ///      one diverging pair; a seed-pinned-to-0 backend diverges on NONE, so it
+    ///      exhausts every pair and fails. False-pass requires ALL pairs to collide,
+    ///      whose probability is the per-pair collision rate raised to the pair count
+    ///      — negligible. False-fail requires a working seed to collide on every pair
+    ///      over a long stream — also negligible.
+    func test_differentSeeds_divergeOverLongStream() async throws {
+        guard let modelURL = HardwareRequirements.findGGUFModel() else {
+            throw XCTSkip("No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test.")
+        }
+
+        let backend = LlamaBackend()
+        addTeardownBlock { await backend.unloadAndWait() }
+        try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
+
+        // Distinct seed pairs tried in order; pass on the first pair that diverges.
+        // Each pair uses two clearly different seeds. Three pairs is enough: for any
+        // plausible per-pair collision rate p over a 64-token stream, p^3 is far
+        // below test-flake thresholds, while a pinned seed yields p = 1 on all three.
+        let seedPairs: [(UInt64, UInt64)] = [
+            (42, 1337),
+            (7, 99_991),
+            (2_024, 8_675_309),
+        ]
+
+        // A long stream: divergence probability per pair rises with length, so we
+        // give the RNG room to separate rather than betting on a short prefix.
+        let longStreamTokens = 64
+
+        var observedNonEmpty = false
+        var lastA = ""
+        var lastB = ""
+
+        for (seedA, seedB) in seedPairs {
+            var configA = GenerationConfig(temperature: 1.0, maxOutputTokens: longStreamTokens)
+            configA.seed = seedA
+            // Disable thinking: `findGGUFModel()` may pick a reasoning model whose
+            // thinking phase both widens the back-to-back window and changes which
+            // stream we capture. The divergence property is about the seeded dist
+            // sampler over the visible stream, independent of model shape — see the
+            // same-seed tests above for the identical rationale.
+            configA.maxThinkingTokens = 0
+            var configB = configA
+            configB.seed = seedB
+
+            let outputA = try await collectTokens(backend: backend, prompt: "Tell me a story:", config: configA)
+            backend.resetConversation()
+            let outputB = try await collectTokens(backend: backend, prompt: "Tell me a story:", config: configB)
+            backend.resetConversation()
+
+            if !outputA.isEmpty { observedNonEmpty = true }
+            lastA = outputA
+            lastB = outputB
+
+            if outputA != outputB {
+                // Divergence observed — seed influences output. Done.
+                return
+            }
+        }
+
+        // If we never produced any tokens at all, the model/prompt is the problem,
+        // not the seed — surface that distinctly rather than as a divergence failure.
+        XCTAssertTrue(observedNonEmpty,
+                      "No seed pair produced any tokens; cannot evaluate divergence")
+
+        // Every distinct seed pair collided over a long stream. With a working seed
+        // this is astronomically unlikely; the overwhelmingly likely cause is that
+        // the seed is being ignored (pinned to a constant such as 0).
+        XCTFail("All \(seedPairs.count) distinct seed pairs produced identical \(longStreamTokens)-token "
+              + "streams at temperature=1.0. This is the signature of a seed-pinned-to-constant "
+              + "regression — the seed is not reaching llama_sampler_init_dist. "
+              + "Last pair: A=\(lastA.debugDescription) B=\(lastB.debugDescription)")
     }
 
     // MARK: - Helpers
