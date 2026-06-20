@@ -254,6 +254,11 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     /// dereferences a pointer. Calling any C API on this backend after arming
     /// this seam will crash.
     ///
+    /// The sentinel is a bit-pattern integer cast, not a heap allocation, so
+    /// there is nothing to free. Not calling `llama_free` / `llama_free_model`
+    /// on it is intentional — `unloadModel()` would crash if it tried to free
+    /// address 1.
+    ///
     /// ONLY call this from test targets. Never call in production code.
     @_spi(Testing) public func armFakeLoadedStateForTesting() {
         withStateLock {
