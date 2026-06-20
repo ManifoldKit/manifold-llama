@@ -158,7 +158,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             supportsKVCachePersistence: true,
             supportsGrammarConstrainedSampling: supportsGrammar,
             supportsThinking: true,
-            supportsVision: BackendVisionCapability.llamaSupportsImageInput
+            supportsVision: BackendVisionCapability.llamaSupportsImageInput,
+            supportsParallelToolCalls: false
         )
     }
 
