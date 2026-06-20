@@ -93,7 +93,7 @@ final class LlamaEmbeddingBackendLoadUnloadTests: XCTestCase {
 
         let backend = LlamaEmbeddingBackend()
         try await backend.loadModel(from: modelURL)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
 
         XCTAssertTrue(backend.isModelLoaded)
         XCTAssertGreaterThan(backend.dimensions, 0,
@@ -114,6 +114,9 @@ final class LlamaEmbeddingBackendLoadUnloadTests: XCTestCase {
         // the underlying C cleanup is detached.
         XCTAssertFalse(backend.isModelLoaded)
         XCTAssertEqual(backend.dimensions, 0)
+        // Drain the detached C free before the test ends so it cannot race
+        // teardown (idempotent — storage.unload() is nil-safe).
+        await backend.unloadAndWait()
     }
 
     func test_loadModel_invalidPath_throwsEncodingFailed() async {
@@ -153,7 +156,7 @@ final class LlamaEmbeddingBackendEmbedTests: XCTestCase {
 
         let backend = LlamaEmbeddingBackend()
         try await backend.loadModel(from: modelURL)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
 
         let vectors = try await backend.embed(["hello, world"])
         XCTAssertEqual(vectors.count, 1)
@@ -168,7 +171,7 @@ final class LlamaEmbeddingBackendEmbedTests: XCTestCase {
 
         let backend = LlamaEmbeddingBackend()
         try await backend.loadModel(from: modelURL)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
 
         let inputs = ["a", "b", "the quick brown fox jumps over the lazy dog"]
         let vectors = try await backend.embed(inputs)
@@ -186,7 +189,7 @@ final class LlamaEmbeddingBackendEmbedTests: XCTestCase {
 
         let backend = LlamaEmbeddingBackend()
         try await backend.loadModel(from: modelURL)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
 
         let vectors = try await backend.embed([])
         XCTAssertTrue(vectors.isEmpty)
@@ -219,7 +222,7 @@ final class LlamaEmbeddingBackendDeterminismTests: XCTestCase {
 
         let backend = LlamaEmbeddingBackend()
         try await backend.loadModel(from: modelURL)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
 
         let input = "deterministic embedding test input"
         let first = try await backend.embed([input])
@@ -309,7 +312,7 @@ final class LlamaEmbeddingBackendDimensionMismatchTests: XCTestCase {
         XCTAssertGreaterThan(dimA, 0)
 
         try await backend.loadModel(from: alternate)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
         let dimB = backend.dimensions
         XCTAssertGreaterThan(dimB, 0)
 
@@ -350,7 +353,7 @@ final class LlamaEmbeddingBackendLiveFireTests: XCTestCase {
                                      "MANIFOLD_EMBEDDING_MODEL_PATH must point at a real GGUF")
         let backend = LlamaEmbeddingBackend()
         try await backend.loadModel(from: modelURL)
-        defer { backend.unloadModel() }
+        addTeardownBlock { await backend.unloadAndWait() }
 
         let input = "the quick brown fox jumps over the lazy dog"
         var first: [Float]? = nil

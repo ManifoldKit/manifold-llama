@@ -90,7 +90,21 @@ public final class LlamaEmbeddingBackend: EmbeddingBackend, @unchecked Sendable 
             dimensions = 0
             contextSize = 0
             poolingType = LLAMA_POOLING_TYPE_UNSPECIFIED
-            if let ctx { llama_free(ctx) }
+            if let ctx {
+                // Drain GPU work and clear KV/output buffers before llama_free.
+                // `llama_free` releases the Metal residency set; releasing it
+                // while encode() command buffers are still enqueued trips
+                //   GGML_ASSERT([rsets->data count] == 0)   (ggml-metal-device.m)
+                // and aborts the process with SIGABRT (#1394). `encode()`
+                // enqueues Metal ops, so the same synchronize→clear→synchronize
+                // dance LlamaBackend.unloadModel() performs is required here.
+                llama_synchronize(ctx)
+                if let mem = llama_get_memory(ctx) {
+                    llama_memory_clear(mem, false)
+                }
+                llama_synchronize(ctx)
+                llama_free(ctx)
+            }
             if let mdl { llama_model_free(mdl) }
         }
 
@@ -360,6 +374,21 @@ public final class LlamaEmbeddingBackend: EmbeddingBackend, @unchecked Sendable 
         Task.detached(priority: .utility) {
             await storage.unload()
         }
+    }
+
+    /// Awaited unload: drains the C teardown before returning, giving callers a
+    /// happens-before edge to `llama_free`. Unlike ``unloadModel()``'s
+    /// fire-and-forget `Task.detached`, the detached free cannot then race
+    /// process/test teardown — which intermittently tripped the Metal residency
+    /// assert at exit when an embedding model had been encoded. Mirrors
+    /// ``LlamaBackend/unloadAndWait()``. The actor's serial executor ensures any
+    /// in-flight `embed` completes before the unload runs.
+    public func unloadAndWait() async {
+        stateLock.withLock {
+            _isModelLoaded = false
+            _dimensions = 0
+        }
+        await storage.unload()
     }
 
     // MARK: - Loader

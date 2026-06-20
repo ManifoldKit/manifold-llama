@@ -33,6 +33,12 @@ env:
   # "qwen", which the conformance suite requires to light up the `qwen` family.
   MODEL_URL: 'https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf'
   MODEL_FILE: 'Qwen3-0.6B-Q8_0.gguf'
+  # Pinned tiny embedding GGUF (all-MiniLM-L6-v2, BERT, 384-dim, ~22 MB Q5_K_M).
+  # CPU/Metal-light — lets the LlamaEmbeddingBackend suites run for real instead
+  # of skipping. Name contains "minilm" so the locator's discovery heuristic also
+  # matches, though the run step points at it explicitly.
+  EMBED_MODEL_URL: 'https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-Q5_K_M.gguf'
+  EMBED_MODEL_FILE: 'all-MiniLM-L6-v2-Q5_K_M.gguf'
 
 jobs:
   model-tests:
@@ -83,8 +89,12 @@ jobs:
           curl -fL --retry 3 --retry-delay 5 \
             -o "$HOME/.cache/manifold-models/$MODEL_FILE" \
             "$MODEL_URL"
+          echo "Downloading $EMBED_MODEL_URL"
+          curl -fL --retry 3 --retry-delay 5 \
+            -o "$HOME/.cache/manifold-models/$EMBED_MODEL_FILE" \
+            "$EMBED_MODEL_URL"
           # Size sanity print (find avoids shellcheck SC2012 on ls).
-          find "$HOME/.cache/manifold-models" -name "$MODEL_FILE" -type f -exec du -h {} +
+          find "$HOME/.cache/manifold-models" -name '*.gguf' -type f -exec du -h {} +
 
       - name: Build
         run: swift build --build-tests
@@ -106,6 +116,15 @@ jobs:
             exit 1
           fi
           echo "Using model: $LLAMA_TEST_MODEL"
+
+          # Point the LlamaEmbeddingBackend suites at the pinned embedding GGUF.
+          # EmbeddingTestModelLocator honors MANIFOLD_EMBEDDING_MODEL_PATH directly.
+          export MANIFOLD_EMBEDDING_MODEL_PATH="$HOME/.cache/manifold-models/$EMBED_MODEL_FILE"
+          if [ ! -f "$MANIFOLD_EMBEDDING_MODEL_PATH" ]; then
+            echo "::error::Pinned embedding GGUF missing at $MANIFOLD_EMBEDDING_MODEL_PATH"
+            exit 1
+          fi
+          echo "Using embedding model: $MANIFOLD_EMBEDDING_MODEL_PATH"
 
           # Model-gated suites. NO --parallel: BackendContractChecks' claims
           # registry is process-global and races under explicit parallelism.
@@ -132,7 +151,7 @@ jobs:
           LlamaPrefillFootprintIntegrationTests \
           LlamaThinkingMarkerAutoDiscoveryTests \
           LlamaRerankerTests \
-          LlamaEmbeddingBackendTests \
+          LlamaEmbeddingBackend \
           LlamaBackendTests \
           LlamaBackendMemoryPressureTests \
           LlamaTokenizationTests \
