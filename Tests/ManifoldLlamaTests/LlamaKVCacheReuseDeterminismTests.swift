@@ -76,6 +76,13 @@ final class LlamaKVCacheReuseDeterminismTests: XCTestCase {
         try await warmBackend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
 
         _ = try await drainEvents(try warmBackend.generate(prompt: turn1Prompt, systemPrompt: nil, config: config))
+        // `isGenerating` is cleared in the generation task's `defer`, which runs
+        // *after* the stream's `continuation.finish()` — draining turn 1's stream
+        // does not guarantee the flag has flipped, so issuing turn 2 immediately
+        // can race the defer and throw `.alreadyGenerating` (flaky under CI
+        // timing). Await settlement between turns, the documented way to observe
+        // post-generation readiness without unloading the model.
+        await warmBackend.awaitGenerationSettled()
         let warmEvents = try await drainEvents(try warmBackend.generate(prompt: turn2Prompt, systemPrompt: nil, config: config))
         let warmReuse = reuseCounts(in: warmEvents)
         let warmText = visibleText(in: warmEvents)
