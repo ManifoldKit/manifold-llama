@@ -107,8 +107,15 @@ jobs:
           fi
           echo "Using model: $LLAMA_TEST_MODEL"
 
-          # Model-gated suites (issue #25). NO --parallel: BackendContractChecks'
-          # claims registry is process-global and races under explicit parallelism.
+          # Model-gated suites. NO --parallel: BackendContractChecks' claims
+          # registry is process-global and races under explicit parallelism.
+          #
+          # This list MUST include every suite whose bodies are gated on a real
+          # GGUF (findGGUFModel / isAppleSilicon / isPhysicalDevice). A gated
+          # suite left off this filter executes NOWHERE — it XCTSkips in ci.yml
+          # (no model) and is filtered out here — so its model-bound guarantee
+          # silently covers zero behavior, the exact failure #25 exists to
+          # prevent. When you add a model-gated suite, add it here too.
           SUITES="\
           LlamaGrammarConformanceTests \
           LlamaToolGrammarCompileTests \
@@ -116,7 +123,19 @@ jobs:
           LlamaTopKConsumptionTests \
           LlamaGrammarSamplerTests \
           LlamaArchitecturePreflightTests \
-          LlamaLocalBackendContractTests"
+          LlamaLocalBackendContractTests \
+          LlamaSeedDeterminismTests \
+          LlamaModernSamplerIntegrationTests \
+          LlamaKVPersistenceTests \
+          LlamaKVReuseTests \
+          LlamaKVCacheReuseDeterminismTests \
+          LlamaPrefillFootprintIntegrationTests \
+          LlamaThinkingMarkerAutoDiscoveryTests \
+          LlamaRerankerTests \
+          LlamaEmbeddingBackendTests \
+          LlamaBackendTests \
+          LlamaBackendMemoryPressureTests \
+          LlamaTokenizationTests"
 
           FILTER=""
           for s in $SUITES; do
