@@ -20,6 +20,13 @@ let package = Package(
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
         .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.56.0")),
+        // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
+        // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
+        // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable
+        // across the package boundary, so the model-free render assertions drive the
+        // real Jinja engine the same way the production renderer does (issue #45).
+        // Pinned to the same major swift-jinja ManifoldKit consumes.
+        .package(url: "https://github.com/huggingface/swift-jinja.git", from: "2.0.0"),
     ],
     targets: [
         // llama.cpp (GGUF) inference, generation driver, process-lifecycle
@@ -74,6 +81,9 @@ let package = Package(
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),
                 .product(name: "ManifoldBackendTestKit", package: "ManifoldKit"),
+                // Test-only: render the vendored gemma-4 chat_template fixture
+                // through the real Jinja engine (issue #45 render assertions).
+                .product(name: "Jinja", package: "swift-jinja"),
             ]
         ),
     ]
