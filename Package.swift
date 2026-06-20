@@ -14,6 +14,11 @@ let package = Package(
     ],
     products: [
         .library(name: "ManifoldLlama", targets: ["ManifoldLlama"]),
+        // Real-hardware tool-calling validation CLI: runs ManifoldKit's bundled
+        // tool-calling scenarios against a real llama.cpp / GGUF model. Reuses
+        // the published `ManifoldTools` library product from ManifoldKit — no
+        // changes to core are needed.
+        .executable(name: "manifold-tools-llama", targets: ["manifold-tools-llama"]),
     ],
     dependencies: [
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
@@ -70,6 +75,34 @@ let package = Package(
             name: "LlamaSwift",
             dependencies: ["llama-cpp"],
             path: "Sources/LlamaSwift"
+        ),
+        // Tool-calling scenario CLI. Links the published `ManifoldTools`
+        // library product (the bundled scenarios + reference tools travel with
+        // it) plus this package's `ManifoldLlama` for the real GGUF backend.
+        // The fixture tree the file/dir tools read is vendored as a bundled
+        // `.copy` resource — `ReadFileTool.defaultRoot()` resolves to a
+        // ManifoldKit test path that does not exist here.
+        .executableTarget(
+            name: "manifold-tools-llama",
+            dependencies: [
+                .product(name: "ManifoldTools", package: "ManifoldKit"),
+                .product(name: "ManifoldInference", package: "ManifoldKit"),
+                "ManifoldLlama",
+            ],
+            path: "Sources/manifold-tools-llama",
+            // README lives inside the target dir; exclude it so SwiftPM doesn't
+            // emit an "unhandled resource" warning for it.
+            exclude: ["README.md"],
+            resources: [
+                .copy("Fixtures/manifold-tools"),
+                // The bundled scenario JSONs are vendored here too:
+                // `ScenarioLoader.loadBuiltIn()` resolves a ManifoldKit
+                // source-relative path (`<cwd>/Sources/ManifoldTools/...`) that
+                // does not exist in this package, so we ship our own copy and
+                // drive the public `ScenarioLoader.load(from:)` against the
+                // bundled directory instead.
+                .copy("Scenarios"),
+            ]
         ),
         .testTarget(
             name: "ManifoldLlamaTests",
