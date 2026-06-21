@@ -16,6 +16,16 @@ import ManifoldInference
 ///    `call:name{key:<|"|>value<|"|>}` brace body.
 /// 2. **JSON fallback** — `<tool_call>` … `</tool_call>` with a
 ///    `{"name":…,"arguments":…}` body (Qwen-style fine-tunes).
+/// 3. **Mistral `[TOOL_CALLS]`** — a literal `[TOOL_CALLS]` open token followed
+///    by a bare JSON *array* of `{"name":…,"arguments":…}` objects with NO
+///    closing tag; the block ends at EOS/end-of-generation. Uses the #1982
+///    EOS-keyed close (`closesAtEnd: true`) + multi-call body parser
+///    (`parseBodyMulti`) so every element of the array becomes a `ToolCall`.
+///
+/// NOTE: end-to-end verification against a real Mistral model is deferred to
+/// #69 / ManifoldKit#1983 — the scenario harness does not render tools yet, so
+/// the parser never sees real Mistral output today. The Mistral coverage in
+/// `LlamaToolCallParserTests` is therefore synthetic/unit-level (#70).
 // @_spi(Testing): published only for backend test targets (companion-package split, #1749).
 @_spi(Testing) public enum LlamaToolMarkers {
 
@@ -31,8 +41,15 @@ import ManifoldInference
     /// Standard JSON close tag.
     static let jsonCloseTag = "</tool_call>"
 
+    /// Mistral v0.3 open token. The body is a bare JSON array emitted right after
+    /// this token with NO closing delimiter — the block ends at EOS.
+    static let mistralOpenTag = "[TOOL_CALLS]"
+
     /// The ordered marker set Llama hands to a `ToolCallTransform`.
-    /// Gemma-4 first so it wins ties against the JSON fallback.
+    /// Gemma-4 first so it wins ties against the JSON fallback. Mistral last —
+    /// its `[TOOL_CALLS]` open token cannot collide with the angle-bracket
+    /// dialects, so order is immaterial for correctness; it sits last for
+    /// readability.
     public static func markers() -> [ToolCallMarker] {
         [
             ToolCallMarker(open: gemma4OpenTag, close: gemma4EndTurn) { body in
@@ -40,6 +57,13 @@ import ManifoldInference
             },
             ToolCallMarker(open: jsonOpenTag, close: jsonCloseTag) { body in
                 parseCallBuffer(body)
+            },
+            // Mistral `[TOOL_CALLS]` — EOS-keyed close (#1982 `closesAtEnd`) and
+            // a multi-call array body (#1982 `parseBodyMulti`). The `close`
+            // string is irrelevant when `closesAtEnd` is true; the scanner
+            // drains the body to the stream end and `finalize()` parses it.
+            ToolCallMarker(open: mistralOpenTag, closesAtEnd: true) { body in
+                parseMistralArray(body)
             }
         ]
     }
@@ -200,6 +224,61 @@ import ManifoldInference
               let obj  = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let name = obj["name"] as? String, !name.isEmpty
         else { return nil }
+
+        let argsString: String
+        if let argsDict = obj["arguments"] as? [String: Any],
+           let serialized = try? JSONSerialization.data(withJSONObject: argsDict),
+           let str = String(data: serialized, encoding: .utf8) {
+            argsString = str
+        } else if let rawStr = obj["arguments"] as? String {
+            argsString = rawStr
+        } else {
+            argsString = "{}"
+        }
+
+        let id = "llama-\(name)-\(UUID().uuidString.prefix(8))"
+        return ToolCall(id: id, toolName: name, arguments: argsString)
+    }
+
+    // MARK: - Mistral `[TOOL_CALLS]` body parsing
+
+    /// Parses Mistral's `[TOOL_CALLS]` body: a bare JSON **array** of call
+    /// objects, e.g. `[{"name":"calc","arguments":{"a":1}}, {"name":"now"}]`.
+    ///
+    /// Returns ALL calls in the array (the #1982 multi-call contract). Each
+    /// element is the same `{name|fn, arguments}` shape the JSON-fallback dialect
+    /// uses; `parseJSONElement` is tolerant of the `fn` alias and of `arguments`
+    /// being either a nested object or a pre-serialized string. Malformed
+    /// elements are skipped rather than aborting the whole array — a single bad
+    /// entry should not drop its well-formed siblings. An entirely unparseable
+    /// body yields `[]`, which the transform surfaces as `.toolCallParseFailed`.
+    private static func parseMistralArray(_ raw: String) -> [ToolCall] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data)
+        else { return [] }
+
+        // Tolerant of both the array form (the spec'd Mistral shape) and a lone
+        // object (some fine-tunes emit a single call without the array wrapper).
+        let elements: [[String: Any]]
+        if let array = parsed as? [[String: Any]] {
+            elements = array
+        } else if let object = parsed as? [String: Any] {
+            elements = [object]
+        } else {
+            return []
+        }
+
+        return elements.compactMap(parseJSONElement)
+    }
+
+    /// Maps one Mistral array element (`{name|fn, arguments}`) to a `ToolCall`.
+    /// Shares the JSON-fallback argument-coercion rules; accepts `fn` as an alias
+    /// for `name`.
+    private static func parseJSONElement(_ obj: [String: Any]) -> ToolCall? {
+        let name = (obj["name"] as? String) ?? (obj["fn"] as? String)
+        guard let name, !name.isEmpty else { return nil }
 
         let argsString: String
         if let argsDict = obj["arguments"] as? [String: Any],

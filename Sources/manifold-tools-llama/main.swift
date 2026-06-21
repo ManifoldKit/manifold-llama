@@ -261,7 +261,22 @@ func runCLI() async -> Int32 {
         let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot)
         print("  advertising \(registry.definitions.count) tool(s): \(scenario.requiredTools.joined(separator: ", "))")
         do {
-            let runner = ScenarioRunner(backend: backend, registry: registry, logger: logger)
+            // Drive scenarios through the production InferenceService →
+            // GenerationQueue → dispatch-loop path (ManifoldKit 0.57
+            // ScenarioRunner takes a `service`, not a raw backend + registry).
+            // That path is the only one that renders the chat template and
+            // injects this scenario's tool definitions the model needs to see
+            // (#1983/#1985) — driving the backend directly dispatches zero
+            // tools. The backend is loaded once above and reused; the service is
+            // a thin per-scenario wrapper so each run advertises only its own
+            // scoped registry (#66).
+            let service = InferenceService(
+                backend: backend,
+                name: "llama",
+                modelName: modelURL.lastPathComponent,
+                toolRegistry: registry
+            )
+            let runner = ScenarioRunner(service: service, logger: logger)
             let outcome = try await runner.run(scenario)
             for assertion in outcome.assertions {
                 let marker = assertion.passed ? "  PASS" : "  FAIL"
