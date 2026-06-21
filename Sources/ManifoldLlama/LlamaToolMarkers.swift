@@ -21,6 +21,15 @@ import ManifoldInference
 ///    closing tag; the block ends at EOS/end-of-generation. Uses the #1982
 ///    EOS-keyed close (`closesAtEnd: true`) + multi-call body parser
 ///    (`parseBodyMulti`) so every element of the array becomes a `ToolCall`.
+/// 4. **Llama 3.1 native bare-JSON** — a top-level JSON object the model emits
+///    DIRECTLY, with NO open/close marker:
+///    `{"name": "calc", "parameters": {"a": 7823, "b": 41, "op": "*"}}`. There
+///    is no delimiter at all, so the only reliable anchor is the literal
+///    `{"name"` key prefix the native `llama3` template emits (compact JSON, no
+///    space after `{`). Like Mistral it has no closing tag — the object ends at
+///    EOS — so it also uses the #1982 `closesAtEnd` path; the body parser
+///    re-prepends the stripped open token and JSON-decodes the object, keyed on
+///    `parameters` (with `arguments` honored as the alias) (#76).
 ///
 /// NOTE: end-to-end verification against a real Mistral model is deferred to
 /// #69 / ManifoldKit#1983 — the scenario harness does not render tools yet, so
@@ -45,6 +54,17 @@ import ManifoldInference
     /// this token with NO closing delimiter — the block ends at EOS.
     static let mistralOpenTag = "[TOOL_CALLS]"
 
+    /// Llama 3.1 native bare-JSON "open token". The `llama3` tool template emits
+    /// a top-level JSON object with NO marker at all — the call IS the object:
+    /// `{"name": "calc", "parameters": {...}}`. The most specific reliable anchor
+    /// is the literal `{"name"` key prefix (compact `tojson` output — no space
+    /// after the brace). Anything looser (a bare `{`) would mis-fire on ordinary
+    /// JSON the model might emit in prose; `{"name"` is rare outside an actual
+    /// tool call, and the body parser still JSON-validates and rejects non-calls.
+    /// The token is stripped from the buffered body by the scanner, so the body
+    /// parser re-prepends it before decoding (see `parseLlama3BareJSON`).
+    static let llama3OpenTag = #"{"name""#
+
     /// The ordered marker set Llama hands to a `ToolCallTransform`.
     /// Gemma-4 first so it wins ties against the JSON fallback. Mistral last —
     /// its `[TOOL_CALLS]` open token cannot collide with the angle-bracket
@@ -64,6 +84,15 @@ import ManifoldInference
             // drains the body to the stream end and `finalize()` parses it.
             ToolCallMarker(open: mistralOpenTag, closesAtEnd: true) { body in
                 parseMistralArray(body)
+            },
+            // Llama 3.1 native bare-JSON — no marker; the `{"name"` key prefix is
+            // the open anchor and the object ends at EOS (`closesAtEnd: true`,
+            // #1982). Placed LAST: its open token starts with `{`, so it cannot
+            // collide with the angle-bracket dialects, and in a Mistral
+            // `[TOOL_CALLS][{"name"…}]` stream the `[TOOL_CALLS]` open is earlier
+            // in the buffer, so earliest-open-wins selects Mistral first (#76).
+            ToolCallMarker(open: llama3OpenTag, closesAtEnd: true) { body in
+                parseLlama3BareJSON(body)
             }
         ]
     }
@@ -217,6 +246,8 @@ import ManifoldInference
     // MARK: - JSON fallback body parsing
 
     /// Parses JSON fallback format: `{"name":"...","arguments":{...}}`.
+    /// `arguments` and the llama3.1 `parameters` alias are both honored via
+    /// `coerceArguments` (#76); the llama3.1 bare-JSON dialect reuses this decoder.
     private static func parseJSONCall(_ raw: String) -> ToolCall? {
         let json = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !json.isEmpty,
@@ -225,19 +256,46 @@ import ManifoldInference
               let name = obj["name"] as? String, !name.isEmpty
         else { return nil }
 
-        let argsString: String
-        if let argsDict = obj["arguments"] as? [String: Any],
+        let id = "llama-\(name)-\(UUID().uuidString.prefix(8))"
+        return ToolCall(id: id, toolName: name, arguments: coerceArguments(from: obj))
+    }
+
+    /// Coerces a call object's arguments field into a serialized JSON string.
+    ///
+    /// Accepts both `arguments` (the JSON / Mistral / Qwen key) and `parameters`
+    /// (the llama3.1 native key) — `arguments` wins when BOTH are present so the
+    /// historical key keeps priority and no existing call changes shape (#76).
+    /// The value may be a nested object (serialized canonically) or an already
+    /// serialized string (preserved verbatim); anything else falls back to `{}`.
+    private static func coerceArguments(from obj: [String: Any]) -> String {
+        let value = obj["arguments"] ?? obj["parameters"]
+        if let argsDict = value as? [String: Any],
            let serialized = try? JSONSerialization.data(withJSONObject: argsDict),
            let str = String(data: serialized, encoding: .utf8) {
-            argsString = str
-        } else if let rawStr = obj["arguments"] as? String {
-            argsString = rawStr
-        } else {
-            argsString = "{}"
+            return str
+        } else if let rawStr = value as? String {
+            return rawStr
         }
+        return "{}"
+    }
 
-        let id = "llama-\(name)-\(UUID().uuidString.prefix(8))"
-        return ToolCall(id: id, toolName: name, arguments: argsString)
+    // MARK: - Llama 3.1 native bare-JSON body parsing
+
+    /// Parses the llama3.1 native dialect: a bare top-level JSON object,
+    /// `{"name": "calc", "parameters": {…}}`, with NO open/close marker.
+    ///
+    /// The scanner matches `{"name"` as the open token and STRIPS it from the
+    /// buffered body, so this re-prepends it before decoding. Returns a one-element
+    /// array on success (the marker uses `parseBodyMulti` for the `closesAtEnd`
+    /// init); a non-object, name-less, or otherwise malformed body yields `[]`,
+    /// which the transform surfaces as `.toolCallParseFailed` — crucially, plain
+    /// prose that merely contained the literal `{"name"` decodes to nothing and is
+    /// dropped rather than mis-dispatched.
+    private static func parseLlama3BareJSON(_ body: String) -> [ToolCall] {
+        // The open token `{"name"` was consumed by the scanner; rebuild the object.
+        let reconstructed = llama3OpenTag + body
+        guard let call = parseJSONCall(reconstructed) else { return [] }
+        return [call]
     }
 
     // MARK: - Mistral `[TOOL_CALLS]` body parsing
@@ -280,18 +338,7 @@ import ManifoldInference
         let name = (obj["name"] as? String) ?? (obj["fn"] as? String)
         guard let name, !name.isEmpty else { return nil }
 
-        let argsString: String
-        if let argsDict = obj["arguments"] as? [String: Any],
-           let serialized = try? JSONSerialization.data(withJSONObject: argsDict),
-           let str = String(data: serialized, encoding: .utf8) {
-            argsString = str
-        } else if let rawStr = obj["arguments"] as? String {
-            argsString = rawStr
-        } else {
-            argsString = "{}"
-        }
-
         let id = "llama-\(name)-\(UUID().uuidString.prefix(8))"
-        return ToolCall(id: id, toolName: name, arguments: argsString)
+        return ToolCall(id: id, toolName: name, arguments: coerceArguments(from: obj))
     }
 }
