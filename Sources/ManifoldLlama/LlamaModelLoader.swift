@@ -146,6 +146,30 @@ import ManifoldInference
         ))
     }
 
+    /// Maps the caller's `flashAttention` bool and the compile-time
+    /// `isSimulator` flag to the correct `llama_flash_attn_type` enum value.
+    ///
+    /// The mapping is strict binary (issue #86):
+    /// - `false` → `LLAMA_FLASH_ATTN_TYPE_DISABLED` — never AUTO.
+    ///   AUTO (-1) enables FA on capable hardware, which contradicts an explicit
+    ///   opt-out. Leaving `flash_attn_type` at its `llama_context_default_params()`
+    ///   default (AUTO) is therefore incorrect when the caller passed `false`.
+    /// - Simulator always → `LLAMA_FLASH_ATTN_TYPE_DISABLED` regardless of the
+    ///   requested value: simulator Metal does not reliably support FA kernels.
+    ///
+    /// Sabotage check: if the `false` arm returned AUTO, the
+    /// `(requested: false, isSimulator: false) → DISABLED` assertion in
+    /// `LlamaModelLoaderFlashAttentionTests` fails immediately.
+    @_spi(Testing) public static func resolvedFlashAttnType(
+        flashAttentionRequested: Bool,
+        isSimulator: Bool
+    ) -> llama_flash_attn_type {
+        guard !isSimulator else { return LLAMA_FLASH_ATTN_TYPE_DISABLED }
+        return flashAttentionRequested
+            ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+            : LLAMA_FLASH_ATTN_TYPE_DISABLED
+    }
+
     /// Synchronous wrapper that holds `loadSerializationLock` while calling the
     /// C-level model init. Called from a detached task so the lock/unlock stays
     /// in a synchronous context (required by Swift 6.3 strict concurrency).
@@ -252,12 +276,18 @@ import ManifoldInference
             ctxParams.type_v = GGML_TYPE_Q4_0
         }
 
-        // Flash attention. Simulator path stays disabled regardless of the
-        // requested value: simulator Metal does not reliably support FA kernels.
-        #if !targetEnvironment(simulator)
-        if loadOptions.flashAttention {
-            ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
-        }
+        // Flash attention — always set explicitly so `false` means DISABLED,
+        // not AUTO. See `resolvedFlashAttnType` for the full mapping rationale.
+        #if targetEnvironment(simulator)
+        ctxParams.flash_attn_type = Self.resolvedFlashAttnType(
+            flashAttentionRequested: loadOptions.flashAttention,
+            isSimulator: true
+        )
+        #else
+        ctxParams.flash_attn_type = Self.resolvedFlashAttnType(
+            flashAttentionRequested: loadOptions.flashAttention,
+            isSimulator: false
+        )
         #endif
 
         if let prefillBatch = loadOptions.prefillBatchSize {
@@ -266,7 +296,9 @@ import ManifoldInference
 
         let prefillBatchDescription = loadOptions.prefillBatchSize.map(String.init) ?? "default"
         let kvDescription = loadOptions.kvCacheQuantization.rawValue
-        let faDescription = loadOptions.flashAttention ? "on" : "off"
+        // Derive the log description from the resolved type so it reflects what
+        // was actually configured — not just the raw requested bool (issue #86).
+        let faDescription = ctxParams.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED ? "on" : "off"
         Self.logger.info("""
             LlamaBackend: initializing context at \(effectiveContextSize, privacy: .public) tokens (plan-authoritative); \
             kv=\(kvDescription, privacy: .public), fa=\(faDescription, privacy: .public), \
