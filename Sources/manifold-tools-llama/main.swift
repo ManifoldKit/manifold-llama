@@ -107,41 +107,35 @@ struct CLI {
     }
 }
 
-/// Builds a `ToolRegistry` containing only the tools a scenario actually
-/// requires.
+/// Holds the `LlamaBackend` the registered factory constructs so the harness can
+/// `unloadAndWait()` it deterministically before `exit()` — the coordinator's own
+/// `unloadModel()` is fire-and-forget and would race the process exit.
+@MainActor
+final class BackendBox {
+    var backend: LlamaBackend?
+}
+
+/// Builds a `ToolRegistry` containing every reference tool.
 ///
-/// The harness previously advertised all six reference tools to the model for
-/// every scenario. Small GGUF models degrade sharply past ~5 advertised tools,
-/// so a 6-tool prompt confounds tool-dispatch results: a miss could be the
-/// model, or just tool overload. Scoping each request to `scenario.requiredTools`
-/// removes that confound. An empty `requiredTools` (e.g. the tool-free
-/// `structured-json-extraction` scenario) correctly yields an empty registry.
+/// `ScenarioRunner` filters the registry to each scenario's `requiredTools`
+/// before advertising them to the model (so a scenario is still only ever shown
+/// the tools it needs — the per-scenario scoping of #66 is preserved by the
+/// runner, not by rebuilding a registry per scenario). A single all-tools
+/// registry therefore lets the harness load the model once and reuse one
+/// service across every scenario.
 ///
 /// The file/dir tools read against the resolved (bundled or overridden) fixture
 /// root rather than ManifoldTools' default, which points at a non-existent
 /// ManifoldKit test path here.
 @MainActor
-func makeRegistry(for scenario: Scenario, fixturesRoot: URL) -> ToolRegistry {
+func makeFullRegistry(fixturesRoot: URL) -> ToolRegistry {
     let registry = ToolRegistry()
-    for name in scenario.requiredTools {
-        switch name {
-        case "now":
-            registry.register(NowTool.makeExecutor())
-        case "calc":
-            registry.register(CalcTool.makeExecutor())
-        case "read_file":
-            registry.register(ReadFileTool.makeExecutor(root: fixturesRoot))
-        case "list_dir":
-            registry.register(ListDirTool.makeExecutor(root: fixturesRoot))
-        case "sample_repo_search":
-            registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
-        case "http_get_fixture":
-            registry.register(HttpGetFixtureTool.makeExecutor())
-        default:
-            FileHandle.standardError.write(Data(
-                "manifold-tools-llama: scenario '\(scenario.id)' lists unknown required tool '\(name)' — skipping\n".utf8))
-        }
-    }
+    registry.register(NowTool.makeExecutor())
+    registry.register(CalcTool.makeExecutor())
+    registry.register(ReadFileTool.makeExecutor(root: fixturesRoot))
+    registry.register(ListDirTool.makeExecutor(root: fixturesRoot))
+    registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
+    registry.register(HttpGetFixtureTool.makeExecutor())
     return registry
 }
 
@@ -239,12 +233,64 @@ func runCLI() async -> Int32 {
     }
     print("Logging to \(logger.destination.path)")
 
-    // Load the GGUF once and reuse the backend across every scenario — model
-    // load dominates wall-clock and llama.cpp uses a process-global backend.
-    let backend = LlamaBackend()
+    // Build one InferenceService, register ALL reference tools once, and load
+    // the GGUF through the *production* load path so the model's native chat
+    // template is rendered (#69).
+    //
+    // Why the production load path (not the `init(backend:)` seam): the renderer
+    // (`PromptRenderer`/`JinjaPromptRenderer`) only injects the native tool block
+    // when `GenerationQueue` is given the model's embedded `tokenizer.chat_template`
+    // (its `selectedChatTemplateRaw`). That raw template is set on
+    // `ModelLifecycleCoordinator` *only* from `ModelInfo.chatTemplateRaw` inside
+    // `InferenceService.loadModel(from:plan:)`. The `init(backend:)` seam the
+    // harness previously used never sets it, so the queue fell back to the
+    // ChatML enum — which renders tools only for `.gemma4`. The result was 0 tool
+    // dispatches and `<|im_start|>/<|im_end|>` markers on non-ChatML models
+    // (llama3.1 / Mistral). Loading via `loadModel(from: ModelInfo, plan:)`
+    // reads the GGUF metadata (`ModelInfo.load(ggufURL:)`) and threads the
+    // embedded template + detected enum into the renderer; native stop tokens
+    // already come from the loaded model via llama.cpp, not the template enum.
+    //
+    // Per-scenario tool scoping is handled by `ScenarioRunner` itself (it filters
+    // the service's registry by `scenario.requiredTools`), so a single
+    // all-tools registry + a single service is sufficient — no per-scenario
+    // service churn (#66 scoping is preserved by the runner's own filter).
+    let registry = makeFullRegistry(fixturesRoot: fixturesRoot)
+    let service = InferenceService(toolRegistry: registry)
+    // Register the GGUF backend factory so `loadModel(from:plan:)` constructs and
+    // installs the backend through the coordinator (the path that captures the
+    // embedded chat template). We capture the constructed instance so we can
+    // `unloadAndWait()` it deterministically before `exit()` — the coordinator's
+    // own `unloadModel()` is fire-and-forget and would race the process exit
+    // (the Metal residency-set SIGABRT the harness teardown guards against).
+    let backendBox = BackendBox()
+    service.registerBackendFactory { modelType in
+        guard modelType == .gguf else { return nil }
+        let backend = LlamaBackend()
+        backendBox.backend = backend
+        return backend
+    }
+    service.declareSupport(for: .gguf)
+
+    let modelInfo: ModelInfo
+    do {
+        modelInfo = try ModelInfo.load(ggufURL: modelURL)
+    } catch {
+        FileHandle.standardError.write(Data("failed to read GGUF metadata: \(error)\n".utf8))
+        return 1
+    }
+    if modelInfo.chatTemplateRaw == nil {
+        // Not fatal — the renderer falls back to the detected enum — but flag it,
+        // since a templateless GGUF cannot render the native tool block.
+        FileHandle.standardError.write(Data(
+            "manifold-tools-llama: WARNING — \(modelURL.lastPathComponent) has no embedded tokenizer.chat_template; tool rendering falls back to the \(modelInfo.detectedPromptTemplate.map(String.init(describing:)) ?? "ChatML") enum\n".utf8))
+    }
+
     do {
         print("Loading model: \(modelURL.path)")
-        try await backend.loadModel(from: modelURL, plan: .systemManaged(requestedContextSize: 4096))
+        print("  embedded chat_template: \(modelInfo.chatTemplateRaw != nil ? "present" : "ABSENT")"
+            + ", detected template: \(modelInfo.detectedPromptTemplate.map(String.init(describing:)) ?? "nil")")
+        try await service.loadModel(from: modelInfo, plan: .systemManaged(requestedContextSize: 4096))
     } catch {
         FileHandle.standardError.write(Data("failed to load model: \(error)\n".utf8))
         return 1
@@ -256,26 +302,13 @@ func runCLI() async -> Int32 {
     var allPassed = true
     for scenario in filtered {
         print("\n── \(scenario.id) (\(scenario.description)) ──")
-        // Build a fresh registry scoped to this scenario's required tools so the
-        // model is only ever advertised what the scenario actually needs.
-        let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot)
-        print("  advertising \(registry.definitions.count) tool(s): \(scenario.requiredTools.joined(separator: ", "))")
+        print("  advertising tool(s): \(scenario.requiredTools.joined(separator: ", "))")
         do {
             // Drive scenarios through the production InferenceService →
-            // GenerationQueue → dispatch-loop path (ManifoldKit 0.57
-            // ScenarioRunner takes a `service`, not a raw backend + registry).
-            // That path is the only one that renders the chat template and
-            // injects this scenario's tool definitions the model needs to see
-            // (#1983/#1985) — driving the backend directly dispatches zero
-            // tools. The backend is loaded once above and reused; the service is
-            // a thin per-scenario wrapper so each run advertises only its own
-            // scoped registry (#66).
-            let service = InferenceService(
-                backend: backend,
-                name: "llama",
-                modelName: modelURL.lastPathComponent,
-                toolRegistry: registry
-            )
+            // GenerationQueue → dispatch-loop path. That path renders the chat
+            // template and injects each scenario's tool definitions the model
+            // needs to see (#1983/#1985); the runner filters the registry by
+            // `scenario.requiredTools` so each run advertises only its own tools.
             let runner = ScenarioRunner(service: service, logger: logger)
             let outcome = try await runner.run(scenario)
             for assertion in outcome.assertions {
@@ -292,7 +325,11 @@ func runCLI() async -> Int32 {
         }
     }
 
-    await backend.unloadAndWait()
+    if let backend = backendBox.backend {
+        await backend.unloadAndWait()
+    } else {
+        service.unloadModel()
+    }
 
     if allPassed {
         print("\nAll scenarios passed.")
