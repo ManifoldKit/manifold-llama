@@ -140,10 +140,26 @@ final class LlamaToolGrammarCompileTests: XCTestCase {
     /// while the flag clears only after `run` returns). Mirrors `LlamaKVReuseTests`.
     private func drainTokens(_ stream: GenerationStream, _ backend: LlamaBackend) async throws -> String {
         var text = ""
+        var capturedEnvelope: String?
         for try await event in stream.events {
             if case .token(let chunk) = event { text += chunk }
+            // A grammar-constrained tool call emits the bare envelope
+            // `{"name":…,"arguments":…}` directly. Since #76 the llama3.1
+            // bare-JSON dialect recognizes that exact shape, so the streaming
+            // `ToolCallTransform` now CAPTURES it as a `.toolCall` instead of
+            // letting it flow through as `.token` text. Reconstruct the envelope
+            // from the captured call so this compile-validation suite still sees
+            // the `{name, arguments}` object it asserts on — the grammar-compile
+            // signal (valid → produces an envelope; invalid → throws) is
+            // unchanged, only the event carrying the envelope moved.
+            if case .toolCall(let call) = event {
+                capturedEnvelope = #"{"name":"\#(call.toolName)","arguments":\#(call.arguments)}"#
+            }
         }
         try await waitForGeneratingFalse(backend)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let capturedEnvelope {
+            return capturedEnvelope
+        }
         return text
     }
 

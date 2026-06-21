@@ -359,6 +359,128 @@ final class LlamaToolCallParserTests: XCTestCase {
         XCTAssertEqual(toolCalls.first?.toolName, "go")
     }
 
+    // MARK: - Llama 3.1 native bare-JSON format (#76)
+    //
+    // llama3.1's native `llama3` tool template emits a bare top-level JSON
+    // object with NO open/close marker, keyed on `parameters`:
+    //   {"name": "calc", "parameters": {"a": 7823, "b": 41, "op": "*"}}
+    // The block ends at EOS (the #1982 `closesAtEnd` path). These tests are
+    // model-free; real-model dispatch is verified via manifold-tools-llama.
+
+    func test_llama3BareJSON_singleCall_extractsNameAndParameters() throws {
+        var parser = LlamaToolCallParser()
+        var all = parser.process(#"{"name": "calc", "parameters": {"a": 7823, "b": 41, "op": "*"}}"#)
+        all += parser.finalize()
+
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(toolCalls.count, 1)
+        let tc = try XCTUnwrap(toolCalls.first)
+        XCTAssertEqual(tc.toolName, "calc")
+
+        let args = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: args) as? [String: Any])
+        // `parameters` must be mapped onto `arguments` — not dropped.
+        XCTAssertEqual(decoded["a"] as? Int, 7823)
+        XCTAssertEqual(decoded["b"] as? Int, 41)
+        XCTAssertEqual(decoded["op"] as? String, "*")
+        XCTAssertNotEqual(tc.arguments, "{}",
+                          "parameters payload must populate arguments, not fall back to empty")
+    }
+
+    func test_llama3BareJSON_noCallUntilFinalize() {
+        // No marker and no close tag: the object is buffered until EOS, so
+        // process() alone must not emit it (the `closesAtEnd` contract).
+        var parser = LlamaToolCallParser()
+        let mid = parser.process(#"{"name": "now", "parameters": {}}"#)
+        let midCalls = mid.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertTrue(midCalls.isEmpty,
+                      "Bare-JSON call has no close tag — it must not surface before finalize()")
+
+        let finalCalls = parser.finalize().compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(finalCalls.count, 1)
+        XCTAssertEqual(finalCalls.first?.toolName, "now")
+    }
+
+    func test_llama3BareJSON_argumentsKeyAlsoAccepted() throws {
+        // The bare-JSON dialect must also accept the historical `arguments` key,
+        // and when BOTH are present `arguments` wins (no silent shape change).
+        var parser = LlamaToolCallParser()
+        var all = parser.process(#"{"name": "calc", "arguments": {"a": 1}, "parameters": {"a": 999}}"#)
+        all += parser.finalize()
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(toolCalls.count, 1)
+        let tc = try XCTUnwrap(toolCalls.first)
+        let args = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: args) as? [String: Any])
+        XCTAssertEqual(decoded["a"] as? Int, 1,
+                       "arguments must take priority over parameters when both are present")
+    }
+
+    func test_parametersAlias_worksForMarkerWrappedJSON() throws {
+        // The `parameters` alias is not bare-JSON-only — a marker-wrapped JSON
+        // fallback call keyed on `parameters` must populate arguments too.
+        var parser = LlamaToolCallParser()
+        var all = parser.process(#"<tool_call>{"name":"search","parameters":{"q":"swift"}}</tool_call>"#)
+        all += parser.finalize()
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(toolCalls.count, 1)
+        let tc = try XCTUnwrap(toolCalls.first)
+        XCTAssertEqual(tc.toolName, "search")
+        let args = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: args) as? [String: Any])
+        XCTAssertEqual(decoded["q"] as? String, "swift")
+    }
+
+    func test_llama3BareJSON_plainProse_withoutNameKey_isUntouched() {
+        // Critical false-positive guard: ordinary prose with no `{"name"` anchor
+        // must pass straight through as visible text — never suppressed as a body.
+        var parser = LlamaToolCallParser()
+        var all = parser.process("The result is 320743. Let me know if you need anything else.")
+        all += parser.finalize()
+
+        let tokens = all.compactMap { event -> String? in
+            if case .token(let t) = event { return t }
+            return nil
+        }
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertTrue(toolCalls.isEmpty)
+        XCTAssertEqual(tokens.joined(), "The result is 320743. Let me know if you need anything else.")
+    }
+
+    func test_llama3BareJSON_nameKeyButNotAToolCall_yieldsNoCall() {
+        // A body that begins with the `{"name"` anchor but is NOT a valid call
+        // (e.g. a missing-name shape after decode, or non-object JSON) must be
+        // rejected by the decoder — no spurious dispatch.
+        var parser = LlamaToolCallParser()
+        // `{"name": 42, ...}` — name is not a string, so parseJSONCall rejects it.
+        var all = parser.process(#"{"name": 42, "parameters": {}}"#)
+        all += parser.finalize()
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertTrue(toolCalls.isEmpty,
+                      "A non-string name must not produce a tool call even with the {\"name\" anchor")
+    }
+
     // MARK: - Tool call ID uniqueness
 
     func test_multipleToolCalls_haveDistinctIDs() {
