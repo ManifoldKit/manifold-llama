@@ -778,3 +778,43 @@ The opacity of binary diffs is mitigated by two practices:
 7. Run `swift test` locally on Apple Silicon before opening the PR (set
    `MANIFOLD_DISCOVER_LOCAL_MODELS=1` or `LLAMA_TEST_MODEL=<path>` to exercise
    the real-model suites).
+
+### Slimming the xcframework
+
+The upstream `llama-b<NNNN>-xcframework.zip` is heavy: ~208 MB zipped and
+~627 MB extracted (measured for b9744). It ships **seven** platform slices
+(ios, ios-simulator, macos, tvos, tvos-simulator, xros, xros-simulator) and
+bundles a fat **dSYM** in every slice. But `Package.swift` only declares
+`.iOS(.v18)` and `.macOS(.v15)`, so the tvOS and visionOS slices are
+unreachable dead weight, and dSYMs are never needed to build, link, or run a
+`.binaryTarget`. Pinning the upstream asset directly forces every consumer
+(and CI cache) to pull ~208 MB of which the vast majority is unused.
+
+`scripts/repackage-xcframework.sh` rebuilds a trimmed xcframework keeping only
+the three usable slices — `macos-arm64_x86_64`, `ios-arm64`,
+`ios-arm64_x86_64-simulator` — with dSYMs dropped (it runs
+`xcodebuild -create-xcframework -framework <slice>/llama.framework …` and
+deliberately omits `-debug-symbols`). Measured result for b9744:
+**~627 MB → ~24 MB extracted, ~208 MB → ~8.4 MB zipped.**
+
+To adopt it:
+
+1. Run `scripts/repackage-xcframework.sh` (defaults to `b9744`; override with
+   `BUILD=b<NNNN>` or a positional arg). It downloads the upstream asset
+   (skipping re-download if already present), builds the slim
+   `llama.xcframework`, zips it to `llama-b<NNNN>-slim.xcframework.zip`, and
+   prints its `swift package compute-checksum` value plus the exact
+   `url`/`checksum` lines to paste into `Package.swift`.
+2. **Host the slim zip as a manifold-llama GitHub release asset** (it is *not*
+   on ggml-org's releases — we produce it):
+   ```
+   gh release create xcframework-b<NNNN>-slim \
+     tmp/repackage-xcframework/llama-b<NNNN>-slim.xcframework.zip \
+     --title "llama.cpp b<NNNN> (slim xcframework)" --notes "…"
+   ```
+3. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
+   asset and its `checksum` to the value the script printed (the package
+   checksum of the slim zip, *not* the upstream zip), then run
+   `swift package resolve`.
+4. The slim framework still carries the same `Versions/A/Headers/llama.h`, so
+   the header-copy / contract-review steps above are unchanged.
