@@ -1,6 +1,6 @@
 import XCTest
 import ManifoldInference
-@testable import ManifoldLlama
+@_spi(Testing) @testable import ManifoldLlama
 
 /// Model-free unit tests for the harness's templateless-model mitigation
 /// (`LlamaToolSystemPromptFallback`): the "does the template render tools?"
@@ -166,5 +166,58 @@ final class LlamaToolSystemPromptFallbackTests: XCTestCase {
         let a = LlamaToolSystemPromptFallback.toolInstruction(for: [calcDefinition(), readFileDefinition()])
         let b = LlamaToolSystemPromptFallback.toolInstruction(for: [readFileDefinition(), calcDefinition()])
         XCTAssertEqual(a, b, "Instruction must be stable regardless of input tool ordering.")
+    }
+
+    /// Multiple advertised tools must ALL be listed with their own param lines —
+    /// a single-tool-only instruction would let the model pick the wrong tool or
+    /// emit args for a tool it wasn't shown.
+    func test_instruction_listsEveryTool() {
+        let text = LlamaToolSystemPromptFallback.toolInstruction(for: [calcDefinition(), readFileDefinition()])
+        XCTAssertTrue(text.contains("- calc:"), "calc must be listed.")
+        XCTAssertTrue(text.contains("- read_file:"), "read_file must be listed.")
+        XCTAssertTrue(text.contains(#""a": <number>"#), "calc params must appear.")
+        XCTAssertTrue(text.contains(#""path": <string>"#), "read_file params must appear.")
+    }
+
+    /// The injected dialect must key arguments on `arguments` (the key
+    /// `parseJSONCall` reads), never on the `parameters` alias — instructing the
+    /// alias would still parse but drifts from the canonical shape the harness
+    /// claims to teach.
+    func test_instruction_usesArgumentsKeyNotParametersAlias() {
+        let text = LlamaToolSystemPromptFallback.toolInstruction(for: [calcDefinition()])
+        XCTAssertTrue(text.contains(#""arguments":"#), "Canonical shape uses the `arguments` key.")
+        XCTAssertFalse(text.contains(#""parameters":"#),
+                       "Must not instruct the `parameters` alias as the wrapper key.")
+    }
+
+    /// The canonical example object must start with the literal `{"name"` prefix
+    /// (no space after the brace) — that exact prefix is `LlamaToolMarkers`'
+    /// `llama3OpenTag` bare-JSON anchor, so a space here would mean the parser's
+    /// markerless dialect never fires on a model that copied the example verbatim.
+    func test_instruction_exampleMatchesBareJSONAnchor() {
+        let text = LlamaToolSystemPromptFallback.toolInstruction(for: [calcDefinition()])
+        XCTAssertTrue(text.contains(#"{"name""#),
+                      "Example must use the no-space `{\"name\"` prefix the bare-JSON parser anchors on.")
+    }
+
+    // MARK: - Detector: enum fallback false-negative guard
+
+    /// A non-empty embedded template that DOES iterate `tools` must win over a
+    /// `false` enum flag — the embedded template, not the detected enum, decides.
+    func test_detector_embeddedTemplateOverridesEnumFlag() {
+        let toolAware = "{% if tools %}{{ tools }}{% endif %}"
+        XCTAssertTrue(
+            LlamaToolSystemPromptFallback.templateRendersTools(
+                chatTemplateRaw: toolAware,
+                templateRendersToolsNatively: false),
+            "An embedded tool-iterating template must override a false enum flag.")
+        // And the converse: a present-but-templateless template overrides a true
+        // enum flag (the embedded template is authoritative when present/usable).
+        let phiLike = "{% for m in messages %}{{ m.content }}{% endfor %}"
+        XCTAssertFalse(
+            LlamaToolSystemPromptFallback.templateRendersTools(
+                chatTemplateRaw: phiLike,
+                templateRendersToolsNatively: true),
+            "A present templateless chat_template must override a true enum flag.")
     }
 }

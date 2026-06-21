@@ -15,7 +15,7 @@
 import Foundation
 import ManifoldInference
 import ManifoldTools
-import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
 
 /// Hand-rolled argument parser — mirrors `manifold-tools` in ManifoldKit core.
 /// Pulling in swift-argument-parser for a ~150-line harness is not worth the
@@ -540,8 +540,17 @@ func runCLI() async -> Int32 {
             // template can't render tools — fold the JSON tool-call instruction
             // into the system prompt for exactly the tools this scenario will
             // advertise (the padded `requiredTools`).
+            //
+            // A scenario whose ORIGINAL `requiredTools` is empty is a *tool-free*
+            // probe (e.g. `structured-json-extraction`, which wants compact plain
+            // JSON output, not a tool call). Injecting the `{"name":…,"arguments":…}`
+            // tool-call instruction there would actively sabotage it — the model
+            // would wrap its answer as a tool call and the plain-JSON assertions
+            // would never match. So gate injection on the scenario actually
+            // requiring a tool; decoy padding (--extra-tools) is irrelevant to that
+            // intent and must not flip a tool-free probe into a tool-instructed one.
             let padded = try padScenario(baseScenario, advertisingAlso: decoyNames)
-            scenario = needsToolInstruction
+            scenario = (needsToolInstruction && !baseScenario.requiredTools.isEmpty)
                 ? try injectToolInstruction(into: padded, registry: registry)
                 : padded
         } catch {

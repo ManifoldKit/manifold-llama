@@ -22,7 +22,14 @@ import ManifoldInference
 /// the tool-calling test campaign can exercise these models. The instruction it
 /// injects targets the exact JSON dialect `LlamaToolMarkers` already parses
 /// (`{"name": "<tool>", "arguments": { … }}`).
-public enum LlamaToolSystemPromptFallback {
+///
+/// Gated behind `@_spi(Testing)` (matching `LlamaToolMarkers`): this is
+/// harness-support logic, not part of `ManifoldLlama`'s supported public API. It
+/// lives in the library target only so the model-free unit tests can reach it
+/// (an executable target's symbols are not importable); SPI keeps it out of the
+/// library's clean public surface while the `manifold-tools-llama` harness and
+/// the test target opt in via `@_spi(Testing) import ManifoldLlama`.
+@_spi(Testing) public enum LlamaToolSystemPromptFallback {
 
     // MARK: - Detection
 
