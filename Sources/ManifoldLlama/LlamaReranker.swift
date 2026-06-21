@@ -87,7 +87,20 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
             contextSize = 0
             sepToken = -1
             eosToken = -1
-            if let ctx { llama_free(ctx) }
+            if let ctx {
+                // Drain GPU work and clear KV/output buffers before llama_free.
+                // `llama_free` releases the Metal residency set; releasing it
+                // while encode() command buffers are still enqueued trips
+                //   GGML_ASSERT([rsets->data count] == 0)   (ggml-metal-device.m)
+                // and aborts the process with SIGABRT (#1394). Mirrors the same
+                // synchronize→clear→synchronize dance in LlamaEmbeddingBackend.
+                llama_synchronize(ctx)
+                if let mem = llama_get_memory(ctx) {
+                    llama_memory_clear(mem, false)
+                }
+                llama_synchronize(ctx)
+                llama_free(ctx)
+            }
             if let mdl { llama_model_free(mdl) }
         }
 
@@ -369,6 +382,8 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
         llama_set_embeddings(ctx, true)
 
         guard let vocab = llama_model_get_vocab(rawModel) else {
+            // Load-failure path: no llama_encode has been called yet so no Metal
+            // command buffers are enqueued — synchronize dance (#1394) not needed.
             llama_free(ctx)
             llama_model_free(rawModel)
             throw RerankerError.modelLoadFailed(underlying: NSError(
