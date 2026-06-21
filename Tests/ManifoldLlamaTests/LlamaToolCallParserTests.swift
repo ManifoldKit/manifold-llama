@@ -256,6 +256,109 @@ final class LlamaToolCallParserTests: XCTestCase {
         XCTAssertTrue(parser.finalize().isEmpty)
     }
 
+    // MARK: - Mistral [TOOL_CALLS] format (#70)
+    //
+    // Mistral v0.3 emits a bare JSON ARRAY of calls right after a literal
+    // `[TOOL_CALLS]` token with NO closing tag — the block ends at EOS. These
+    // tests are synthetic/unit-level: end-to-end verification against a real
+    // Mistral model is deferred to #69 / ManifoldKit#1983 (the scenario harness
+    // does not render tools yet).
+
+    func test_mistral_singleCall_extractsNameAndArguments() throws {
+        var parser = LlamaToolCallParser()
+        var all = parser.process(#"[TOOL_CALLS][{"name": "calc", "arguments": {"a": 1}}]"#)
+        all += parser.finalize()
+
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(toolCalls.count, 1)
+        let tc = try XCTUnwrap(toolCalls.first)
+        XCTAssertEqual(tc.toolName, "calc")
+
+        let args = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: args) as? [String: Any])
+        XCTAssertEqual(decoded["a"] as? Int, 1)
+    }
+
+    func test_mistral_multipleCalls_fromOneArray() {
+        var parser = LlamaToolCallParser()
+        var all = parser.process(#"[TOOL_CALLS][{"name": "calc", "arguments": {"a": 1}}, {"name": "now", "arguments": {}}]"#)
+        all += parser.finalize()
+
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(toolCalls.count, 2)
+        XCTAssertEqual(toolCalls[0].toolName, "calc")
+        XCTAssertEqual(toolCalls[1].toolName, "now")
+        // count == 2 (not 1) proves the array multi-call path (`parseBodyMulti`)
+        // is exercised — a single-call fallback would collapse this to one call.
+    }
+
+    func test_mistral_plainText_withoutToolCallsToken_isUntouched() {
+        var parser = LlamaToolCallParser()
+        var all = parser.process("Here is a plain answer with no tool calls.")
+        all += parser.finalize()
+
+        let tokens = all.compactMap { event -> String? in
+            if case .token(let t) = event { return t }
+            return nil
+        }
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertTrue(toolCalls.isEmpty, "Text without [TOOL_CALLS] must not yield tool calls")
+        XCTAssertEqual(tokens.joined(), "Here is a plain answer with no tool calls.")
+    }
+
+    func test_mistral_eosClose_unterminatedBlockAtStreamEnd_yieldsCall() throws {
+        // Mistral has NO close tag: the block is only terminated by EOS. The
+        // call must therefore not appear until finalize() drains the buffered
+        // body (the #1982 `closesAtEnd` path).
+        var parser = LlamaToolCallParser()
+        let processEvents = parser.process(#"[TOOL_CALLS][{"name": "lookup", "arguments": {"q": "swift"}}]"#)
+
+        let midToolCalls = processEvents.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertTrue(midToolCalls.isEmpty,
+                      "No close tag means the call is buffered until EOS — process() must not emit it yet")
+
+        let finalToolCalls = parser.finalize().compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(finalToolCalls.count, 1, "finalize() (EOS) must flush the buffered Mistral call")
+        let tc = try XCTUnwrap(finalToolCalls.first)
+        XCTAssertEqual(tc.toolName, "lookup")
+        let args = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: args) as? [String: Any])
+        XCTAssertEqual(decoded["q"] as? String, "swift")
+    }
+
+    func test_mistral_prefixText_emittedBeforeToolCalls() {
+        var parser = LlamaToolCallParser()
+        var all = parser.process(#"Sure.[TOOL_CALLS][{"name": "go", "arguments": {}}]"#)
+        all += parser.finalize()
+
+        let tokens = all.compactMap { event -> String? in
+            if case .token(let t) = event { return t }
+            return nil
+        }
+        let toolCalls = all.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(tokens.joined(), "Sure.")
+        XCTAssertEqual(toolCalls.count, 1)
+        XCTAssertEqual(toolCalls.first?.toolName, "go")
+    }
+
     // MARK: - Tool call ID uniqueness
 
     func test_multipleToolCalls_haveDistinctIDs() {
