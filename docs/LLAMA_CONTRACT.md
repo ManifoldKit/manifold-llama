@@ -827,8 +827,10 @@ To re-cut it for a new build:
 
 1. Run `scripts/repackage-xcframework.sh` (defaults to `b9744`; override with
    `BUILD=b<NNNN>` or a positional arg). It downloads the upstream asset
-   (skipping re-download if already present), builds the slim
-   `llama.xcframework`, zips it to `llama-b<NNNN>-slim.xcframework.zip`, and
+   (re-downloading only if the cached zip is missing or fails an `unzip -t`
+   integrity check), builds the slim `llama.xcframework`, asserts it contains
+   exactly the three intended slices with no dSYMs, zips it to
+   `llama-b<NNNN>-slim.xcframework.zip`, and
    prints its `swift package compute-checksum` value plus the exact
    `url`/`checksum` lines to paste into `Package.swift`.
 2. **Host that exact slim zip as a manifold-llama GitHub release asset** (it is
