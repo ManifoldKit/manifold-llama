@@ -109,8 +109,10 @@ struct CLI {
 
         EXIT
           0 — all scenarios passed.
-          1 — at least one scenario or assertion failed (or a load/setup error).
+          1 — at least one scenario or assertion failed (or a non-load setup error).
           2 — bad arguments.
+          3 — the model FAILED TO LOAD (arch / llama.cpp version skew). Distinct
+              from 1 so a sweep can tell "never loaded" from "loaded, no dispatch".
 
         REQUIREMENTS
           Apple Silicon + Metal (llama.cpp has no simulator Metal support) and a
@@ -286,6 +288,37 @@ func padScenario(_ scenario: Scenario, advertisingAlso decoyNames: [String]) thr
     return try JSONDecoder().decode(Scenario.self, from: patched)
 }
 
+/// Returns a copy of `scenario` whose `systemPrompt` has the templateless-model
+/// tool-call instruction appended (Fix 1). The instruction lists exactly the
+/// tools this scenario advertises — `scenario.requiredTools` filtered against the
+/// registry, the same set `ScenarioRunner` advertises to the model — with their
+/// real parameter names, so the emitted JSON matches each tool's schema.
+///
+/// `Scenario` has no public memberwise initialiser, so (like `padScenario`) we
+/// round-trip through `Codable` and splice the patched `systemPrompt` via JSON.
+/// Returns the scenario unchanged when there is nothing to instruct (no
+/// advertised tools resolve to definitions).
+@MainActor
+func injectToolInstruction(into scenario: Scenario, registry: ToolRegistry) throws -> Scenario {
+    let advertised = registry.definitions.filter {
+        scenario.requiredTools.isEmpty || scenario.requiredTools.contains($0.name)
+    }
+    let instruction = LlamaToolSystemPromptFallback.toolInstruction(for: advertised)
+    guard !instruction.isEmpty else { return scenario }
+
+    let data = try JSONEncoder().encode(scenario)
+    guard var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return scenario
+    }
+    let existing = (dict["systemPrompt"] as? String) ?? ""
+    // Clearly demarcate the addendum so it reads as an addition, not part of the
+    // scenario's own system prompt.
+    let separator = existing.isEmpty ? "" : "\n\n"
+    dict["systemPrompt"] = existing + separator + instruction
+    let patched = try JSONSerialization.data(withJSONObject: dict)
+    return try JSONDecoder().decode(Scenario.self, from: patched)
+}
+
 /// Loads the bundled tool-calling scenarios.
 ///
 /// `ScenarioLoader.loadBuiltIn()` is unusable here: it resolves a ManifoldKit
@@ -446,21 +479,74 @@ func runCLI() async -> Int32 {
             + ", detected template: \(modelInfo.detectedPromptTemplate.map(String.init(describing:)) ?? "nil")")
         try await service.loadModel(from: modelInfo, plan: .systemManaged(requestedContextSize: 4096))
     } catch {
-        FileHandle.standardError.write(Data("failed to load model: \(error)\n".utf8))
-        return 1
+        // Fix 2 — load failure is a DISTINCT, loud outcome (separate exit code 3),
+        // so a sweep can tell "model never loaded" (arch/llama.cpp version skew —
+        // e.g. qwen3.5-4b's `rope.dimension_sections` mismatch, gemma4-e4b's
+        // `unsupportedModelArchitecture`) apart from "loaded but did not dispatch"
+        // (empty/garbage transcript, exit 1). Previously both collapsed to a
+        // generic "failed to load model" + exit 1 that read as "no dispatch" in
+        // the campaign and caused a misdiagnosis. Surface the underlying error
+        // verbatim (`errorDescription` when available, then the raw value) so the
+        // root cause is visible without re-running under a debugger.
+        let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        let banner = "LOAD FAILED: \(modelURL.lastPathComponent): \(detail)"
+        FileHandle.standardError.write(Data((banner + "\n").utf8))
+        print(banner)
+        print("  (model never loaded — this is a load failure, NOT a tool-dispatch failure)")
+        // Best-effort teardown of any half-constructed backend before exit.
+        if let backend = backendBox.backend {
+            await backend.unloadAndWait()
+        }
+        return 3
     }
     // Teardown must be awaited before `exit()` reclaims the process, so a fire-
     // and-forget `Task` in `defer` would race the exit and routinely never run.
     // Run the scenarios, then await `unloadAndWait()` on every exit path below.
 
+    // Fix 1 — templateless-model tool-format injection.
+    //
+    // Detect whether this model's template will actually render tool definitions
+    // into the prompt. The detector mirrors production `PromptRenderer`'s
+    // `rendersToolsNatively`: a usable embedded Jinja template that references the
+    // `tools` variable in a delimiter renders tools; otherwise only the `.gemma4`
+    // enum does. Phi-3.5-mini / the Mistral-7B GGUF have a no-tool embedded
+    // template, so the model is told tools exist but given no emission format and
+    // improvises an unparseable Pythonic `tool_call(...)` → nothing dispatches.
+    //
+    // When (and ONLY when) the template can't render tools, we fold a concise
+    // instruction into each scenario's system prompt telling the model the exact
+    // JSON shape `LlamaToolMarkers` already parses, with the real tool/param
+    // names. We must NOT inject for native-tool models (gemma-4, llama3.1, Qwen3
+    // ChatML) — that would double-instruct and could break them.
+    //
+    // NOTE: the general fix belongs in ManifoldKit's `ToolSystemPromptBuilder` /
+    // `GenerationQueue` fold (MK#1856); this is the harness-level mitigation for
+    // the test campaign until that lands and reaches this package's pin.
+    let templateRendersTools = LlamaToolSystemPromptFallback.templateRendersTools(
+        chatTemplateRaw: modelInfo.chatTemplateRaw,
+        templateRendersToolsNatively: modelInfo.detectedPromptTemplate?.rendersToolsNatively ?? false)
+    let needsToolInstruction = !templateRendersTools
+    if needsToolInstruction {
+        print("  tool rendering: template does NOT render tools — injecting JSON tool-call instruction into the system prompt (Fix 1 / MK#1856)")
+    } else {
+        print("  tool rendering: native — no instruction injection")
+    }
+
     var allPassed = true
     for baseScenario in filtered {
         let scenario: Scenario
         do {
-            scenario = try padScenario(baseScenario, advertisingAlso: decoyNames)
+            // Decoy padding first (extends `requiredTools`), then — only when the
+            // template can't render tools — fold the JSON tool-call instruction
+            // into the system prompt for exactly the tools this scenario will
+            // advertise (the padded `requiredTools`).
+            let padded = try padScenario(baseScenario, advertisingAlso: decoyNames)
+            scenario = needsToolInstruction
+                ? try injectToolInstruction(into: padded, registry: registry)
+                : padded
         } catch {
             allPassed = false
-            print("\n── \(baseScenario.id) — ERROR padding decoys: \(error)")
+            print("\n── \(baseScenario.id) — ERROR preparing scenario: \(error)")
             continue
         }
         print("\n── \(scenario.id) (\(scenario.description)) ──")
