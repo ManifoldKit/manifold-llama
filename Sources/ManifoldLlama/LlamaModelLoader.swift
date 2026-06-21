@@ -331,7 +331,7 @@ import ManifoldInference
         // Fused-multimodal Gemma checkpoints (Gemma 3n / "gemma4"): a single
         // GGUF carries the text tower plus separate audio (`a.*`) and vision
         // (`v.*`) towers and an mm projector (`mm.*`). The pinned llama.cpp
-        // build (b9553) recognizes the `gemma4` arch but its text-model loader
+        // build (b9744) recognizes the `gemma4` arch but its text-model loader
         // only claims the text-tower tensors, then aborts in
         // `done_getting_tensors` ("wrong number of tensors; expected N, got M")
         // because the audio/vision/mmproj tensors are unclaimed. Until the
