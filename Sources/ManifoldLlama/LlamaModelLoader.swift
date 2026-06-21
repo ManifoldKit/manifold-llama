@@ -200,6 +200,20 @@ import ManifoldInference
         }
         defer { callbackContextRef?.release() }
 
+        // Pre-load architecture preflight. The post-load denylist check below
+        // (kept as defense-in-depth) is unreachable for architectures the
+        // pinned llama.cpp build cannot construct: those abort inside
+        // `llama_model_load_from_file` and return nil before we hold a model
+        // pointer, collapsing to a cryptic "Failed to load GGUF model" error.
+        // Reading `general.architecture` straight from the GGUF header (no
+        // tensor data touched) lets us throw the typed
+        // `unsupportedModelArchitecture` for those cases too. A nil result
+        // means "couldn't read the header arch" — assume supported and let the
+        // real load decide, preserving prior behavior. See issue #62.
+        if let headerArch = Self.readArchitectureFromHeader(at: url) {
+            try Self.preflightArchitecture(headerArch)
+        }
+
         guard let rawModel = llama_model_load_from_file(url.path, modelParams) else {
             throw InferenceError.modelLoadFailed(underlying: NSError(
                 domain: "LlamaBackend",
@@ -314,6 +328,19 @@ import ManifoldInference
         "t5encoder",    // T5 encoder-only checkpoints
         "stablediffusion", // diffusion UNet weights
         "sd3",          // stable-diffusion-3
+        // Fused-multimodal Gemma checkpoints (Gemma 3n / "gemma4"): a single
+        // GGUF carries the text tower plus separate audio (`a.*`) and vision
+        // (`v.*`) towers and an mm projector (`mm.*`). The pinned llama.cpp
+        // build (b9553) recognizes the `gemma4` arch but its text-model loader
+        // only claims the text-tower tensors, then aborts in
+        // `done_getting_tensors` ("wrong number of tensors; expected N, got M")
+        // because the audio/vision/mmproj tensors are unclaimed. Until the
+        // pinned build can load these (or the model is re-packaged as a
+        // text-only GGUF + standalone mmproj), surface a typed
+        // `unsupportedModelArchitecture` instead of a cryptic nil-load failure.
+        // See issue #62.
+        "gemma4",       // Gemma 4 fused-multimodal (audio + vision + text)
+        "gemma3n",      // Gemma 3n fused-multimodal (the HF/upstream arch name)
     ]
 
     /// Returns true when `architecture` is on the non-LM denylist.
@@ -362,6 +389,80 @@ import ManifoldInference
         }
         guard written > 0 else { return nil }
         return buffer.withUnsafeBytes { ptr in String(decoding: ptr.prefix(Int(written)), as: UTF8.self) }
+    }
+
+    /// Reads `general.architecture` directly from a GGUF file header, without
+    /// loading the model or touching tensor data.
+    ///
+    /// Used by the pre-load preflight so denylisted architectures the pinned
+    /// llama.cpp build cannot even construct (which abort inside
+    /// `llama_model_load_from_file` and return nil) still surface a typed
+    /// ``InferenceError/unsupportedModelArchitecture`` rather than a generic
+    /// load failure. Returns `nil` on any parse problem — callers treat that as
+    /// "unknown, assume supported" and fall through to the real load. See #62.
+    ///
+    /// Parses only the GGUF header + metadata key-value section (the file's
+    /// prefix); the multi-GB tensor blob is never read. Mirrors the layout of
+    /// `ManifoldHardware`'s `GGUFMetadataReader`, reimplemented here because that
+    /// type is `package`-scoped and unreachable across the package boundary.
+    @_spi(Testing) public static func readArchitectureFromHeader(at url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        // GGUF type-code → fixed scalar byte width. `nil` for string/array,
+        // which are length-prefixed and handled specially.
+        func scalarSize(_ type: UInt32) -> Int? {
+            switch type {
+            case 0, 1, 7: return 1          // uint8/int8/bool
+            case 2, 3: return 2             // uint16/int16
+            case 4, 5, 6: return 4          // uint32/int32/float32
+            case 10, 11, 12: return 8       // uint64/int64/float64
+            default: return nil             // 8 = string, 9 = array
+            }
+        }
+
+        // Sequential little-endian readers over the file handle. Any short read
+        // or malformed length aborts the whole parse (returns nil upstream).
+        func read(_ count: Int) -> Data? {
+            guard count >= 0, let d = try? handle.read(upToCount: count), d.count == count else { return nil }
+            return d
+        }
+        func readU32() -> UInt32? { read(4).map { $0.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) } } }
+        func readU64() -> UInt64? { read(8).map { $0.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) } } }
+        func readString() -> String? {
+            guard let len = readU64(), len <= 64 * 1024, let bytes = read(Int(len)) else { return nil }
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        /// Advances past a metadata value of the given type without retaining it.
+        func skipValue(type: UInt32) -> Bool {
+            if type == 8 { return readString() != nil }      // string
+            if type == 9 {                                    // array
+                guard let elemType = readU32(), let count = readU64() else { return false }
+                if elemType == 8 {
+                    for _ in 0..<count where readString() == nil { return false }
+                    return true
+                }
+                guard let elemSize = scalarSize(elemType) else { return false }
+                return read(elemSize * Int(count)) != nil
+            }
+            guard let size = scalarSize(type) else { return false }
+            return read(size) != nil
+        }
+
+        guard let magic = read(4), magic == Data([0x47, 0x47, 0x55, 0x46]) else { return nil } // "GGUF"
+        guard let version = readU32(), version == 2 || version == 3 else { return nil }
+        guard readU64() != nil else { return nil }            // tensor count (unused)
+        guard let kvCount = readU64() else { return nil }
+
+        for _ in 0..<kvCount {
+            guard let key = readString(), let valueType = readU32() else { return nil }
+            if key == "general.architecture" {
+                guard valueType == 8 else { return nil }       // must be a string
+                return readString()
+            }
+            guard skipValue(type: valueType) else { return nil }
+        }
+        return nil
     }
 
     /// Reads `general.architecture` from the loaded GGUF model's metadata.
