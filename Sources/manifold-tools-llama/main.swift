@@ -15,7 +15,7 @@
 import Foundation
 import ManifoldInference
 import ManifoldTools
-@_spi(Testing) import ManifoldLlama
+import ManifoldLlama
 
 /// Hand-rolled argument parser — mirrors `manifold-tools` in ManifoldKit core.
 /// Pulling in swift-argument-parser for a ~150-line harness is not worth the
@@ -288,37 +288,6 @@ func padScenario(_ scenario: Scenario, advertisingAlso decoyNames: [String]) thr
     return try JSONDecoder().decode(Scenario.self, from: patched)
 }
 
-/// Returns a copy of `scenario` whose `systemPrompt` has the templateless-model
-/// tool-call instruction appended (Fix 1). The instruction lists exactly the
-/// tools this scenario advertises — `scenario.requiredTools` filtered against the
-/// registry, the same set `ScenarioRunner` advertises to the model — with their
-/// real parameter names, so the emitted JSON matches each tool's schema.
-///
-/// `Scenario` has no public memberwise initialiser, so (like `padScenario`) we
-/// round-trip through `Codable` and splice the patched `systemPrompt` via JSON.
-/// Returns the scenario unchanged when there is nothing to instruct (no
-/// advertised tools resolve to definitions).
-@MainActor
-func injectToolInstruction(into scenario: Scenario, registry: ToolRegistry) throws -> Scenario {
-    let advertised = registry.definitions.filter {
-        scenario.requiredTools.isEmpty || scenario.requiredTools.contains($0.name)
-    }
-    let instruction = LlamaToolSystemPromptFallback.toolInstruction(for: advertised)
-    guard !instruction.isEmpty else { return scenario }
-
-    let data = try JSONEncoder().encode(scenario)
-    guard var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        return scenario
-    }
-    let existing = (dict["systemPrompt"] as? String) ?? ""
-    // Clearly demarcate the addendum so it reads as an addition, not part of the
-    // scenario's own system prompt.
-    let separator = existing.isEmpty ? "" : "\n\n"
-    dict["systemPrompt"] = existing + separator + instruction
-    let patched = try JSONSerialization.data(withJSONObject: dict)
-    return try JSONDecoder().decode(Scenario.self, from: patched)
-}
-
 /// Loads the bundled tool-calling scenarios.
 ///
 /// `ScenarioLoader.loadBuiltIn()` is unusable here: it resolves a ManifoldKit
@@ -503,56 +472,28 @@ func runCLI() async -> Int32 {
     // and-forget `Task` in `defer` would race the exit and routinely never run.
     // Run the scenarios, then await `unloadAndWait()` on every exit path below.
 
-    // Fix 1 — templateless-model tool-format injection.
-    //
-    // Detect whether this model's template will actually render tool definitions
-    // into the prompt. The detector mirrors production `PromptRenderer`'s
-    // `rendersToolsNatively`: a usable embedded Jinja template that references the
-    // `tools` variable in a delimiter renders tools; otherwise only the `.gemma4`
-    // enum does. Phi-3.5-mini / the Mistral-7B GGUF have a no-tool embedded
-    // template, so the model is told tools exist but given no emission format and
-    // improvises an unparseable Pythonic `tool_call(...)` → nothing dispatches.
-    //
-    // When (and ONLY when) the template can't render tools, we fold a concise
-    // instruction into each scenario's system prompt telling the model the exact
-    // JSON shape `LlamaToolMarkers` already parses, with the real tool/param
-    // names. We must NOT inject for native-tool models (gemma-4, llama3.1, Qwen3
-    // ChatML) — that would double-instruct and could break them.
-    //
-    // NOTE: the general fix belongs in ManifoldKit's `ToolSystemPromptBuilder` /
-    // `GenerationQueue` fold (MK#1856); this is the harness-level mitigation for
-    // the test campaign until that lands and reaches this package's pin.
-    let templateRendersTools = LlamaToolSystemPromptFallback.templateRendersTools(
-        chatTemplateRaw: modelInfo.chatTemplateRaw,
-        templateRendersToolsNatively: modelInfo.detectedPromptTemplate?.rendersToolsNatively ?? false)
-    let needsToolInstruction = !templateRendersTools
-    if needsToolInstruction {
-        print("  tool rendering: template does NOT render tools — injecting JSON tool-call instruction into the system prompt (Fix 1 / MK#1856)")
-    } else {
-        print("  tool rendering: native — no instruction injection")
-    }
+    // Templateless-model tool-format instruction is now handled UPSTREAM: as of
+    // ManifoldKit 0.58 (MK#2002), `GenerationQueue.toolAugmentedSystemPrompt`
+    // folds `ToolSystemPromptBuilder.preferTools(for:)` — which spells out the
+    // exact `{"name": …, "arguments": {…}}` envelope, named-argument enumeration,
+    // and the "no Python-style call" prohibition — into the system prompt for any
+    // model whose renderer does NOT emit tools natively (Phi-3.5, Mistral-7B, and
+    // every non-`gemma4` enum template). Since the harness routes through the
+    // production `InferenceService` → `GenerationQueue` path (#69), that preamble
+    // already reaches templateless models. The harness no longer injects its own
+    // instruction — doing so would double-instruct. (Verified: Phi-3.5 dispatches
+    // `calc` with correct args on 0.58 with no harness injection.)
 
     var allPassed = true
     for baseScenario in filtered {
         let scenario: Scenario
         do {
-            // Decoy padding first (extends `requiredTools`), then — only when the
-            // template can't render tools — fold the JSON tool-call instruction
-            // into the system prompt for exactly the tools this scenario will
-            // advertise (the padded `requiredTools`).
-            //
-            // A scenario whose ORIGINAL `requiredTools` is empty is a *tool-free*
-            // probe (e.g. `structured-json-extraction`, which wants compact plain
-            // JSON output, not a tool call). Injecting the `{"name":…,"arguments":…}`
-            // tool-call instruction there would actively sabotage it — the model
-            // would wrap its answer as a tool call and the plain-JSON assertions
-            // would never match. So gate injection on the scenario actually
-            // requiring a tool; decoy padding (--extra-tools) is irrelevant to that
-            // intent and must not flip a tool-free probe into a tool-instructed one.
-            let padded = try padScenario(baseScenario, advertisingAlso: decoyNames)
-            scenario = (needsToolInstruction && !baseScenario.requiredTools.isEmpty)
-                ? try injectToolInstruction(into: padded, registry: registry)
-                : padded
+            // Decoy padding extends `requiredTools` so `--extra-tools` decoys are
+            // advertised alongside the scenario's real tool. The templateless
+            // tool-format instruction is supplied upstream by 0.58's
+            // `ToolSystemPromptBuilder` fold (MK#2002), so no per-scenario system
+            // prompt injection happens here.
+            scenario = try padScenario(baseScenario, advertisingAlso: decoyNames)
         } catch {
             allPassed = false
             print("\n── \(baseScenario.id) — ERROR preparing scenario: \(error)")
