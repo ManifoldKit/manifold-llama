@@ -33,6 +33,22 @@ struct CLI {
     /// (advertise only the scenario's `requiredTools`).
     var extraTools: Int = 0
 
+    /// Cold-vs-warm generation benchmark mode (see Benchmark.swift). Bypasses the
+    /// scenario runner entirely — drives `LlamaBackend` directly to time the
+    /// one-time per-process Metal pipeline warm-up the first generation pays.
+    var bench: Bool = false
+    /// Flash-attention setting(s) for `--bench`: on | off | both.
+    var flash: String = "on"
+    /// Prompt the benchmark generates from. Fixed so every run does identical work.
+    var benchPrompt: String = "Write a short paragraph about the ocean."
+    /// Tokens to generate per benchmark run.
+    var maxTokens: Int = 64
+    /// Number of warm (post-cold) generations to average for `--bench`.
+    var warmRuns: Int = 3
+    /// Requested context size (tokens) for `--bench`. The load planner may clamp
+    /// it; the benchmark prints the plan-effective value.
+    var context: Int = 4096
+
     /// Argument errors exit with status 2 via `exit(2)` + stderr rather than
     /// `precondition` / `fatalError` (those trap with SIGABRT in debug builds,
     /// producing a confusing stack trace instead of the clean "bad arguments"
@@ -69,6 +85,31 @@ struct CLI {
                 guard i < argv.count else { fail("--extra-tools requires a value") }
                 guard let n = Int(argv[i]), n >= 0 else { fail("--extra-tools requires a non-negative integer") }
                 cli.extraTools = n
+            case "--bench":
+                cli.bench = true
+            case "--flash":
+                i += 1
+                guard i < argv.count else { fail("--flash requires a value (on|off|both)") }
+                cli.flash = argv[i]
+            case "--bench-prompt":
+                i += 1
+                guard i < argv.count else { fail("--bench-prompt requires a value") }
+                cli.benchPrompt = argv[i]
+            case "--max-tokens":
+                i += 1
+                guard i < argv.count else { fail("--max-tokens requires a value") }
+                guard let n = Int(argv[i]), n > 0 else { fail("--max-tokens requires a positive integer") }
+                cli.maxTokens = n
+            case "--warm-runs":
+                i += 1
+                guard i < argv.count else { fail("--warm-runs requires a value") }
+                guard let n = Int(argv[i]), n >= 0 else { fail("--warm-runs requires a non-negative integer") }
+                cli.warmRuns = n
+            case "--context":
+                i += 1
+                guard i < argv.count else { fail("--context requires a value") }
+                guard let n = Int(argv[i]), n > 0 else { fail("--context requires a positive integer") }
+                cli.context = n
             case "--list":
                 cli.list = true
             case "--help", "-h":
@@ -94,12 +135,31 @@ struct CLI {
         USAGE
           manifold-tools-llama --model <path.gguf> [--scenario <id|all>]
                     [--output <path.jsonl>] [--fixtures-root <dir>] [--list]
+          manifold-tools-llama --bench --model <path.gguf> [--flash on|off|both]
+                    [--bench-prompt <text>] [--max-tokens <n>] [--warm-runs <n>]
 
         FLAGS
           --model <path>        Path to the .gguf model file. REQUIRED (except for --list / --help).
           --scenario <id>       Scenario id (matches JSON 'id') or 'all'. Default: all.
           --output <path>       Transcript JSONL destination. Default: tmp/manifold-tools-llama/<iso>.jsonl.
           --fixtures-root <dir> Override the file/dir tool fixture root. Default: bundled fixtures.
+
+        BENCHMARK (--bench)
+          --bench               Run the cold-vs-warm generation benchmark instead of
+                                the scenario harness. Times model load, the first
+                                (cold) generation, and N warm generations; the
+                                cold−warm delta ≈ the one-time per-process Metal
+                                pipeline warm-up (incl. flash-attention kernels).
+          --flash on|off|both   FA setting. Default: on. For an honest cold
+                                comparison run on/off in SEPARATE processes — Metal
+                                caches pipelines per-process, so 'both' under-reports
+                                the second config's cold time (a warning is printed).
+          --bench-prompt <text> Prompt to generate from. Default: a fixed sentence.
+          --max-tokens <n>      Tokens generated per run. Default: 64.
+          --warm-runs <n>       Warm generations to average. Default: 3.
+          --context <n>         Requested context size in tokens. Default: 4096.
+                                The load planner may clamp it; the run prints the
+                                plan-effective value.
           --extra-tools <N>     Advertise N decoy (distractor) tools alongside each
                                 scenario's required tool(s). Decoys are plausible but
                                 never the correct answer; success still requires the
@@ -357,6 +417,19 @@ func runCLI() async -> Int32 {
     guard FileManager.default.fileExists(atPath: modelURL.path) else {
         FileHandle.standardError.write(Data("model file not found: \(modelURL.path)\n".utf8))
         return 1
+    }
+
+    // Benchmark mode short-circuits the scenario harness: it drives LlamaBackend
+    // directly to time the cold (first) vs warm (subsequent) generations and the
+    // one-time per-process Metal pipeline warm-up between them.
+    if cli.bench {
+        return await Benchmark.run(
+            modelURL: modelURL,
+            flash: cli.flash,
+            prompt: cli.benchPrompt,
+            maxTokens: cli.maxTokens,
+            warmRuns: cli.warmRuns,
+            contextSize: cli.context)
     }
 
     let filtered: [Scenario]
