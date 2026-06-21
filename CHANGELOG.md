@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.10](https://github.com/roryford/manifold-llama/compare/v0.2.9...v0.2.10) (2026-06-21)
+
+
+### Features
+
+* **tools:** add cold-vs-warm generation benchmark to manifold-tools-llama ([#83](https://github.com/roryford/manifold-llama/issues/83)) ([7cc99d4](https://github.com/roryford/manifold-llama/commit/7cc99d4d1ede50a1164a55f858e83090d5a81b37))
+
 ## [0.2.9](https://github.com/roryford/manifold-llama/compare/v0.2.8...v0.2.9) (2026-06-21)
 
 
