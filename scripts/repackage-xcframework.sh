@@ -32,8 +32,8 @@
 #   WORK_DIR    working directory for download/unpack/output
 #               (default: <repo>/tmp/repackage-xcframework).
 #
-# Idempotent: re-running reuses an already-downloaded zip and rebuilds the
-# slim artifact in place.
+# Idempotent: re-running reuses an already-downloaded zip (only if it still
+# passes an integrity check) and rebuilds the slim artifact in place.
 
 set -euo pipefail
 
@@ -45,6 +45,11 @@ UPSTREAM_URL="https://github.com/ggml-org/llama.cpp/releases/download/${BUILD}/l
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="${WORK_DIR:-${REPO_ROOT}/tmp/repackage-xcframework}"
+# Guard against an empty WORK_DIR (e.g. `WORK_DIR= scripts/...`): every `rm -rf`
+# below is rooted at WORK_DIR, so an empty value could escalate to deleting the
+# wrong tree. Require an absolute path.
+[[ -n "${WORK_DIR}" && "${WORK_DIR}" = /* ]] \
+    || { printf 'error: WORK_DIR must be a non-empty absolute path, got: %q\n' "${WORK_DIR}" >&2; exit 1; }
 
 # The three slices we keep (must match Package.swift's declared platforms).
 KEEP_SLICES=(
@@ -75,18 +80,31 @@ human_size() {
 
 log "Checking required tools…"
 for tool in curl unzip xcodebuild swift; do
-    command -v "$tool" >/dev/null 2>&1 || fail "required tool not found on PATH: $tool"
+    command -v "${tool}" >/dev/null 2>&1 || fail "required tool not found on PATH: ${tool}"
 done
 
 # --- 2. download ------------------------------------------------------------
 
 mkdir -p "${WORK_DIR}"
 
-if [[ -f "${UPSTREAM_ZIP}" ]]; then
-    log "Upstream zip already present, skipping download: ${UPSTREAM_ZIP}"
+# Re-verify a cached download before trusting it: a previous run could have been
+# interrupted (truncated zip) or the file could be corrupt. `unzip -t` confirms
+# the central directory + CRCs are intact; a stale/corrupt cache is discarded and
+# re-downloaded rather than silently reused.
+if [[ -f "${UPSTREAM_ZIP}" ]] && unzip -tqq "${UPSTREAM_ZIP}" >/dev/null 2>&1; then
+    log "Upstream zip already present and verified, skipping download: ${UPSTREAM_ZIP}"
 else
+    if [[ -f "${UPSTREAM_ZIP}" ]]; then
+        log "Cached zip missing or failed integrity check — re-downloading: ${UPSTREAM_ZIP}"
+        rm -f "${UPSTREAM_ZIP}"
+    fi
     log "Downloading ${UPSTREAM_URL}"
+    # Download to a .partial sidecar and only promote it on success, so an
+    # interrupted curl never leaves a truncated file at the cache path.
+    rm -f "${UPSTREAM_ZIP}.partial"
     curl --fail --location --progress-bar -o "${UPSTREAM_ZIP}.partial" "${UPSTREAM_URL}"
+    unzip -tqq "${UPSTREAM_ZIP}.partial" >/dev/null 2>&1 \
+        || fail "downloaded zip failed integrity check (truncated or corrupt): ${UPSTREAM_URL}"
     mv "${UPSTREAM_ZIP}.partial" "${UPSTREAM_ZIP}"
 fi
 
@@ -143,8 +161,29 @@ CHECKSUM="$(cd "${WORK_DIR}" && swift package compute-checksum "$(basename "${SL
 
 # --- 7. verify + summary ----------------------------------------------------
 
-DSYM_COUNT="$(find "${SLIM_XCFRAMEWORK}" -name 'dSYMs' -type d | wc -l | tr -d ' ')"
-SLICE_LIST="$(find "${SLIM_XCFRAMEWORK}" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; | sort | tr '\n' ' ')"
+# Authoritative slice list comes from the xcframework's own Info.plist
+# (LibraryIdentifier values), NOT from directory names — that is exactly what
+# SwiftPM / Xcode consult when resolving a slice for a platform. Assert the slim
+# output contains EXACTLY the slices we intended: no more (a stray upstream
+# slice leaking through) and no fewer (a slice silently dropped, which would
+# yield a short xcframework that fails to link on the missing platform).
+SLIM_INFO_PLIST="${SLIM_XCFRAMEWORK}/Info.plist"
+[[ -f "${SLIM_INFO_PLIST}" ]] || fail "slim xcframework has no Info.plist: ${SLIM_INFO_PLIST}"
+
+ACTUAL_SLICES="$(/usr/libexec/PlistBuddy -c "Print" "${SLIM_INFO_PLIST}" 2>/dev/null \
+    | grep 'LibraryIdentifier' | sed -E 's/.*= //' | sort)"
+EXPECTED_SLICES="$(printf '%s\n' "${KEEP_SLICES[@]}" | sort)"
+
+if [[ "${ACTUAL_SLICES}" != "${EXPECTED_SLICES}" ]]; then
+    printf '%s\n' "expected slices:" "${EXPECTED_SLICES}" "but got:" "${ACTUAL_SLICES}" >&2
+    fail "slim xcframework slice set does not match the intended ${#KEEP_SLICES[@]} slices"
+fi
+
+SLICE_LIST="$(printf '%s' "${ACTUAL_SLICES}" | tr '\n' ' ')"
+
+# dSYMs (and any stray standalone *.dSYM bundles / BCSymbolMaps) must be absent
+# from the OUTPUT tree. Check the slim framework, not the input.
+DSYM_COUNT="$(find "${SLIM_XCFRAMEWORK}" \( -name 'dSYMs' -o -name '*.dSYM' -o -name 'BCSymbolMaps' \) -type d | wc -l | tr -d ' ')"
 
 echo
 echo "=========================================================================="
