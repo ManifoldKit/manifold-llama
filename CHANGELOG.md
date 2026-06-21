@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.9](https://github.com/roryford/manifold-llama/compare/v0.2.8...v0.2.9) (2026-06-21)
+
+
+### Bug Fixes
+
+* add llama3.1 bare-JSON tool-call dialect + parameters key alias ([#76](https://github.com/roryford/manifold-llama/issues/76)) ([#77](https://github.com/roryford/manifold-llama/issues/77)) ([bc8874e](https://github.com/roryford/manifold-llama/commit/bc8874e54bd961257881335f54d9956bf52c9bc7))
+* bump ManifoldKit pin to v0.58.0 ([#81](https://github.com/roryford/manifold-llama/issues/81)) ([62515cd](https://github.com/roryford/manifold-llama/commit/62515cde3deaf13c2c548f997fb81c5812a938b8))
+
 ## [0.2.8](https://github.com/roryford/manifold-llama/compare/v0.2.7...v0.2.8) (2026-06-21)
 
 
