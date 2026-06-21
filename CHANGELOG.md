@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.11](https://github.com/roryford/manifold-llama/compare/v0.2.10...v0.2.11) (2026-06-21)
+
+
+### Features
+
+* **tools:** slim the llama.cpp xcframework artifact (627 MB → 24 MB) ([#87](https://github.com/roryford/manifold-llama/issues/87)) ([bd26b6b](https://github.com/roryford/manifold-llama/commit/bd26b6b54ca8e3957f22fb4cb7f6fbf17141b15b))
+
 ## [0.2.10](https://github.com/roryford/manifold-llama/compare/v0.2.9...v0.2.10) (2026-06-21)
 
 
