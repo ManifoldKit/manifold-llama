@@ -157,6 +157,7 @@ jobs:
           LlamaBackendMemoryPressureTests \
           LlamaTokenizationTests \
           LlamaTokenUsageTests \
+          LlamaGenerationGuardTests \
           LlamaBackendContractTests"
 
           FILTER=""
