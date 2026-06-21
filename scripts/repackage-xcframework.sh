@@ -12,7 +12,8 @@
 #   - macos-arm64_x86_64
 #   - ios-arm64
 #   - ios-arm64_x86_64-simulator
-# with all dSYMs dropped. The result is ~40-50 MB extracted.
+# with all dSYMs dropped. Measured for b9744: ~627 MB → ~24 MB extracted,
+# ~208 MB → ~8.4 MB zipped.
 #
 # It then zips the slim framework, computes the SwiftPM package checksum, and
 # prints the exact `url` + `checksum` lines to paste into Package.swift. The URL
