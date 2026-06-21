@@ -7,10 +7,12 @@ is generated from a careful read of `LlamaBackend.swift`,
 `LlamaGenerationDriver.swift`, `LlamaModelLoader.swift`,
 `LlamaEmbeddingBackend.swift`, and the vendored `docs/vendor/llama.h` (llama.cpp
 build **b9744**; the public C API header is byte-identical to b9553, so the
-contract tables below are unchanged). The xcframework is consumed **directly from the upstream
-`ggml-org/llama.cpp` GitHub releases** via a local `.binaryTarget(url:checksum:)`
-in `Package.swift` — there is no `mattt/llama.swift` wrapper in the dependency
-graph anymore (see *Binary vs. Vendored Source* below).
+contract tables below are unchanged). The xcframework is consumed as a
+**self-hosted slim repackage of the upstream `ggml-org/llama.cpp` b9744 release**
+(dSYMs and the unused tvOS/visionOS slices removed) via a local
+`.binaryTarget(url:checksum:)` in `Package.swift` — there is no
+`mattt/llama.swift` wrapper in the dependency graph anymore (see *Binary vs.
+Vendored Source* and *Slimming the xcframework* below).
 
 Use this document when upgrading the xcframework pin: diff `docs/vendor/llama.h`
 against the new version's header, then review every section below for contract
@@ -686,12 +688,15 @@ GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 
 1. Pick the target upstream build `b<NNNN>` from the
    [`ggml-org/llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases).
-   The release asset is `llama-b<NNNN>-xcframework.zip`.
-2. In `Package.swift`, update the `.binaryTarget(name: "llama-cpp", …)` `url`
-   to that asset and refresh its `checksum`. The checksum is SwiftPM's package
-   checksum of the zip — `swift package compute-checksum llama-b<NNNN>-xcframework.zip`
-   on a local download (the same value SwiftPM verifies at resolve time). Then
-   run `swift package resolve`.
+   The upstream release asset is `llama-b<NNNN>-xcframework.zip`.
+2. Run `scripts/repackage-xcframework.sh` for the new build to produce the slim
+   `llama-b<NNNN>-slim.xcframework.zip`, host it as a new `vendor-llama-b<NNNN>`
+   manifold-llama release asset, then in `Package.swift` update the
+   `.binaryTarget(name: "llama-cpp", …)` `url` to that self-hosted slim asset
+   and refresh its `checksum` to the value the script printed (SwiftPM's package
+   checksum of the *slim* zip — the value SwiftPM verifies at resolve time). Then
+   run `swift package resolve`. See *Slimming the xcframework* below for the full
+   procedure.
 3. Refresh `docs/vendor/llama.h` from the resolved xcframework
    (`.build/artifacts/manifold-llama/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/Headers/llama.h`).
    Prepend the four-line `Read-only reference copy.` banner with the new
@@ -710,13 +715,18 @@ GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 
 ### Decision
 
-The llama.cpp xcframework is consumed as a **pre-built binary, straight from
-the upstream `ggml-org/llama.cpp` GitHub releases** — `Package.swift` declares a
-local `.binaryTarget(name: "llama-cpp", url:checksum:)` pointing at
-`llama-b<NNNN>-xcframework.zip` (currently **b9744**), and a one-file local
+The llama.cpp xcframework is consumed as a **pre-built binary** — but as a
+**self-hosted *slim* repackage of the upstream `ggml-org/llama.cpp` release**
+rather than the upstream asset directly. `Package.swift` declares a local
+`.binaryTarget(name: "llama-cpp", url:checksum:)` pointing at the
+`llama-b<NNNN>-slim.xcframework.zip` hosted on the manifold-llama
+`vendor-llama-b<NNNN>` release (currently **b9744**), and a one-file local
 `LlamaSwift` target (`Sources/LlamaSwift/Llama.swift`:
 `@_exported @preconcurrency import llama`) re-exports the C module so the
-`ManifoldLlama` sources keep importing `LlamaSwift` unchanged. This package does
+`ManifoldLlama` sources keep importing `LlamaSwift` unchanged. The slim asset is
+produced from the upstream `llama-b<NNNN>-xcframework.zip` by
+`scripts/repackage-xcframework.sh` (dSYMs + tvOS/visionOS slices removed; see
+*Slimming the xcframework* below). This package does
 **not** compile llama.cpp from source, and **no longer depends on the
 `mattt/llama.swift` wrapper** — it was dropped in favour of pinning the same
 upstream asset directly (url + checksum, no git-tag resolution), which removes
@@ -753,11 +763,14 @@ The opacity of binary diffs is mitigated by two practices:
 
 1. Pick the target upstream build `b<NNNN>` from the
    [`ggml-org/llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases);
-   the asset is `llama-b<NNNN>-xcframework.zip`. Update the
-   `.binaryTarget(name: "llama-cpp", …)` `url` to it in `Package.swift`.
-2. Refresh the `.binaryTarget` `checksum`. It is SwiftPM's package checksum of
-   the zip — download the asset and run
-   `swift package compute-checksum llama-b<NNNN>-xcframework.zip` (the value
+   the upstream asset is `llama-b<NNNN>-xcframework.zip`. **Do not pin it
+   directly** — the production pin points at a self-hosted *slim* repackage of
+   that asset (see *Slimming the xcframework* below).
+2. Run `scripts/repackage-xcframework.sh` for the new build, host the resulting
+   `llama-b<NNNN>-slim.xcframework.zip` as a new `vendor-llama-b<NNNN>`
+   manifold-llama release asset, then update the `.binaryTarget(name:
+   "llama-cpp", …)` `url` to that slim asset and its `checksum` to the package
+   checksum the script printed (SwiftPM's checksum of the *slim* zip, the value
    SwiftPM verifies at resolve). Then run `swift package resolve`.
 3. Copy the new `llama.h` from the resolved xcframework:
    ```
@@ -797,7 +810,20 @@ the three usable slices — `macos-arm64_x86_64`, `ios-arm64`,
 deliberately omits `-debug-symbols`). Measured result for b9744:
 **~627 MB → ~24 MB extracted, ~208 MB → ~8.4 MB zipped.**
 
-To adopt it:
+**This slim asset is the production pin.** `Package.swift`'s
+`.binaryTarget(name: "llama-cpp", …)` points at the self-hosted
+`vendor-llama-b9744` release asset
+(`llama-b9744-slim.xcframework.zip`), not at upstream's
+`llama-b9744-xcframework.zip`. The url + checksum still pin it deterministically;
+only the hosting moved (upstream → this repo's releases) and the bytes shrank.
+
+> **Determinism caveat — produce once, host that exact file.** The slim zip is
+> *not* byte-reproducible (ditto + embedded timestamps), so the hosted asset and
+> the `Package.swift` checksum must come from one and the same build. Never
+> rebuild after uploading: upload the exact zip the script produced and pin that
+> same file's printed checksum.
+
+To re-cut it for a new build:
 
 1. Run `scripts/repackage-xcframework.sh` (defaults to `b9744`; override with
    `BUILD=b<NNNN>` or a positional arg). It downloads the upstream asset
@@ -805,16 +831,20 @@ To adopt it:
    `llama.xcframework`, zips it to `llama-b<NNNN>-slim.xcframework.zip`, and
    prints its `swift package compute-checksum` value plus the exact
    `url`/`checksum` lines to paste into `Package.swift`.
-2. **Host the slim zip as a manifold-llama GitHub release asset** (it is *not*
-   on ggml-org's releases — we produce it):
+2. **Host that exact slim zip as a manifold-llama GitHub release asset** (it is
+   *not* on ggml-org's releases — we produce it):
    ```
-   gh release create xcframework-b<NNNN>-slim \
+   gh release create vendor-llama-b<NNNN> \
      tmp/repackage-xcframework/llama-b<NNNN>-slim.xcframework.zip \
-     --title "llama.cpp b<NNNN> (slim xcframework)" --notes "…"
+     --title "Vendored slim llama.cpp xcframework (b<NNNN>)" \
+     --latest=false --notes "…"
    ```
+   The resulting asset URL is
+   `https://github.com/roryford/manifold-llama/releases/download/vendor-llama-b<NNNN>/llama-b<NNNN>-slim.xcframework.zip`.
 3. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
    asset and its `checksum` to the value the script printed (the package
    checksum of the slim zip, *not* the upstream zip), then run
-   `swift package resolve`.
+   `swift package resolve` to confirm it fetches the hosted URL and the checksum
+   matches.
 4. The slim framework still carries the same `Versions/A/Headers/llama.h`, so
    the header-copy / contract-review steps above are unchanged.
