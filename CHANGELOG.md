@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.8](https://github.com/roryford/manifold-llama/compare/v0.2.7...v0.2.8) (2026-06-21)
+
+
+### Features
+
+* add manifold-tools-llama CLI for running tool-calling scenarios against real GGUF models ([#60](https://github.com/roryford/manifold-llama/issues/60)) ([71089ee](https://github.com/roryford/manifold-llama/commit/71089ee86f7a27e01549d8bb58932bf3e23f04ed))
+* add Mistral [TOOL_CALLS] tool-call dialect to GGUF parser ([#70](https://github.com/roryford/manifold-llama/issues/70)) ([#74](https://github.com/roryford/manifold-llama/issues/74)) ([51d1c29](https://github.com/roryford/manifold-llama/commit/51d1c290cdb2777cd15f51d3d882b611f1e5a2a8))
+
+
+### Bug Fixes
+
+* register only each scenario's requiredTools in manifold-tools-llama (was advertising all 6, overloading small models) ([#66](https://github.com/roryford/manifold-llama/issues/66)) ([baf7d3f](https://github.com/roryford/manifold-llama/commit/baf7d3fbe5b62d4c54518d264b440b127257fbf5))
+* render harness prompts with the model's embedded GGUF chat_template ([#69](https://github.com/roryford/manifold-llama/issues/69)) ([#75](https://github.com/roryford/manifold-llama/issues/75)) ([6cf066c](https://github.com/roryford/manifold-llama/commit/6cf066c66e35796c685169019028f8e8a28aba02))
+* surface typed error for fused-multimodal gemma4/gemma3n GGUFs ([#62](https://github.com/roryford/manifold-llama/issues/62)) ([#68](https://github.com/roryford/manifold-llama/issues/68)) ([c3629c2](https://github.com/roryford/manifold-llama/commit/c3629c2e01b626b015c0348ce8c9f58ae3d7577f))
+
 ## [0.2.7](https://github.com/roryford/manifold-llama/compare/v0.2.6...v0.2.7) (2026-06-20)
 
 
