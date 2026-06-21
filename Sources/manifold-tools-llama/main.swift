@@ -27,6 +27,11 @@ struct CLI {
     var output: URL? = nil
     var fixturesRoot: URL? = nil
     var list: Bool = false
+    /// Number of decoy (distractor) tools to advertise alongside each scenario's
+    /// required tool(s). Used to measure how a model's tool selection degrades as
+    /// the advertised tool set grows. Default 0 preserves the original behaviour
+    /// (advertise only the scenario's `requiredTools`).
+    var extraTools: Int = 0
 
     /// Argument errors exit with status 2 via `exit(2)` + stderr rather than
     /// `precondition` / `fatalError` (those trap with SIGABRT in debug builds,
@@ -59,6 +64,11 @@ struct CLI {
                 i += 1
                 guard i < argv.count else { fail("--fixtures-root requires a value") }
                 cli.fixturesRoot = URL(fileURLWithPath: argv[i], isDirectory: true)
+            case "--extra-tools":
+                i += 1
+                guard i < argv.count else { fail("--extra-tools requires a value") }
+                guard let n = Int(argv[i]), n >= 0 else { fail("--extra-tools requires a non-negative integer") }
+                cli.extraTools = n
             case "--list":
                 cli.list = true
             case "--help", "-h":
@@ -90,13 +100,19 @@ struct CLI {
           --scenario <id>       Scenario id (matches JSON 'id') or 'all'. Default: all.
           --output <path>       Transcript JSONL destination. Default: tmp/manifold-tools-llama/<iso>.jsonl.
           --fixtures-root <dir> Override the file/dir tool fixture root. Default: bundled fixtures.
+          --extra-tools <N>     Advertise N decoy (distractor) tools alongside each
+                                scenario's required tool(s). Decoys are plausible but
+                                never the correct answer; success still requires the
+                                REAL tool to be dispatched. Default: 0. Max useful: 24.
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
         EXIT
           0 — all scenarios passed.
-          1 — at least one scenario or assertion failed (or a load/setup error).
+          1 — at least one scenario or assertion failed (or a non-load setup error).
           2 — bad arguments.
+          3 — the model FAILED TO LOAD (arch / llama.cpp version skew). Distinct
+              from 1 so a sweep can tell "never loaded" from "loaded, no dispatch".
 
         REQUIREMENTS
           Apple Silicon + Metal (llama.cpp has no simulator Metal support) and a
@@ -137,6 +153,139 @@ func makeFullRegistry(fixturesRoot: URL) -> ToolRegistry {
     registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
     registry.register(HttpGetFixtureTool.makeExecutor())
     return registry
+}
+
+// MARK: - Decoy tools (--extra-tools)
+
+/// A fixed pool of plausible, distinct decoy `ToolDefinition`s used to pad the
+/// advertised tool set when `--extra-tools N` is passed. None of these is ever
+/// the correct answer for the single-tool scenarios (`now` / `calc` / file
+/// reads), so a model that dispatches one has been distracted — the scenario's
+/// own assertions (which require the REAL tool) still gate pass/fail.
+///
+/// Names and parameter schemas are deliberately realistic and varied so the
+/// model faces genuine selection pressure rather than obvious throwaways. There
+/// are 24 entries so `--extra-tools` can pad well past 20.
+enum DecoyTools {
+
+    /// Helper to build a one-string-parameter object schema.
+    private static func obj(_ props: [(String, String)], required: [String]) -> JSONSchemaValue {
+        var properties: [String: JSONSchemaValue] = [:]
+        for (name, desc) in props {
+            properties[name] = .object([
+                "type": .string("string"),
+                "description": .string(desc)
+            ])
+        }
+        return .object([
+            "type": .string("object"),
+            "properties": .object(properties),
+            "required": .array(required.map(JSONSchemaValue.string))
+        ])
+    }
+
+    /// The ordered decoy pool. `--extra-tools N` advertises the first N entries.
+    static let pool: [ToolDefinition] = [
+        ToolDefinition(name: "get_weather", description: "Returns the current weather for a city.",
+                       parameters: obj([("city", "City name")], required: ["city"])),
+        ToolDefinition(name: "send_email", description: "Sends an email to a recipient.",
+                       parameters: obj([("to", "Recipient address"), ("subject", "Subject line"), ("body", "Email body")], required: ["to", "body"])),
+        ToolDefinition(name: "search_web", description: "Searches the web and returns result snippets.",
+                       parameters: obj([("query", "Search query")], required: ["query"])),
+        ToolDefinition(name: "translate_text", description: "Translates text into a target language.",
+                       parameters: obj([("text", "Text to translate"), ("target_language", "Target language code")], required: ["text", "target_language"])),
+        ToolDefinition(name: "set_timer", description: "Starts a countdown timer for the given duration.",
+                       parameters: obj([("duration", "Duration, e.g. '10 minutes'")], required: ["duration"])),
+        ToolDefinition(name: "currency_convert", description: "Converts an amount between two currencies.",
+                       parameters: obj([("amount", "Amount to convert"), ("from", "Source currency code"), ("to", "Target currency code")], required: ["amount", "from", "to"])),
+        ToolDefinition(name: "create_event", description: "Creates a calendar event.",
+                       parameters: obj([("title", "Event title"), ("start", "Start time"), ("end", "End time")], required: ["title", "start"])),
+        ToolDefinition(name: "get_stock_price", description: "Returns the latest price for a stock ticker.",
+                       parameters: obj([("ticker", "Stock ticker symbol")], required: ["ticker"])),
+        ToolDefinition(name: "roll_dice", description: "Rolls dice and returns the total.",
+                       parameters: obj([("notation", "Dice notation, e.g. '2d6'")], required: ["notation"])),
+        ToolDefinition(name: "unit_convert", description: "Converts a value between measurement units.",
+                       parameters: obj([("value", "Numeric value"), ("from_unit", "Source unit"), ("to_unit", "Target unit")], required: ["value", "from_unit", "to_unit"])),
+        ToolDefinition(name: "send_sms", description: "Sends a text message to a phone number.",
+                       parameters: obj([("phone", "Destination phone number"), ("message", "Message text")], required: ["phone", "message"])),
+        ToolDefinition(name: "get_directions", description: "Returns driving directions between two places.",
+                       parameters: obj([("origin", "Starting location"), ("destination", "Ending location")], required: ["origin", "destination"])),
+        ToolDefinition(name: "play_music", description: "Plays a song or playlist.",
+                       parameters: obj([("query", "Song, artist, or playlist name")], required: ["query"])),
+        ToolDefinition(name: "set_reminder", description: "Creates a reminder at a given time.",
+                       parameters: obj([("text", "Reminder text"), ("time", "When to remind")], required: ["text", "time"])),
+        ToolDefinition(name: "get_news", description: "Returns recent news headlines for a topic.",
+                       parameters: obj([("topic", "News topic or category")], required: ["topic"])),
+        ToolDefinition(name: "book_flight", description: "Searches and books a flight.",
+                       parameters: obj([("origin", "Departure airport"), ("destination", "Arrival airport"), ("date", "Travel date")], required: ["origin", "destination", "date"])),
+        ToolDefinition(name: "get_definition", description: "Returns the dictionary definition of a word.",
+                       parameters: obj([("word", "Word to define")], required: ["word"])),
+        ToolDefinition(name: "create_note", description: "Saves a note to the user's notebook.",
+                       parameters: obj([("title", "Note title"), ("content", "Note body")], required: ["content"])),
+        ToolDefinition(name: "get_traffic", description: "Returns current traffic conditions for a route.",
+                       parameters: obj([("route", "Route or area name")], required: ["route"])),
+        ToolDefinition(name: "shorten_url", description: "Creates a shortened URL.",
+                       parameters: obj([("url", "URL to shorten")], required: ["url"])),
+        ToolDefinition(name: "get_recipe", description: "Returns a recipe for a dish.",
+                       parameters: obj([("dish", "Dish name")], required: ["dish"])),
+        ToolDefinition(name: "track_package", description: "Returns the delivery status of a package.",
+                       parameters: obj([("tracking_number", "Carrier tracking number")], required: ["tracking_number"])),
+        ToolDefinition(name: "get_horoscope", description: "Returns the daily horoscope for a star sign.",
+                       parameters: obj([("sign", "Zodiac sign")], required: ["sign"])),
+        ToolDefinition(name: "convert_timezone", description: "Converts a time between two time zones.",
+                       parameters: obj([("time", "Time to convert"), ("from_zone", "Source time zone"), ("to_zone", "Target time zone")], required: ["time", "from_zone", "to_zone"])),
+    ]
+
+    /// Result shape every decoy executor returns. Decoys should never actually be
+    /// dispatched on a passing run; if a model does call one, this benign payload
+    /// keeps the runner loop alive so the transcript records the wrong-tool call.
+    struct DecoyResult: Encodable, Sendable {
+        let note: String
+    }
+
+    /// Builds a no-op executor for a decoy definition. Accepts any arguments
+    /// (`EmptyArgs` is permissive) and returns a fixed marker so a wrong-tool
+    /// dispatch is visible in the transcript without crashing the run.
+    static func makeExecutor(for definition: ToolDefinition) -> TypedToolExecutor<EmptyArgs, DecoyResult> {
+        TypedToolExecutor(definition: definition) { _ in
+            DecoyResult(note: "decoy tool '\(definition.name)' is not the right tool for this task")
+        }
+    }
+}
+
+/// Registers the first `count` decoy tools (clamped to the pool size) into the
+/// registry and returns their names so the caller can add them to the scenario's
+/// advertised set. Returns an empty array when `count <= 0`.
+@MainActor
+func registerDecoys(count: Int, into registry: ToolRegistry) -> [String] {
+    guard count > 0 else { return [] }
+    let n = min(count, DecoyTools.pool.count)
+    let chosen = Array(DecoyTools.pool.prefix(n))
+    for definition in chosen {
+        registry.register(DecoyTools.makeExecutor(for: definition))
+    }
+    return chosen.map(\.name)
+}
+
+/// Returns a copy of `scenario` whose `requiredTools` also lists `decoyNames`.
+///
+/// `ScenarioRunner` advertises exactly the tools named in `requiredTools` (it
+/// filters the registry by that set), so padding the list is how decoys reach
+/// the model. The scenario's assertions are unchanged — success still requires
+/// the original required tool to be dispatched with correct args. `Scenario` has
+/// no public memberwise initialiser, so we round-trip through its `Codable`
+/// conformance and splice the names in via JSON.
+func padScenario(_ scenario: Scenario, advertisingAlso decoyNames: [String]) throws -> Scenario {
+    guard !decoyNames.isEmpty else { return scenario }
+    let data = try JSONEncoder().encode(scenario)
+    guard var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return scenario
+    }
+    let existing = (dict["requiredTools"] as? [String]) ?? []
+    // Required tool(s) first so the real tool keeps a stable, leading position.
+    dict["requiredTools"] = existing + decoyNames.filter { !existing.contains($0) }
+    let patched = try JSONSerialization.data(withJSONObject: dict)
+    return try JSONDecoder().decode(Scenario.self, from: patched)
 }
 
 /// Loads the bundled tool-calling scenarios.
@@ -256,6 +405,13 @@ func runCLI() async -> Int32 {
     // all-tools registry + a single service is sufficient — no per-scenario
     // service churn (#66 scoping is preserved by the runner's own filter).
     let registry = makeFullRegistry(fixturesRoot: fixturesRoot)
+    // Decoy padding (--extra-tools): register N distractor tools into the shared
+    // registry so the runner can advertise them alongside each scenario's real
+    // tool. Names are spliced into each scenario's `requiredTools` below.
+    let decoyNames = registerDecoys(count: cli.extraTools, into: registry)
+    if !decoyNames.isEmpty {
+        print("Decoy tools (--extra-tools \(cli.extraTools)): \(decoyNames.joined(separator: ", "))")
+    }
     let service = InferenceService(toolRegistry: registry)
     // Register the GGUF backend factory so `loadModel(from:plan:)` constructs and
     // installs the backend through the coordinator (the path that captures the
@@ -292,15 +448,57 @@ func runCLI() async -> Int32 {
             + ", detected template: \(modelInfo.detectedPromptTemplate.map(String.init(describing:)) ?? "nil")")
         try await service.loadModel(from: modelInfo, plan: .systemManaged(requestedContextSize: 4096))
     } catch {
-        FileHandle.standardError.write(Data("failed to load model: \(error)\n".utf8))
-        return 1
+        // Fix 2 — load failure is a DISTINCT, loud outcome (separate exit code 3),
+        // so a sweep can tell "model never loaded" (arch/llama.cpp version skew —
+        // e.g. qwen3.5-4b's `rope.dimension_sections` mismatch, gemma4-e4b's
+        // `unsupportedModelArchitecture`) apart from "loaded but did not dispatch"
+        // (empty/garbage transcript, exit 1). Previously both collapsed to a
+        // generic "failed to load model" + exit 1 that read as "no dispatch" in
+        // the campaign and caused a misdiagnosis. Surface the underlying error
+        // verbatim (`errorDescription` when available, then the raw value) so the
+        // root cause is visible without re-running under a debugger.
+        let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        let banner = "LOAD FAILED: \(modelURL.lastPathComponent): \(detail)"
+        FileHandle.standardError.write(Data((banner + "\n").utf8))
+        print(banner)
+        print("  (model never loaded — this is a load failure, NOT a tool-dispatch failure)")
+        // Best-effort teardown of any half-constructed backend before exit.
+        if let backend = backendBox.backend {
+            await backend.unloadAndWait()
+        }
+        return 3
     }
     // Teardown must be awaited before `exit()` reclaims the process, so a fire-
     // and-forget `Task` in `defer` would race the exit and routinely never run.
     // Run the scenarios, then await `unloadAndWait()` on every exit path below.
 
+    // Templateless-model tool-format instruction is now handled UPSTREAM: as of
+    // ManifoldKit 0.58 (MK#2002), `GenerationQueue.toolAugmentedSystemPrompt`
+    // folds `ToolSystemPromptBuilder.preferTools(for:)` — which spells out the
+    // exact `{"name": …, "arguments": {…}}` envelope, named-argument enumeration,
+    // and the "no Python-style call" prohibition — into the system prompt for any
+    // model whose renderer does NOT emit tools natively (Phi-3.5, Mistral-7B, and
+    // every non-`gemma4` enum template). Since the harness routes through the
+    // production `InferenceService` → `GenerationQueue` path (#69), that preamble
+    // already reaches templateless models. The harness no longer injects its own
+    // instruction — doing so would double-instruct. (Verified: Phi-3.5 dispatches
+    // `calc` with correct args on 0.58 with no harness injection.)
+
     var allPassed = true
-    for scenario in filtered {
+    for baseScenario in filtered {
+        let scenario: Scenario
+        do {
+            // Decoy padding extends `requiredTools` so `--extra-tools` decoys are
+            // advertised alongside the scenario's real tool. The templateless
+            // tool-format instruction is supplied upstream by 0.58's
+            // `ToolSystemPromptBuilder` fold (MK#2002), so no per-scenario system
+            // prompt injection happens here.
+            scenario = try padScenario(baseScenario, advertisingAlso: decoyNames)
+        } catch {
+            allPassed = false
+            print("\n── \(baseScenario.id) — ERROR preparing scenario: \(error)")
+            continue
+        }
         print("\n── \(scenario.id) (\(scenario.description)) ──")
         print("  advertising tool(s): \(scenario.requiredTools.joined(separator: ", "))")
         do {
