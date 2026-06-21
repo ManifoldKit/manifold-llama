@@ -6,7 +6,8 @@ invariants, capacity limits, ownership semantics, and known failure modes. It
 is generated from a careful read of `LlamaBackend.swift`,
 `LlamaGenerationDriver.swift`, `LlamaModelLoader.swift`,
 `LlamaEmbeddingBackend.swift`, and the vendored `docs/vendor/llama.h` (llama.cpp
-build **b9553**). The xcframework is consumed **directly from the upstream
+build **b9744**; the public C API header is byte-identical to b9553, so the
+contract tables below are unchanged). The xcframework is consumed **directly from the upstream
 `ggml-org/llama.cpp` GitHub releases** via a local `.binaryTarget(url:checksum:)`
 in `Package.swift` — there is no `mattt/llama.swift` wrapper in the dependency
 graph anymore (see *Binary vs. Vendored Source* below).
@@ -656,7 +657,7 @@ are unaffected because Invariant #1 kicks in.
 | Affected symbol | `llama_sampler_init_grammar` → internal `llama_grammar_advance_stack()` |
 | Vulnerability | A buffer overflow in the grammar stack-advance logic allowed a crafted GBNF grammar string (or a JSON Schema with certain constructs) to overflow an internal stack buffer, enabling potential arbitrary code execution. |
 | Fixed in | llama.cpp build **b8774** |
-| Vendored build | **b9553** (upstream `ggml-org/llama.cpp` release) — **fix is included** (b9553 ≫ b8774) |
+| Vendored build | **b9744** (upstream `ggml-org/llama.cpp` release) — **fix is included** (b9744 ≫ b8774) |
 | Status | ✅ **Mitigated in the vendored binary.** |
 
 #### Defence in depth
@@ -677,7 +678,7 @@ just the CVE PoC shapes:
 
 Callers that pass a GBNF string directly via `GenerationConfig.grammar` (not
 via tool definitions) are still not covered by the pre-validator. Those
-strings are now safe against the CVE on the b9553 binary, but a malformed
+strings are now safe against the CVE on the b9744 binary, but a malformed
 GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 (see Violation #6).
 
@@ -712,7 +713,7 @@ GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 The llama.cpp xcframework is consumed as a **pre-built binary, straight from
 the upstream `ggml-org/llama.cpp` GitHub releases** — `Package.swift` declares a
 local `.binaryTarget(name: "llama-cpp", url:checksum:)` pointing at
-`llama-b<NNNN>-xcframework.zip` (currently **b9553**), and a one-file local
+`llama-b<NNNN>-xcframework.zip` (currently **b9744**), and a one-file local
 `LlamaSwift` target (`Sources/LlamaSwift/Llama.swift`:
 `@_exported @preconcurrency import llama`) re-exports the C module so the
 `ManifoldLlama` sources keep importing `LlamaSwift` unchanged. This package does

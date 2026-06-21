@@ -1,6 +1,6 @@
 // Read-only reference copy of llama.cpp's public C API header.
-// Source: ggml-org/llama.cpp release b9553 — llama-b9553-xcframework.zip
-// xcframework checksum: 8d7d15297300c2724d4630c855d5eb7d92a4eca6c3fd037cdb28b55854e49a67
+// Source: ggml-org/llama.cpp release b9744 — llama-b9744-xcframework.zip
+// xcframework checksum: 8839b12b8819b38a64e1b7d6495914d514bf4b5d5751222377cc1afdbe77a4fc
 // Do not edit; refresh per docs/LLAMA_CONTRACT.md upgrade procedure on each pin bump.
 #ifndef LLAMA_H
 #define LLAMA_H
