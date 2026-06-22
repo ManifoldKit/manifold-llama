@@ -51,6 +51,11 @@ let package = Package(
                 // @_spi(BackendInternals) import in LlamaBackend.swift requires
                 // the direct product edge.
                 .product(name: "ManifoldContract", package: "ManifoldKit"),
+                // ManifoldModelCatalog (MK 0.59+) provides
+                // `ChatTemplateToolDescriptor` — ToolCallGrammar.swift keys its
+                // emitted GBNF on the descriptor's dialect/argEncoding. Direct
+                // product edge rather than via core's @_exported chain.
+                .product(name: "ManifoldModelCatalog", package: "ManifoldKit"),
                 "LlamaSwift",
             ],
             path: "Sources/ManifoldLlama"

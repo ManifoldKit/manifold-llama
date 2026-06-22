@@ -34,6 +34,12 @@ struct CLI {
     /// no Metal, no generation. Distinct from the scenario soak (the measured
     /// positive verdict) and from `--bench` (timing).
     var describe: Bool = false
+    /// Before/after grammar-constrained tool-call probe (#2005 follow-on spike).
+    /// Drives the 01-now / 02-calc / 03-read prompts directly through
+    /// `InferenceService.enqueue` with `GenerationConfig.grammar` OFF then ON,
+    /// where ON is the GBNF emitted by `ToolCallGrammar` for the model's dialect.
+    /// Measures the first-turn parseable-tool-call rate. Requires a loaded model.
+    var grammarTools: Bool = false
     /// Number of decoy (distractor) tools to advertise alongside each scenario's
     /// required tool(s). Used to measure how a model's tool selection degrades as
     /// the advertised tool set grows. Default 0 preserves the original behaviour
@@ -119,6 +125,8 @@ struct CLI {
                 cli.context = n
             case "--describe":
                 cli.describe = true
+            case "--grammar-tools":
+                cli.grammarTools = true
             case "--list":
                 cli.list = true
             case "--help", "-h":
@@ -180,6 +188,14 @@ struct CLI {
                                 RenderConsistencyChecker verdict. Reads GGUF
                                 metadata only — no weights, no Metal, no
                                 generation. Runs anywhere, including CI.
+          --grammar-tools       Run the before/after GRAMMAR-CONSTRAINED tool-call
+                                probe (#2005 spike): drives the 01-now / 02-calc /
+                                03-read prompts directly through InferenceService
+                                with GenerationConfig.grammar OFF then ON (ON = the
+                                GBNF ToolCallGrammar emits for the model's dialect),
+                                and prints the first-turn parseable-tool-call rate
+                                for each condition. Requires --model (loads weights).
+                                Measures dispatch/parse only — NOT grounding.
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
@@ -630,6 +646,20 @@ func runCLI() async -> Int32 {
     // already reaches templateless models. The harness no longer injects its own
     // instruction — doing so would double-instruct. (Verified: Phi-3.5 dispatches
     // `calc` with correct args on 0.58 with no harness injection.)
+
+    // Grammar-tools probe short-circuits the scenario loop: it drives the
+    // 01/02/03 prompts directly through InferenceService.enqueue with
+    // GenerationConfig.grammar OFF then ON and prints the parseable-tool-call rate
+    // (#2005 follow-on spike). Tear down the backend before returning.
+    if cli.grammarTools {
+        let code = await GrammarToolProbe.run(service: service, registry: registry, modelInfo: modelInfo)
+        if let backend = backendBox.backend {
+            await backend.unloadAndWait()
+        } else {
+            service.unloadModel()
+        }
+        return code
+    }
 
     var allPassed = true
     for baseScenario in filtered {
