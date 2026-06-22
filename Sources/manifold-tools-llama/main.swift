@@ -14,6 +14,7 @@
 // a local `.gguf` model. Compilation does not need a model; running does.
 import Foundation
 import ManifoldInference
+import ManifoldModelCatalog
 import ManifoldTools
 import ManifoldLlama
 
@@ -27,6 +28,12 @@ struct CLI {
     var output: URL? = nil
     var fixturesRoot: URL? = nil
     var list: Bool = false
+    /// Static tool-call capability report (issue #2005 layers 1+2): parses the
+    /// model's embedded chat template into a `ChatTemplateToolDescriptor` and
+    /// runs `RenderConsistencyChecker`. Reads GGUF metadata only — NO weights,
+    /// no Metal, no generation. Distinct from the scenario soak (the measured
+    /// positive verdict) and from `--bench` (timing).
+    var describe: Bool = false
     /// Number of decoy (distractor) tools to advertise alongside each scenario's
     /// required tool(s). Used to measure how a model's tool selection degrades as
     /// the advertised tool set grows. Default 0 preserves the original behaviour
@@ -110,6 +117,8 @@ struct CLI {
                 guard i < argv.count else { fail("--context requires a value") }
                 guard let n = Int(argv[i]), n > 0 else { fail("--context requires a positive integer") }
                 cli.context = n
+            case "--describe":
+                cli.describe = true
             case "--list":
                 cli.list = true
             case "--help", "-h":
@@ -164,6 +173,13 @@ struct CLI {
                                 scenario's required tool(s). Decoys are plausible but
                                 never the correct answer; success still requires the
                                 REAL tool to be dispatched. Default: 0. Max useful: 24.
+          --describe            Print the STATIC tool-call capability report for
+                                --model (issue #2005 layers 1+2): the
+                                ChatTemplateToolDescriptor (toolsExpressible,
+                                declared dialect, extractability) and the
+                                RenderConsistencyChecker verdict. Reads GGUF
+                                metadata only — no weights, no Metal, no
+                                generation. Runs anywhere, including CI.
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
@@ -387,6 +403,53 @@ func resolveFixturesRoot(_ override: URL?) -> URL {
     return bundled
 }
 
+/// `--describe`: static tool-call capability report (issue #2005 layers 1+2).
+///
+/// Reads GGUF metadata only (`ModelInfo.load`), builds the layer-1
+/// `ChatTemplateToolDescriptor` from the embedded `tokenizer.chat_template`, and
+/// runs the layer-2 `RenderConsistencyChecker`. No weights are mapped, no Metal
+/// context is created, and nothing is generated — so this runs anywhere, in the
+/// simulator, and in CI.
+///
+/// Exit codes mirror the rest of the tool: `0` success, `1` metadata read
+/// failure. The capability verdict itself is informational (printed), not an
+/// exit code — a `toolless` model is a legitimate, successful describe.
+func describeModel(_ modelURL: URL) -> Int32 {
+    let modelInfo: ModelInfo
+    do {
+        modelInfo = try ModelInfo.load(ggufURL: modelURL)
+    } catch {
+        FileHandle.standardError.write(Data("failed to read GGUF metadata: \(error)\n".utf8))
+        return 1
+    }
+
+    let raw = modelInfo.chatTemplateRaw
+    let descriptor = ChatTemplateToolDescriptor(parsingChatTemplate: raw)
+    let consistency = RenderConsistencyChecker.check(chatTemplateRaw: raw)
+
+    func dialectString(_ d: ChatTemplateToolDescriptor.ToolCallDialect?) -> String {
+        guard let d else { return "—" }
+        let open = d.openDelimiter ?? "(none)"
+        let close = d.closeDelimiter ?? "(none)"
+        return "open=\(open) close=\(close) args=\(d.argEncoding.rawValue)"
+    }
+
+    print("Model: \(modelURL.lastPathComponent)")
+    print("  embedded chat_template: \(raw != nil ? "present" : "ABSENT")")
+    print("  — Layer 1 (ChatTemplateToolDescriptor, static) —")
+    print("    toolsExpressible : \(descriptor.toolsExpressible)")
+    print("    declaredDialect  : \(dialectString(descriptor.declaredDialect))")
+    print("    extractability   : \(descriptor.extractability.rawValue)")
+    print("  — Layer 2 (RenderConsistencyChecker, static) —")
+    print("    status                  : \(consistency.status)")
+    print("    toolDefinitionRendered  : \(consistency.toolDefinitionRendered)")
+    print("    declaredDelimiterRendered: \(consistency.declaredDelimiterRendered.map(String.init(describing:)) ?? "n/a")")
+    if !consistency.detail.isEmpty {
+        print("    detail                  : \(consistency.detail)")
+    }
+    return 0
+}
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -417,6 +480,17 @@ func runCLI() async -> Int32 {
     guard FileManager.default.fileExists(atPath: modelURL.path) else {
         FileHandle.standardError.write(Data("model file not found: \(modelURL.path)\n".utf8))
         return 1
+    }
+
+    // Describe mode short-circuits everything: it reads GGUF metadata only and
+    // reports the STATIC tool-call capability (issue #2005 layers 1+2) — no
+    // weights, no Metal, no generation. This is the free/cheap signal that
+    // precedes the scenario soak: a model whose template cannot express tools
+    // (no tools guard) is honestly `unsupported` without ever running it, and a
+    // template that declares a dialect MK's renderer does not emit is flagged by
+    // the render-consistency check (the #1909 class) with no model run.
+    if cli.describe {
+        return describeModel(modelURL)
     }
 
     // Benchmark mode short-circuits the scenario harness: it drives LlamaBackend

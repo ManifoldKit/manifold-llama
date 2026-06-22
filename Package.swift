@@ -93,6 +93,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ManifoldTools", package: "ManifoldKit"),
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
+                // ManifoldModelCatalog (MK 0.59+) provides
+                // `ChatTemplateToolDescriptor` — the static, render-honest
+                // tool-call dialect/negative-gate descriptor (issue #2005 layer
+                // 1). Used by `--describe` to report capability without loading
+                // weights. `RenderConsistencyChecker` (layer 2) lives in
+                // ManifoldInference (already linked above).
+                .product(name: "ManifoldModelCatalog", package: "ManifoldKit"),
                 "ManifoldLlama",
             ],
             path: "Sources/manifold-tools-llama",
@@ -120,6 +127,9 @@ let package = Package(
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),
                 .product(name: "ManifoldBackendTestKit", package: "ManifoldKit"),
+                // ManifoldModelCatalog (MK 0.59+): `ChatTemplateToolDescriptor`
+                // exercised by the `--describe` integration test (layers 1+2).
+                .product(name: "ManifoldModelCatalog", package: "ManifoldKit"),
                 // Test-only: render the vendored gemma-4 chat_template fixture
                 // through the real Jinja engine (issue #45 render assertions).
                 .product(name: "Jinja", package: "swift-jinja"),
