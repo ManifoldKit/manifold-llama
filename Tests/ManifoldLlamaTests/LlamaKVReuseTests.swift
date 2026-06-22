@@ -129,6 +129,55 @@ final class LlamaKVReuseTests: XCTestCase {
         )
     }
 
+    // MARK: - 1b. secureWipe() between turns prevents reuse (clean context)
+
+    /// #99 ground-truth: `manifold-tools-llama --scenario all` reuses ONE
+    /// backend across every scenario, and the orchestrator reuses the resident
+    /// KV cache turn-to-turn (the `.kvCacheReuse` event above proves it). That
+    /// is what made a later scenario prefill on an earlier scenario's tokens and
+    /// truncate intermittently. The CLI fix calls `resetConversation()` +
+    /// `secureWipe()` before each scenario; this test pins the behavioural
+    /// guarantee that fix relies on — wiping between two prefix-sharing turns
+    /// makes the second turn start CLEAN (no `.kvCacheReuse`), exactly as if it
+    /// ran in isolation.
+    ///
+    /// This is the inverse of `test_twoTurnsEmitKVReuseSecondTurn`: same two
+    /// prompts, but with a wipe interposed, reuse must NOT fire.
+    ///
+    /// Sabotage: drop the `backend.secureWipe()` call below — turn 2 reuses
+    /// turn 1's prefix again and the `XCTAssertNil` trips.
+    func test_secureWipeBetweenTurnsPreventsReuse() async throws {
+        guard let modelURL = HardwareRequirements.findGGUFModel() else {
+            throw XCTSkip("No GGUF model on disk. Set LLAMA_TEST_MODEL or place a .gguf in ~/Documents/Models/.")
+        }
+
+        let backend = LlamaBackend()
+        addTeardownBlock { await backend.unloadAndWait() }
+        try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
+
+        let turn1Prompt = "The Swift programming language was created by"
+        let turn2Prompt = turn1Prompt + " Apple in 2014 and announced at WWDC."
+
+        let config = GenerationConfig(temperature: 0.1, maxOutputTokens: 16)
+
+        let stream1 = try backend.generate(prompt: turn1Prompt, systemPrompt: nil, config: config)
+        _ = try await drainAllEvents(stream1)
+        try await waitForGeneratingFalse(backend)
+
+        // Interpose the wipe the CLI now performs between scenarios. Without it,
+        // turn 2 would reuse turn 1's prefix (see test_twoTurnsEmitKVReuseSecondTurn).
+        backend.resetConversation()
+        backend.secureWipe()
+
+        let stream2 = try backend.generate(prompt: turn2Prompt, systemPrompt: nil, config: config)
+        let events2 = try await drainAllEvents(stream2)
+
+        XCTAssertNil(
+            kvReuseValue(in: events2),
+            "After resetConversation()+secureWipe(), turn 2 must NOT emit .kvCacheReuse — the cleared cache means it prefills from scratch, giving each --scenario-all scenario a clean context (#99)"
+        )
+    }
+
     // MARK: - 2. System-prompt change breaks reuse
 
     /// Changing the system prompt between turns invalidates the prefix —

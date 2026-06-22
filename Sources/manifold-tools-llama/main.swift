@@ -633,6 +633,21 @@ func runCLI() async -> Int32 {
 
     var allPassed = true
     for baseScenario in filtered {
+        // #99 — `--scenario all` reuses a single `service` (one backend, one KV
+        // cache, one conversation) across every scenario. The orchestrator
+        // appends each `enqueue` turn to that shared conversation and reuses the
+        // resident KV cache (it emits `.kvCacheReuse`), so a later scenario
+        // prefills on top of an earlier scenario's tokens and can run out of
+        // context budget mid-answer — observed as intermittent truncation (e.g.
+        // qwen3-0.6B's `structured-json-extraction` clipped to ` ```json\n `).
+        // Reset the conversation and zero the KV cache BEFORE each scenario so
+        // every scenario starts from a clean context, matching the deterministic
+        // behaviour of an isolated `--scenario <id>` run. Done at the top of the
+        // loop (not the bottom) so it still runs after a `continue`, and is a
+        // harmless no-op on the very first iteration.
+        service.resetConversation()
+        service.secureWipe()
+
         let scenario: Scenario
         do {
             // Decoy padding extends `requiredTools` so `--extra-tools` decoys are
