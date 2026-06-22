@@ -24,7 +24,7 @@ let package = Package(
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.58.0")),
+        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.59.0")),
         // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
         // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
         // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable
@@ -93,6 +93,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ManifoldTools", package: "ManifoldKit"),
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
+                // ManifoldModelCatalog (MK 0.59+) provides
+                // `ChatTemplateToolDescriptor` — the static, render-honest
+                // tool-call dialect/negative-gate descriptor (issue #2005 layer
+                // 1). Used by `--describe` to report capability without loading
+                // weights. `RenderConsistencyChecker` (layer 2) lives in
+                // ManifoldInference (already linked above).
+                .product(name: "ManifoldModelCatalog", package: "ManifoldKit"),
                 "ManifoldLlama",
             ],
             path: "Sources/manifold-tools-llama",
