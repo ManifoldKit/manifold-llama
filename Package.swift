@@ -127,6 +127,9 @@ let package = Package(
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),
                 .product(name: "ManifoldBackendTestKit", package: "ManifoldKit"),
+                // ManifoldModelCatalog (MK 0.59+): `ChatTemplateToolDescriptor`
+                // exercised by the `--describe` integration test (layers 1+2).
+                .product(name: "ManifoldModelCatalog", package: "ManifoldKit"),
                 // Test-only: render the vendored gemma-4 chat_template fixture
                 // through the real Jinja engine (issue #45 render assertions).
                 .product(name: "Jinja", package: "swift-jinja"),
