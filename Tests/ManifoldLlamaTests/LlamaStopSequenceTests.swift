@@ -183,13 +183,29 @@ final class LlamaStopSequenceTests: XCTestCase {
         XCTAssertEqual(Set(resolved), Set(LlamaGenerationDriver.defaultControlMarkerStops))
     }
 
-    func test_defaultControlMarkers_coverCrossFamily() {
+    func test_defaultControlMarkers_areEndOfTurnTerminatorsOnly() {
         let set = Set(LlamaGenerationDriver.defaultControlMarkerStops)
-        // Spot-check the cross-family coverage the fix exists to provide.
-        for required in ["<|im_end|>", "<|im_start|>", "<end_of_turn>",
-                         "<|eot_id|>", "<|end_of_text|>", "</s>", "[/INST]", "[tool_call]"] {
-            XCTAssertTrue(set.contains(required), "Missing required cross-family stop: \(required)")
+        // Only true end-of-turn terminators are safe blanket defaults: terminating
+        // on them can never truncate legitimate content because the turn is over.
+        for required in ["<|im_end|>", "<end_of_turn>",
+                         "<|eot_id|>", "<|end_of_text|>", "</s>"] {
+            XCTAssertTrue(set.contains(required), "Missing required end-of-turn stop: \(required)")
         }
+        // Start-of-turn markers, instruction delimiters, and tool-call openers can
+        // legitimately precede or appear within real content, so they must NOT be
+        // blanket defaults — terminating on them truncated a valid answer in a real
+        // run. Callers can still pass them via config.stopSequences (see below).
+        for excluded in ["<|im_start|>", "[/INST]", "[tool_call]"] {
+            XCTAssertFalse(set.contains(excluded), "Non-terminator must NOT be a default stop: \(excluded)")
+        }
+    }
+
+    func test_callerSuppliedStop_honorsArbitraryNonDefaultMarker() {
+        // A start/opener marker is not a default, but a caller that explicitly wants
+        // to stop on it can still pass it through config.stopSequences.
+        let (emit, stopped) = run(stops: ["<|im_start|>"], chunks: ["answer<|im_start|>user\nfake"])
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(emit, "answer")
     }
 
     // MARK: - Default markers caught when leaked as plain text

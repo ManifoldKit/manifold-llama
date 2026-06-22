@@ -1038,29 +1038,36 @@ import ManifoldHardware
     /// set only contains the loaded model's *native* turn markers. ChatML training
     /// contamination means non-ChatML small instruct models (Mistral `[INST]`,
     /// Gemma `<end_of_turn>`, Llama-3 `<|eot_id|>`) frequently emit *foreign* control
-    /// strings — e.g. `<|im_end|>`, `<|im_start|>`, `[tool_call]` — as PLAIN TEXT
+    /// strings — e.g. a foreign end-of-turn marker like `<|im_end|>` — as PLAIN TEXT
     /// rather than as real EOG token IDs. `llama_vocab_is_eog` never fires on those,
     /// so without a text-level stop the model runs on and fabricates entire fake
     /// multi-turn conversations and bogus tool calls.
     ///
-    /// Membership criteria: every entry is a literal control/turn-delimiter marker
-    /// that should never appear in legitimate assistant prose. We deliberately
-    /// EXCLUDE bare common words and anything that could occur in normal output. The
-    /// set spans the major instruct families:
-    ///   - ChatML:   `<|im_end|>`, `<|im_start|>`
+    /// Membership criteria: every entry must be a true *end-of-turn terminator* —
+    /// a marker that signals "the assistant has ended its turn". Only such markers
+    /// are safe as blanket cross-family defaults: terminating on them can never
+    /// truncate legitimate content because, by definition, the turn is over.
+    ///
+    /// We deliberately EXCLUDE start-of-turn markers (`<|im_start|>`), instruction
+    /// delimiters (`[/INST]`), and tool-call openers (`[tool_call]`). Those strings
+    /// can legitimately *precede* or appear *within* real content — a model may emit
+    /// a stray start/opener marker before a valid answer — so treating them as stops
+    /// truncates valid output and drops everything after them. (A real run regressed
+    /// to empty output this way: a model emitted a stray marker then a correct answer,
+    /// and we truncated to nothing.) Callers that genuinely need to stop on such a
+    /// marker can still pass it via `config.stopSequences`.
+    ///
+    /// The set spans the major instruct families' end-of-turn terminators:
+    ///   - ChatML:   `<|im_end|>`
     ///   - Gemma:    `<end_of_turn>`
     ///   - Llama-3:  `<|eot_id|>`, `<|end_of_text|>`
-    ///   - Mistral/Llama-2: `</s>`, `[/INST]`
-    ///   - leaked tool-call open marker: `[tool_call]`
+    ///   - Mistral/Llama-2: `</s>`
     @_spi(Testing) public static let defaultControlMarkerStops: [String] = [
         "<|im_end|>",
-        "<|im_start|>",
         "<end_of_turn>",
         "<|eot_id|>",
         "<|end_of_text|>",
         "</s>",
-        "[/INST]",
-        "[tool_call]",
     ]
 
     /// Resolves the effective stop-sequence set: the union of the caller's
