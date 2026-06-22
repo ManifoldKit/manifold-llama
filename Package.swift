@@ -123,6 +123,9 @@ let package = Package(
                 "ManifoldLlama",
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "ManifoldHardware", package: "ManifoldKit"),
+                // Test-only: load the vendored tool-calling scenario JSONs via
+                // `ScenarioLoader` to pin lever 1's result-grounding prompt (#100).
+                .product(name: "ManifoldTools", package: "ManifoldKit"),
                 .product(name: "ManifoldRuntime", package: "ManifoldKit"),
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),

@@ -364,6 +364,54 @@ func padScenario(_ scenario: Scenario, advertisingAlso decoyNames: [String]) thr
     return try JSONDecoder().decode(Scenario.self, from: patched)
 }
 
+/// Result-grounding directive appended to every scenario's system prompt
+/// (lever 1 of #100).
+///
+/// The four-model soak found tool-call *dispatch* is solid but the second turn
+/// — the one AFTER a tool returns a result — is where llama/gemma fail: they
+/// narrate ("I called the tool and it said…", or a paraphrase) instead of
+/// answering FROM the tool result. The harness can't edit the second-turn
+/// instruction the orchestrator emits (that lives in MK's
+/// `GenerationToolDispatchLoop`), but the system prompt is in force on every
+/// turn including that one, so strengthening it here is the cheapest, highest-
+/// headroom grounding lift. Kept generic so it stacks on top of each scenario's
+/// own (already grounding-flavoured) instruction without contradicting it; the
+/// `structured-json` extraction scenario advertises no tools, so it is left
+/// untouched (see `groundScenario`).
+let resultGroundingDirective =
+    "When a tool returns a result, answer USING that result directly — quote its "
+    + "values verbatim where the user asks for them. Do NOT narrate that you called "
+    + "a tool, do NOT paraphrase or recompute the result, and do NOT add facts the "
+    + "tool did not return. The tool result is the ground truth for your answer."
+
+/// Composes a scenario's grounded system prompt: its own instruction followed by
+/// the shared ``resultGroundingDirective``. Scenarios that advertise no tools
+/// (e.g. structured-JSON extraction) are returned unchanged — there is no tool
+/// result for them to ground in, and the directive would only add noise.
+func groundedSystemPrompt(base: String, requiredTools: [String]) -> String {
+    guard !requiredTools.isEmpty else { return base }
+    let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return resultGroundingDirective }
+    return trimmed + " " + resultGroundingDirective
+}
+
+/// Returns a copy of `scenario` whose `systemPrompt` carries the
+/// ``resultGroundingDirective`` (lever 1 of #100). Mirrors ``padScenario``'s
+/// Codable round-trip because `Scenario` has no public memberwise initialiser.
+func groundScenario(_ scenario: Scenario) throws -> Scenario {
+    let grounded = groundedSystemPrompt(
+        base: scenario.systemPrompt,
+        requiredTools: scenario.requiredTools)
+    guard grounded != scenario.systemPrompt else { return scenario }
+    let data = try JSONEncoder().encode(scenario)
+    guard var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return scenario
+    }
+    dict["systemPrompt"] = grounded
+    let patched = try JSONSerialization.data(withJSONObject: dict)
+    return try JSONDecoder().decode(Scenario.self, from: patched)
+}
+
 /// Loads the bundled tool-calling scenarios.
 ///
 /// `ScenarioLoader.loadBuiltIn()` is unusable here: it resolves a ManifoldKit
@@ -639,8 +687,14 @@ func runCLI() async -> Int32 {
             // advertised alongside the scenario's real tool. The templateless
             // tool-format instruction is supplied upstream by 0.58's
             // `ToolSystemPromptBuilder` fold (MK#2002), so no per-scenario system
-            // prompt injection happens here.
-            scenario = try padScenario(baseScenario, advertisingAlso: decoyNames)
+            // prompt injection happens here for tool *format*.
+            //
+            // Tool-*result grounding* (lever 1 of #100) IS injected here: the
+            // system prompt is in force on the second turn (after a tool returns)
+            // where the soak found llama/gemma narrate instead of grounding, and
+            // the harness cannot reach the orchestrator's second-turn instruction.
+            let padded = try padScenario(baseScenario, advertisingAlso: decoyNames)
+            scenario = try groundScenario(padded)
         } catch {
             allPassed = false
             print("\n── \(baseScenario.id) — ERROR preparing scenario: \(error)")
