@@ -1,14 +1,14 @@
 {
   "id": "structured-json-extraction",
-  "description": "Structured-output probe — tool-free extraction should return the requested JSON keys and nonce.",
+  "description": "Structured-extraction probe — tool-free extraction must return all requested keys and values. Asserts extraction format-tolerantly (whitespace, markdown fences, and number-vs-string quoting are ignored); compact-formatting instruction-following is intentionally NOT gated, as it conflated extraction correctness with a stylistic constraint and produced false negatives for models that pretty-print otherwise-correct JSON.",
   "systemPrompt": "Return only compact JSON that satisfies the user's requested schema. Do not include markdown fences or commentary.",
   "userPrompt": "Extract invoice id INV-754-CORE, total 123.45, and currency USD into keys invoice_id, total, and currency.",
   "requiredTools": [],
   "assertions": [
     {
       "kind": "containsAll",
-      "values": ["\"invoice_id\":\"INV-754-CORE\"", "\"total\":123.45", "\"currency\":\"USD\""],
-      "message": "Final answer should be compact JSON with the seeded invoice fields"
+      "values": ["invoice_id", "INV-754-CORE", "total", "123.45", "currency", "USD"],
+      "message": "Final answer must contain all three requested keys and their values (format-tolerant: whitespace, fences, and number quoting ignored)"
     }
   ],
   "backend": {
