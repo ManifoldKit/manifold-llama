@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.12](https://github.com/roryford/manifold-llama/compare/v0.2.11...v0.2.12) (2026-06-22)
+
+### Highlights
+
+**Tracks ManifoldKit 0.60** ([#103](https://github.com/roryford/manifold-llama/issues/103), [#96](https://github.com/roryford/manifold-llama/issues/96)) — the core pin moves to `.upToNextMinor(from: "0.60.0")`, jumping past 0.59 to build against the 0.60 release. 0.60 lands the measured tool-call conformance spine — a `ToolCallConformance` cache port, tool-call *dialect* surfaced on `BackendCapabilities`, transcript attribution + a conformance scorer, and a public JSON-Schema → GBNF surface — plus the Mistral renderer fix that folds the system prompt into the first user turn for alternation-strict chat templates. No source changes required — bump and rebuild.
+
+**Tool-call conformance CLI** ([#97](https://github.com/roryford/manifold-llama/issues/97), [#102](https://github.com/roryford/manifold-llama/issues/102), [#99](https://github.com/roryford/manifold-llama/issues/99)) — `manifold-tools-llama` gains `--describe`, which surfaces ManifoldKit 0.59's static tool-call capability claim (`toolsExpressible` + declared dialect) for a GGUF without running inference; a result-grounding prompt (lever 1 of the conformance build-out) that steers weak models to consume a tool result instead of re-calling the tool; and a fix to reset context between scenarios under `--scenario all` so one scenario's history no longer leaks into the next.
+
+**Stability fixes** — honor `flashAttention=false` by mapping to `DISABLED` rather than `AUTO` ([#86](https://github.com/roryford/manifold-llama/issues/86), [#92](https://github.com/roryford/manifold-llama/issues/92)); drain GPU work and clear the KV cache before `llama_free` to avoid a #1394-class SIGABRT in the reranker ([#93](https://github.com/roryford/manifold-llama/issues/93)); make the structured-json extraction assertion format-tolerant ([#95](https://github.com/roryford/manifold-llama/issues/95)); and harden `repackage-xcframework` against silent partial output ([#90](https://github.com/roryford/manifold-llama/issues/90)).
+
 ## [0.2.11](https://github.com/roryford/manifold-llama/compare/v0.2.10...v0.2.11) (2026-06-21)
 
 
