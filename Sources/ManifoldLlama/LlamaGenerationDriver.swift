@@ -699,6 +699,25 @@ import ManifoldHardware
         }
         var session = OutputParserSession(stages)
 
+        // Stop-sequence enforcement (feature-completeness fix). `config.stopSequences`
+        // was plumbed end-to-end but this driver previously dropped it: generation
+        // only ever halted on an EOG *token ID*, never on generated *text*. Non-ChatML
+        // small instruct models leak ChatML/other-family control strings as plain
+        // text (no matching EOG token), so without this they run on and fabricate
+        // fake turns. We union the caller's stops with a default cross-family
+        // control-marker set (`resolveStopSequences`) and run the streamed visible
+        // and thinking text through a hold-back matcher so a marker spanning multiple
+        // tokens is never emitted and the output is truncated exactly at the boundary.
+        // Separate matchers per channel: a marker does not meaningfully straddle a
+        // thinking→visible boundary, and visible text is where leaked markers appear.
+        let resolvedStops = Self.resolveStopSequences(config.stopSequences)
+        var tokenStopMatcher = StopSequenceMatcher(stops: resolvedStops)
+        var thinkingStopMatcher = StopSequenceMatcher(stops: resolvedStops)
+        // Set once a stop sequence matched so the loop breaks after flushing the
+        // pending emit for the current chunk. Termination is treated exactly like
+        // EOG: break out, fall through to the normal `.done` phase + usage emission.
+        var stopSequenceHit = false
+
         // Repetition-window state: track the last decoded token string and how
         // many times it has appeared consecutively. Exceeding `maxRepeatWindow`
         // triggers an early exit — no need to run the loop all the way to maxTokens.
@@ -769,8 +788,31 @@ import ManifoldHardware
 
                 var visibleBudgetExceeded = false
                 for event in events {
-                    if isFirstToken {
-                        switch event {
+                    // Route text-bearing events through the stop-sequence matcher
+                    // (no-op when no stops are configured — `isEmpty` short-circuits
+                    // before any allocation). The matcher holds back a tail so a
+                    // marker spanning multiple tokens is never streamed, and reports
+                    // when a stop boundary was crossed; the matched marker and all
+                    // trailing text are dropped. Non-text events pass through
+                    // unchanged. We still account the *source* token against the
+                    // thinking/visible budgets so decode-loop accounting is unchanged
+                    // even when the matcher releases empty/partial text.
+                    let yielded: GenerationEvent?
+                    switch event {
+                    case .token(let s) where !tokenStopMatcher.isEmpty:
+                        let (emit, stopped) = tokenStopMatcher.push(s)
+                        if stopped { stopSequenceHit = true }
+                        yielded = emit.isEmpty ? nil : .token(emit)
+                    case .thinkingToken(let s) where !thinkingStopMatcher.isEmpty:
+                        let (emit, stopped) = thinkingStopMatcher.push(s)
+                        if stopped { stopSequenceHit = true }
+                        yielded = emit.isEmpty ? nil : .thinkingToken(emit)
+                    default:
+                        yielded = event
+                    }
+
+                    if isFirstToken, let yielded {
+                        switch yielded {
                         case .token, .thinkingToken:
                             // Trigger .streaming on first reasoning token too — models can think
                             // for 30s before any visible output; staying in .connecting is poor UX.
@@ -779,7 +821,7 @@ import ManifoldHardware
                         default: break
                         }
                     }
-                    continuation.yield(event)
+                    if let yielded { continuation.yield(yielded) }
                     switch event {
                     case .thinkingToken:
                         thinkingTokenCount += 1
@@ -793,9 +835,9 @@ import ManifoldHardware
                         }
                     default: break
                     }
-                    if thinkingLimitReached || visibleBudgetExceeded { break }
+                    if stopSequenceHit || thinkingLimitReached || visibleBudgetExceeded { break }
                 }
-                if thinkingLimitReached || visibleBudgetExceeded { break generationLoop }
+                if stopSequenceHit || thinkingLimitReached || visibleBudgetExceeded { break generationLoop }
             }
 
             // Prepare next batch
@@ -827,9 +869,32 @@ import ManifoldHardware
         // session cascades each stage's finalize output through the stages
         // downstream of it (thinking → tool), and is a no-op when the chain is
         // empty (neither thinking nor tool parsing was engaged).
+        //
+        // These finalize-flushed events must still pass through the stop-sequence
+        // matchers: a marker could sit entirely inside the chain's held-back tail.
+        // When a stop already matched (`stopSequenceHit`) the matchers have latched
+        // and release nothing, so no post-stop text leaks here either.
         for event in session.finalize() {
-            continuation.yield(event)
+            switch event {
+            case .token(let s) where !tokenStopMatcher.isEmpty:
+                let (emit, _) = tokenStopMatcher.push(s)
+                if !emit.isEmpty { continuation.yield(.token(emit)) }
+            case .thinkingToken(let s) where !thinkingStopMatcher.isEmpty:
+                let (emit, _) = thinkingStopMatcher.push(s)
+                if !emit.isEmpty { continuation.yield(.thinkingToken(emit)) }
+            default:
+                continuation.yield(event)
+            }
         }
+
+        // Release each matcher's held-back tail. By construction the tail is only
+        // ever a *partial* stop prefix (a full match would have latched + dropped
+        // it), so at end of stream it is genuine output and is emitted verbatim.
+        // No-op when stopped, when no stops are configured, or when nothing is held.
+        let flushedToken = tokenStopMatcher.flush()
+        if !flushedToken.isEmpty { continuation.yield(.token(flushedToken)) }
+        let flushedThinking = thinkingStopMatcher.flush()
+        if !flushedThinking.isEmpty { continuation.yield(.thinkingToken(flushedThinking)) }
 
         // Flush all pending Metal command buffers before returning.
         //
@@ -962,6 +1027,187 @@ import ManifoldHardware
             if window[start..<end].elementsEqual(phrase) == false { return false }
         }
         return true
+    }
+
+    // MARK: - Stop sequences
+
+    /// Default cross-family turn/control terminator strings, enforced as stop
+    /// sequences regardless of the active prompt template.
+    ///
+    /// Rationale (issue: stop sequences never enforced): the template-derived stop
+    /// set only contains the loaded model's *native* turn markers. ChatML training
+    /// contamination means non-ChatML small instruct models (Mistral `[INST]`,
+    /// Gemma `<end_of_turn>`, Llama-3 `<|eot_id|>`) frequently emit *foreign* control
+    /// strings — e.g. `<|im_end|>`, `<|im_start|>`, `[tool_call]` — as PLAIN TEXT
+    /// rather than as real EOG token IDs. `llama_vocab_is_eog` never fires on those,
+    /// so without a text-level stop the model runs on and fabricates entire fake
+    /// multi-turn conversations and bogus tool calls.
+    ///
+    /// Membership criteria: every entry is a literal control/turn-delimiter marker
+    /// that should never appear in legitimate assistant prose. We deliberately
+    /// EXCLUDE bare common words and anything that could occur in normal output. The
+    /// set spans the major instruct families:
+    ///   - ChatML:   `<|im_end|>`, `<|im_start|>`
+    ///   - Gemma:    `<end_of_turn>`
+    ///   - Llama-3:  `<|eot_id|>`, `<|end_of_text|>`
+    ///   - Mistral/Llama-2: `</s>`, `[/INST]`
+    ///   - leaked tool-call open marker: `[tool_call]`
+    @_spi(Testing) public static let defaultControlMarkerStops: [String] = [
+        "<|im_end|>",
+        "<|im_start|>",
+        "<end_of_turn>",
+        "<|eot_id|>",
+        "<|end_of_text|>",
+        "</s>",
+        "[/INST]",
+        "[tool_call]",
+    ]
+
+    /// Resolves the effective stop-sequence set: the union of the caller's
+    /// `config.stopSequences` and the default cross-family control markers, with
+    /// empties removed and duplicates collapsed. Order is not significant — the
+    /// matcher always prefers the longest match at a given position.
+    @_spi(Testing) public static func resolveStopSequences(_ configured: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for s in configured + defaultControlMarkerStops where !s.isEmpty {
+            if seen.insert(s).inserted { result.append(s) }
+        }
+        return result
+    }
+
+    /// Streaming stop-sequence matcher with multi-token-spanning hold-back.
+    ///
+    /// A stop sequence can straddle several decoded tokens, so this type buffers a
+    /// tail of pending characters and only releases the portion that provably
+    /// cannot become the prefix of any stop string. The hold-back length is
+    /// bounded by `longest stop − 1` characters: anything older than that cannot be
+    /// the start of an in-progress match.
+    ///
+    /// Matching operates on Swift `Character`s (extended grapheme clusters), the
+    /// same unit `String` indexing and the streamed text use, so a marker is never
+    /// split mid-grapheme. When a stop is found the matched marker and everything
+    /// after it are dropped — they are never released to the consumer — and
+    /// `isStopped` latches `true`.
+    ///
+    /// Pure and model-free: all decode-loop callers feed it decoded text chunks and
+    /// emit only what `push`/`flush` release.
+    @_spi(Testing) public struct StopSequenceMatcher {
+        /// Stop strings as character arrays (precomputed for prefix scanning).
+        private let stops: [[Character]]
+        /// `longestStop − 1`; the max number of trailing chars we must retain to
+        /// detect a match that completes on a future chunk. Zero when no stops.
+        private let maxHoldback: Int
+        /// Pending un-released characters (kept ≤ maxHoldback after each `push`,
+        /// except transiently while we scan a freshly appended chunk).
+        private var buffer: [Character] = []
+        /// Latches once a stop has been matched; further `push`es release nothing.
+        public private(set) var isStopped = false
+
+        /// `true` when there are no stop strings to enforce — callers can take a
+        /// zero-overhead passthrough path.
+        public var isEmpty: Bool { stops.isEmpty }
+
+        public init(stops: [String]) {
+            let nonEmpty = stops.filter { !$0.isEmpty }
+            self.stops = nonEmpty.map { Array($0) }
+            self.maxHoldback = max(0, (nonEmpty.map { $0.count }.max() ?? 0) - 1)
+        }
+
+        /// Feeds a decoded text chunk. Returns the text that is safe to emit now —
+        /// i.e. everything up to (but excluding) any matched stop, minus a held-back
+        /// tail that could still be the start of a stop on the next chunk. Once a
+        /// stop has matched (or already matched on a prior chunk) the returned text
+        /// stops exactly at the boundary and `isStopped` is `true`.
+        public mutating func push(_ chunk: String) -> (emit: String, stopped: Bool) {
+            if stops.isEmpty { return (chunk, false) }
+            if isStopped { return ("", true) }
+            buffer.append(contentsOf: chunk)
+
+            // Scan for the earliest position at which any stop matches in full.
+            // Prefer the LONGEST match at that earliest position so overlapping
+            // stops (e.g. "</s>" vs "</s>!") resolve deterministically to the
+            // longest marker; the trailing chars are dropped either way.
+            var matchStart: Int? = nil
+            var matchLen = 0
+            var i = 0
+            while i < buffer.count {
+                var bestLenHere = 0
+                for stop in stops where matches(buffer, at: i, stop: stop) {
+                    bestLenHere = max(bestLenHere, stop.count)
+                }
+                if bestLenHere > 0 {
+                    matchStart = i
+                    matchLen = bestLenHere
+                    break
+                }
+                i += 1
+            }
+
+            if let start = matchStart {
+                // Emit everything before the marker; discard the marker and all
+                // trailing buffered text (it is part of / past the stop boundary).
+                let emit = String(buffer[0..<start])
+                buffer.removeAll(keepingCapacity: false)
+                isStopped = true
+                _ = matchLen  // marker length is irrelevant once we cut at `start`
+                return (emit, true)
+            }
+
+            // No full match. Release everything except a tail short enough to be a
+            // partial stop prefix. We only need to retain a suffix that is a prefix
+            // of some stop; the maximum such suffix length is `maxHoldback`, but we
+            // can release more aggressively by retaining only as many trailing chars
+            // as actually form a stop prefix.
+            let retain = longestStopPrefixSuffixLength()
+            let releaseCount = buffer.count - retain
+            let emit = String(buffer[0..<releaseCount])
+            buffer.removeFirst(releaseCount)
+            return (emit, false)
+        }
+
+        /// End-of-stream flush. Whatever remains in the buffer is, by construction,
+        /// only ever a *partial* stop prefix (a full match would have stopped us),
+        /// and no more text is coming — so it is genuine output and is released
+        /// verbatim. Returns "" once stopped or when nothing is held back.
+        public mutating func flush() -> String {
+            if isStopped { return "" }
+            let remaining = String(buffer)
+            buffer.removeAll(keepingCapacity: false)
+            return remaining
+        }
+
+        /// Returns true when `stop` occurs in `buffer` starting exactly at `index`.
+        private func matches(_ buffer: [Character], at index: Int, stop: [Character]) -> Bool {
+            guard index + stop.count <= buffer.count else { return false }
+            for k in 0..<stop.count where buffer[index + k] != stop[k] {
+                return false
+            }
+            return true
+        }
+
+        /// Length of the longest buffer suffix that is a proper prefix of some stop
+        /// string (and therefore must be held back in case it completes next chunk).
+        /// Bounded by `maxHoldback`. Returns 0 when no suffix can extend into a stop.
+        private func longestStopPrefixSuffixLength() -> Int {
+            let cap = min(maxHoldback, buffer.count)
+            // Try the longest candidate suffix first so we hold back the minimum
+            // necessary while never releasing a char that could start a match.
+            var len = cap
+            while len > 0 {
+                let suffixStart = buffer.count - len
+                for stop in stops where len < stop.count {
+                    var isPrefix = true
+                    for k in 0..<len where buffer[suffixStart + k] != stop[k] {
+                        isPrefix = false
+                        break
+                    }
+                    if isPrefix { return len }
+                }
+                len -= 1
+            }
+            return 0
+        }
     }
 
     /// Builds a transient `[UnsafePointer<CChar>?]` for `strings` and hands it to
