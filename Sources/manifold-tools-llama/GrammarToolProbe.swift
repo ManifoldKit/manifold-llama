@@ -55,10 +55,17 @@ enum GrammarToolProbe {
         case narrated
     }
 
-    /// Runs the before/after probe. The model is already loaded into `service`.
+    /// Probe difficulty. `.easy` advertises only the required tool and decodes
+    /// greedily (temp 0, topK 1) — the saturated, deterministic baseline. `.hard`
+    /// advertises ALL registered tools and decodes at temp 0.7 (the default,
+    /// non-greedy regime where Llama-3.1 narrates instead of emitting a call) —
+    /// this is the regime that reproduces the soak's dispatch failure and where a
+    /// grammar can bite.
+    enum Difficulty { case easy, hard }
+
+    /// Runs the before/after probe at both difficulties. Model already loaded.
     @MainActor
     static func run(service: InferenceService, registry: ToolRegistry, modelInfo: ModelInfo) async -> Int32 {
-        // Derive the dialect from the model's embedded chat template (Layer 1).
         let descriptor = ChatTemplateToolDescriptor(parsingChatTemplate: modelInfo.chatTemplateRaw)
         guard let dialect = descriptor.declaredDialect else {
             print("grammar-tools: model declares no recognised tool dialect — nothing to constrain.")
@@ -66,9 +73,23 @@ enum GrammarToolProbe {
         }
         print("=== grammar-tools probe ===")
         print("Dialect: open=\(dialect.openDelimiter ?? "(none)") close=\(dialect.closeDelimiter ?? "(none)") args=\(dialect.argEncoding.rawValue) extractability=\(descriptor.extractability.rawValue)")
+        _ = await runOne(service: service, registry: registry, dialect: dialect, difficulty: .easy)
+        _ = await runOne(service: service, registry: registry, dialect: dialect, difficulty: .hard)
+        return 0
+    }
 
+    @MainActor
+    private static func runOne(service: InferenceService, registry: ToolRegistry, dialect: ChatTemplateToolDescriptor.ToolCallDialect, difficulty: Difficulty) async -> Int32 {
         let allDefs = registry.definitions
         func defs(for tool: String) -> [ToolDefinition] { allDefs.filter { $0.name == tool } }
+
+        // `.hard` advertises every registered tool to each prompt (selection
+        // pressure + a multi-tool name-enum in the grammar) and decodes at the
+        // default temperature; `.easy` advertises only the required tool greedily.
+        let label = difficulty == .easy
+            ? "EASY (only required tool advertised, greedy temp=0)"
+            : "HARD (all \(allDefs.count) tools advertised, temp=0.7)"
+        print("\n############ \(label) ############")
 
         var offParseable = 0, onParseable = 0
         let total = prompts.count
@@ -76,8 +97,9 @@ enum GrammarToolProbe {
         for grammarOn in [false, true] {
             print("\n--- grammar \(grammarOn ? "ON" : "OFF") ---")
             for p in prompts {
-                let toolDefs = defs(for: p.tool)
-                guard let def = toolDefs.first else {
+                // Tools advertised to the model this prompt.
+                let advertised = difficulty == .easy ? defs(for: p.tool) : allDefs
+                guard advertised.contains(where: { $0.name == p.tool }) else {
                     print("  \(p.id): SKIP — tool '\(p.tool)' not registered")
                     continue
                 }
@@ -85,13 +107,14 @@ enum GrammarToolProbe {
                 var grammar: String? = nil
                 if grammarOn {
                     do {
-                        // Schema-bearing generator call so the emitted GBNF is keyed
-                        // to the advertised tool's real name (and, when we extend it,
-                        // its params). For the single-tool prompts the name enum is
-                        // exactly that one tool.
+                        // The grammar's name-enum lists exactly the advertised tools
+                        // (one for .easy, all for .hard), keyed to their real names
+                        // and schemas — so a grammar-valid call must name a real tool.
                         grammar = try ToolCallGrammar.grammar(
                             for: dialect,
-                            tools: [ToolCallGrammar.Tool(name: def.name, parametersSchema: def.parameters)])
+                            tools: advertised.map {
+                                ToolCallGrammar.Tool(name: $0.name, parametersSchema: $0.parameters)
+                            })
                     } catch {
                         print("  \(p.id): grammar generation failed: \(error)")
                         continue
@@ -99,8 +122,9 @@ enum GrammarToolProbe {
                 }
 
                 let outcome = await probeOne(
-                    service: service, prompt: p, toolDefs: toolDefs, grammar: grammar)
-                print("  \(p.id) [\(p.tool)] → \(outcome.rawValue)")
+                    service: service, prompt: p, toolDefs: advertised,
+                    grammar: grammar, difficulty: difficulty)
+                print("  \(p.id) [want \(p.tool)] → \(outcome.rawValue)")
                 if outcome == .parseable {
                     if grammarOn { onParseable += 1 } else { offParseable += 1 }
                 }
@@ -108,10 +132,10 @@ enum GrammarToolProbe {
         }
 
         func pct(_ n: Int) -> String { String(format: "%.0f%%", Double(n) / Double(total) * 100) }
-        print("\n=== RESULT (parseable tool-call rate, first turn) ===")
+        print("\n=== RESULT [\(difficulty == .easy ? "easy" : "hard")] parseable-tool-call rate (first turn) ===")
         print("  grammar OFF: \(offParseable)/\(total) (\(pct(offParseable)))")
         print("  grammar ON : \(onParseable)/\(total) (\(pct(onParseable)))")
-        print("  NOTE: this measures dispatch/parse only — NOT second-turn grounding.")
+        print("  NOTE: dispatch/parse only — NOT second-turn grounding.")
         return 0
     }
 
@@ -122,13 +146,15 @@ enum GrammarToolProbe {
         service: InferenceService,
         prompt: ProbePrompt,
         toolDefs: [ToolDefinition],
-        grammar: String?
+        grammar: String?,
+        difficulty: Difficulty
     ) async -> Outcome {
-        // Deterministic single-turn config: greedy (temp 0, topK 1), fixed seed,
-        // one tool iteration so we observe the FIRST assistant turn's emission.
+        // .easy: greedy (temp 0, topK 1) — deterministic saturated baseline.
+        // .hard: default temp 0.7 (the regime Llama-3.1 narrates in), fixed seed
+        // for reproducibility. One tool iteration: we observe the FIRST turn only.
         let config = GenerationConfig(
-            temperature: 0.0,
-            topK: 1,
+            temperature: difficulty == .easy ? 0.0 : 0.7,
+            topK: difficulty == .easy ? 1 : nil,
             seed: 42,
             maxOutputTokens: 256,
             tools: toolDefs,
