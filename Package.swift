@@ -93,6 +93,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ManifoldTools", package: "ManifoldKit"),
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
+                // ManifoldModelCatalog (MK 0.59+) provides
+                // `ChatTemplateToolDescriptor` — the static, render-honest
+                // tool-call dialect/negative-gate descriptor (issue #2005 layer
+                // 1). Used by `--describe` to report capability without loading
+                // weights. `RenderConsistencyChecker` (layer 2) lives in
+                // ManifoldInference (already linked above).
+                .product(name: "ManifoldModelCatalog", package: "ManifoldKit"),
                 "ManifoldLlama",
             ],
             path: "Sources/manifold-tools-llama",
