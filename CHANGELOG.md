@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.13](https://github.com/roryford/manifold-llama/compare/v0.2.12...v0.2.13) (2026-06-23)
+
+
+### Features
+
+* **llama:** surface tool-call dialect on BackendCapabilities ([#104](https://github.com/roryford/manifold-llama/issues/104)) ([be4a72c](https://github.com/roryford/manifold-llama/commit/be4a72c23d9e21f78f8af40d3dd4084c856504b4))
+* **tools-cli:** grammar-constrained final-answer decoding for structured-json scenarios ([#100](https://github.com/roryford/manifold-llama/issues/100)) ([#105](https://github.com/roryford/manifold-llama/issues/105)) ([2de6b2d](https://github.com/roryford/manifold-llama/commit/2de6b2d359826f682488a6f9cdc408b6baa153c0))
+
 ## [0.2.12](https://github.com/roryford/manifold-llama/compare/v0.2.11...v0.2.12) (2026-06-22)
 
 ### Highlights
