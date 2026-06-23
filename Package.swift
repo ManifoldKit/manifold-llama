@@ -24,7 +24,7 @@ let package = Package(
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.59.0")),
+        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.60.0")),
         // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
         // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
         // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable

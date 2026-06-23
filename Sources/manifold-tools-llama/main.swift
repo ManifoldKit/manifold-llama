@@ -412,6 +412,127 @@ func groundScenario(_ scenario: Scenario) throws -> Scenario {
     return try JSONDecoder().decode(Scenario.self, from: patched)
 }
 
+// MARK: - Lever 2: grammar-constrained final-answer decoding (#100)
+
+/// JSON-Schema for the `structured-json-extraction` scenario's expected output:
+/// `{ invoice_id: string, total: string, currency: string }`.
+///
+/// Using string for `total` (not number) because models frequently emit the
+/// value as a quoted string (e.g. `"123.45"`), matching the `containsAll`
+/// assertion which accepts either form — the grammar must not be stricter than
+/// the assertion gate.
+let structuredJsonExtractionSchema: JSONSchemaValue = .object([
+    "type": .string("object"),
+    "properties": .object([
+        "invoice_id": .object(["type": .string("string")]),
+        "total": .object(["type": .string("string")]),
+        "currency": .object(["type": .string("string")])
+    ]),
+    "required": .array([.string("invoice_id"), .string("total"), .string("currency")])
+])
+
+/// Returns a GBNF grammar constraining output to the expected JSON object for
+/// `structured-json` extraction scenarios, or `nil` when the scenario is not a
+/// no-tool extraction scenario or the backend does not support grammar-
+/// constrained sampling (e.g. Gemma family).
+///
+/// The grammar activates ONLY on the final-answer (synthesis) turn. Extraction
+/// scenarios have no tool calls so this is always the only turn; the constraint
+/// is never applied on a tool-call turn.
+func grammarForScenario(_ scenario: Scenario, backend: LlamaBackend) -> String? {
+    guard scenario.requiredTools.isEmpty,
+          scenario.id.hasPrefix("structured-json")
+    else { return nil }
+    guard backend.capabilities.supportsGrammarConstrainedSampling else { return nil }
+    return ToolGrammarBuilder().buildObjectGrammar(for: structuredJsonExtractionSchema)
+}
+
+/// Minimal outcome from ``runScenarioWithGrammar``.
+///
+/// `ScenarioRunner.Outcome`'s memberwise initialiser is `internal`, so the
+/// grammar-constrained runner returns its own parallel type. The call site in
+/// ``runCLI`` only reads `finalAnswer`, `assertions`, and `passed`, which are
+/// available on both types.
+struct GrammarRunOutcome: Sendable {
+    let finalAnswer: String
+    let assertions: [AssertionOutcome]
+    var passed: Bool { assertions.allSatisfy(\.passed) }
+}
+
+/// Runs `scenario` through `service` with `grammar` injected into the
+/// generation config, collecting events and evaluating assertions.
+///
+/// Mirrors `ScenarioRunner.run` but adds `grammar` to the `GenerationConfig`.
+/// `ScenarioRunner` is `final` with no grammar hook, so grammar injection
+/// requires driving `service.enqueue` directly for the constrained case.
+@MainActor
+func runScenarioWithGrammar(
+    _ scenario: Scenario,
+    grammar: String,
+    service: InferenceService,
+    logger: TranscriptLogger?
+) async throws -> GrammarRunOutcome {
+    logger?.append(.prompt(
+        scenarioId: scenario.id,
+        system: scenario.systemPrompt,
+        user: scenario.userPrompt,
+        requiredTools: scenario.requiredTools))
+
+    let messages: [StructuredMessage] = [
+        StructuredMessage(role: "user", content: scenario.userPrompt)
+    ]
+
+    var config = GenerationConfig(
+        temperature: Float(scenario.backend.temperature ?? 0.0),
+        topP: 0.9,
+        repeatPenalty: 1.1,
+        topK: scenario.backend.topK.map(Int32.init),
+        maxOutputTokens: 1024,
+        maxToolIterations: 6
+    )
+    // Disable thinking explicitly: the #1595 grammar-phase gate holds the grammar
+    // permissive until </think> closes. Extraction scenarios have no thinking
+    // block, but a thinking-capable model might emit one; disabling it forces the
+    // single strict sampler chain where the grammar applies from token 0.
+    config.maxThinkingTokens = 0
+    config.grammar = grammar
+
+    var accumulatedText = ""
+
+    let (_, stream) = try service.enqueue(
+        structuredMessages: messages,
+        systemPrompt: scenario.systemPrompt,
+        config: config)
+
+    for try await event in stream.events {
+        switch event {
+        case .token(let text):
+            accumulatedText += text
+            logger?.append(.tokenDelta(scenarioId: scenario.id, text: text))
+        case .generationCompleted:
+            continue
+        default:
+            continue
+        }
+    }
+
+    logger?.append(.final(scenarioId: scenario.id, text: accumulatedText))
+
+    var assertionOutcomes: [AssertionOutcome] = []
+    for assertion in scenario.assertions {
+        let outcome = AssertionEvaluator.evaluate(
+            assertion,
+            finalAnswer: accumulatedText)
+        assertionOutcomes.append(outcome)
+        logger?.append(.assertion(
+            scenarioId: scenario.id,
+            passed: outcome.passed,
+            message: outcome.message))
+    }
+
+    return GrammarRunOutcome(finalAnswer: accumulatedText, assertions: assertionOutcomes)
+}
+
 /// Loads the bundled tool-calling scenarios.
 ///
 /// `ScenarioLoader.loadBuiltIn()` is unusable here: it resolves a ManifoldKit
@@ -718,20 +839,44 @@ func runCLI() async -> Int32 {
         print("\n── \(scenario.id) (\(scenario.description)) ──")
         print("  advertising tool(s): \(scenario.requiredTools.joined(separator: ", "))")
         do {
-            // Drive scenarios through the production InferenceService →
-            // GenerationQueue → dispatch-loop path. That path renders the chat
-            // template and injects each scenario's tool definitions the model
-            // needs to see (#1983/#1985); the runner filters the registry by
-            // `scenario.requiredTools` so each run advertises only its own tools.
-            let runner = ScenarioRunner(service: service, logger: logger)
-            let outcome = try await runner.run(scenario)
-            for assertion in outcome.assertions {
+            // Lever 2 of #100: for structured-json extraction scenarios, apply a
+            // GBNF grammar on the final-answer turn. The grammar constrains output
+            // to the expected JSON object shape, eliminating markdown fences and
+            // prose wrapping that cause `containsAll` assertions to fail even when
+            // the model has the right values. Falls through to the standard runner
+            // when the backend does not support grammar sampling (Gemma family).
+            let assertions: [AssertionOutcome]
+            let finalAnswer: String
+            let passed: Bool
+            if let grammar = backendBox.backend.flatMap({ grammarForScenario(scenario, backend: $0) }) {
+                print("  grammar: structured-JSON extraction constraint active")
+                let outcome = try await runScenarioWithGrammar(
+                    scenario,
+                    grammar: grammar,
+                    service: service,
+                    logger: logger)
+                assertions = outcome.assertions
+                finalAnswer = outcome.finalAnswer
+                passed = outcome.passed
+            } else {
+                // Standard path: drive scenarios through the production
+                // InferenceService → GenerationQueue → dispatch-loop. That path
+                // renders the chat template and injects each scenario's tool
+                // definitions (#1983/#1985); the runner filters the registry by
+                // `scenario.requiredTools` so each run advertises only its own tools.
+                let runner = ScenarioRunner(service: service, logger: logger)
+                let outcome = try await runner.run(scenario)
+                assertions = outcome.assertions
+                finalAnswer = outcome.finalAnswer
+                passed = outcome.passed
+            }
+            for assertion in assertions {
                 let marker = assertion.passed ? "  PASS" : "  FAIL"
                 print("\(marker) \(assertion.message)")
             }
-            if !outcome.passed {
+            if !passed {
                 allPassed = false
-                print("  final answer: \(outcome.finalAnswer.prefix(200))")
+                print("  final answer: \(finalAnswer.prefix(200))")
             }
         } catch {
             allPassed = false
