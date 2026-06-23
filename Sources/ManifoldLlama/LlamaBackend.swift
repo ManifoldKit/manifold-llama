@@ -159,7 +159,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             supportsGrammarConstrainedSampling: supportsGrammar,
             supportsThinking: true,
             supportsVision: BackendVisionCapability.llamaSupportsImageInput,
-            supportsParallelToolCalls: false
+            supportsParallelToolCalls: false,
+            toolDialect: LlamaToolCallDialect.infer(from: architecture)
         )
     }
 
