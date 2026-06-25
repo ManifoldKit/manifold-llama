@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.14](https://github.com/roryford/manifold-llama/compare/v0.2.13...v0.2.14) (2026-06-25)
+
+### Highlights
+
+**Tracks ManifoldKit 0.61** ([#107](https://github.com/roryford/manifold-llama/issues/107)) — the core pin moves to `.upToNextMinor(from: "0.61.0")` to build against the 0.61 release. 0.61 lands the SwiftData-backed `ToolCallConformanceCache` adapter — measured `(model × quant × backend)` tool-call verdicts now persist across launches, wired automatically through `ManifoldBootstrap` — plus tool-calling fixes that fold tool results into the user turn for alternation-strict (Mistral-family) chat templates and adjudicate the Gemma close delimiter to `<|end_of_turn|>`. No source changes required — bump and rebuild.
+
 ## [0.2.13](https://github.com/roryford/manifold-llama/compare/v0.2.12...v0.2.13) (2026-06-23)
 
 
