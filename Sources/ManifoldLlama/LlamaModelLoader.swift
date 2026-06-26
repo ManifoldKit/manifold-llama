@@ -1,6 +1,7 @@
 import Foundation
 import LlamaSwift
 import os
+import Synchronization
 import ManifoldInference
 
 /// Owns the C-level model load path: parameter setup, progress-callback ABI
@@ -24,6 +25,29 @@ import ManifoldInference
     /// Blocking is acceptable here because the lock is only held inside a
     /// detached task.
     private let loadSerializationLock = NSLock()
+
+    // MARK: - Cooperative load cancellation
+
+    /// Guards `_activeLoadCallbackContext` — a separate lock from
+    /// `loadSerializationLock` because `requestCancelLoad()` must be callable
+    /// while the serialization lock is held by the in-flight C load.
+    private let cancelLock = NSLock()
+
+    /// The callback context for the currently in-flight load, or `nil` when
+    /// no load is running. Guarded by `cancelLock`.
+    private var _activeLoadCallbackContext: ProgressCallbackContext?
+
+    /// Requests that the in-flight load unwind at its next progress callback.
+    ///
+    /// Sets the `cancelRequested` flag on the active `ProgressCallbackContext`
+    /// so the `@convention(c)` callback returns `false` to
+    /// `llama_model_load_from_file`, instructing the native load to abort. A
+    /// no-op when no load is in flight. The caller must follow up with
+    /// `awaitModelLoadSettled()` to wait for the native work to truly finish.
+    func requestCancelLoad() {
+        cancelLock.withLock { _activeLoadCallbackContext }?
+            .cancelRequested.store(true, ordering: .sequentiallyConsistent)
+    }
 
     struct LoadedResources: @unchecked Sendable {
         let model: LlamaModelHandle
@@ -77,10 +101,18 @@ import ManifoldInference
     /// `llama_model_params.progress_callback` is a C function pointer — it cannot capture Swift
     /// context directly. We store the handler in this class, pass an `Unmanaged` retain into
     /// `progress_callback_user_data`, then release it after `llama_model_load_from_file` returns.
+    ///
+    /// The box also carries `cancelRequested` so `requestCancelLoad()` can instruct the
+    /// `@convention(c)` callback to return `false` and abort the native load cooperatively —
+    /// the C callback can only read Swift state that was passed through `userData`.
     // @_spi(Testing): the box type itself must be reachable so the ABI
     // round-trip helper below can be unit-tested without loading a model.
     @_spi(Testing) public final class ProgressCallbackContext: @unchecked Sendable {
         @_spi(Testing) public let handler: @Sendable (Double) async -> Void
+        /// Set by `requestCancelLoad()`. The `@convention(c)` progress callback checks this
+        /// on every invocation and returns `false` when set, instructing
+        /// `llama_model_load_from_file` to abort and return `nil`.
+        let cancelRequested = Atomic<Bool>(false)
         @_spi(Testing) public init(_ handler: @escaping @Sendable (Double) async -> Void) {
             self.handler = handler
         }
@@ -173,19 +205,30 @@ import ManifoldInference
     /// Synchronous wrapper that holds `loadSerializationLock` while calling the
     /// C-level model init. Called from a detached task so the lock/unlock stays
     /// in a synchronous context (required by Swift 6.3 strict concurrency).
+    ///
+    /// Always creates a `ProgressCallbackContext` (with the caller's handler or a
+    /// no-op) and registers it in `_activeLoadCallbackContext` so
+    /// `requestCancelLoad()` can abort the native load via the callback's
+    /// `cancelRequested` flag.
     func serializedModelLoad(
         at url: URL,
         effectiveContextSize: Int32,
         loadOptions: BackendLoadOptions,
         progressHandler: (@Sendable (Double) async -> Void)?
     ) throws -> LoadedResources {
+        // Always build a context — even without a user handler — so the cancel
+        // flag is always wired into the C callback.
+        let ctx = ProgressCallbackContext(progressHandler ?? { _ in })
+        cancelLock.withLock { _activeLoadCallbackContext = ctx }
+        defer { cancelLock.withLock { _activeLoadCallbackContext = nil } }
+
         loadSerializationLock.lock()
         defer { loadSerializationLock.unlock() }
         return try Self.initializeModel(
             at: url,
             effectiveContextSize: effectiveContextSize,
             loadOptions: loadOptions,
-            progressHandler: progressHandler
+            callbackContext: ctx
         )
     }
 
@@ -193,20 +236,21 @@ import ManifoldInference
         at url: URL,
         effectiveContextSize: Int32,
         loadOptions: BackendLoadOptions = .default,
-        progressHandler: (@Sendable (Double) async -> Void)? = nil
+        callbackContext: ProgressCallbackContext? = nil
     ) throws -> LoadedResources {
         var modelParams = llama_model_default_params()
         // Hardware-selection policy lives in `LlamaSamplingPolicy` so the
         // generation-load and embedding-load paths cannot drift again.
         modelParams.n_gpu_layers = LlamaSamplingPolicy.gpuLayerCount()
 
-        // Wire up the progress callback when a handler is installed.
-        // The C callback fires on the loader thread; we bridge to async by
-        // creating an unstructured Task so the synchronous C callback returns
-        // quickly. The Unmanaged retain is released once the load call returns.
+        // Wire up the progress/cancel callback when a context is provided.
+        // The C callback fires on the loader thread. It returns `false` when
+        // `cancelRequested` is set — instructing `llama_model_load_from_file` to
+        // abort — and bridges the user progress handler to async via an
+        // unstructured Task otherwise. The Unmanaged retain is released once the
+        // load call returns.
         var callbackContextRef: Unmanaged<ProgressCallbackContext>?
-        if let handler = progressHandler {
-            let ctx = ProgressCallbackContext(handler)
+        if let ctx = callbackContext {
             callbackContextRef = Unmanaged.passRetained(ctx)
             modelParams.progress_callback_user_data = callbackContextRef!.toOpaque()
             modelParams.progress_callback = { progress, userData -> Bool in
@@ -217,6 +261,8 @@ import ManifoldInference
                 // in `loadModel` is separate and only responsible for keeping the context
                 // alive during the synchronous C load call.
                 let ctx = LlamaModelLoader.progressContext(fromOpaque: ptr)
+                // Cooperative cancel: return false to abort the native load.
+                if ctx.cancelRequested.load(ordering: .sequentiallyConsistent) { return false }
                 let value = Double(progress)
                 Task { await ctx.handler(value) }
                 return true
@@ -239,6 +285,12 @@ import ManifoldInference
         }
 
         guard let rawModel = llama_model_load_from_file(url.path, modelParams) else {
+            // When cancel was requested, the progress callback returned false to abort the
+            // native load. Surface CancellationError so the caller can distinguish a
+            // cooperative abort from a real load failure (e.g. file-not-found, OOM).
+            if callbackContext?.cancelRequested.load(ordering: .sequentiallyConsistent) == true {
+                throw CancellationError()
+            }
             throw InferenceError.modelLoadFailed(underlying: NSError(
                 domain: "LlamaBackend",
                 code: -1,
