@@ -622,6 +622,11 @@ func describeModel(_ modelURL: URL) -> Int32 {
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
+    // BFCL argument-level eval subcommand — drives the shared ManifoldTools
+    // BFCLRunner against this package's LlamaBackend (mirrors core manifold-tools).
+    if argv.first == "bfcl" {
+        return await BFCLLlamaCLI.run(Array(argv.dropFirst()))
+    }
     let cli = CLI.parse(argv)
 
     let scenarios: [Scenario]

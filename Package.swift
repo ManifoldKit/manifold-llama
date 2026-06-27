@@ -24,7 +24,10 @@ let package = Package(
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.61.0")),
+        // TEMPORARY local path-pin (uncommitted) to pick up the unreleased
+        // BFCLRunner on the spike/bfcl-ast-scorer branch. Revert to the url pin
+        // before any commit. SwiftPM local packages need an explicit name:.
+        .package(name: "ManifoldKit", path: "../ManifoldKit"),
         // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
         // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
         // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable
