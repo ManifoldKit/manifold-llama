@@ -456,10 +456,17 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         // Store the detached task handle so CancellableModelLoading can observe
         // and await the native load even after this async function has thrown
         // (e.g. the host's deadline fired while the C load was still in flight).
-        // The task's defer clears _isModelLoadInFlight and _activeLoadTask once
-        // the native work truly finishes, guarded by the load token to avoid
-        // clobbering a new load that superseded this one.
+        // The task body sets _isModelLoadInFlight = true at its start and clears
+        // it in a defer at its end — keeping both writes on the same thread to
+        // eliminate the TOCTOU where a fast-failing task's defer fired before the
+        // spawning thread could reach its own withStateLock{_isModelLoadInFlight = true}.
         let loadTask = Task.detached(priority: .userInitiated) { [weak self, modelLoader] in
+            // Set in-flight before any work so the flag tracks native load lifetime.
+            self?.withStateLock {
+                if self?.activeLoadToken == capturedLoadToken {
+                    self?._isModelLoadInFlight = true
+                }
+            }
             defer {
                 self?.withStateLock {
                     // Guard: unloadModel() bumps activeLoadToken so a superseded
@@ -479,7 +486,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         }
 
         withStateLock {
-            _isModelLoadInFlight = true
             _activeLoadTask = loadTask
         }
 
@@ -839,12 +845,13 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         _mmprojURL = nil
         _structuredHistory = []
         _lastUsage = nil
-        // An in-flight load is superseded: clear the tracking state so
-        // isModelLoadInFlight / awaitModelLoadSettled reflect the new reality.
-        // The detached load task may still be running (it's detached), but its
-        // own defer will see the bumped activeLoadToken and skip a spurious clear.
+        // An in-flight load is superseded: clear the in-flight flag immediately
+        // so callers see the unloaded state. _activeLoadTask is intentionally
+        // NOT cleared here — awaitModelLoadSettled() reads it to suspend until
+        // the native C work truly finishes (the detached task may still be
+        // running). The task's own defer skips clearing (bumped activeLoadToken)
+        // so the reference stays valid until the next loadModel overwrites it.
         _isModelLoadInFlight = false
-        _activeLoadTask = nil
         stateLock.unlock()
 
         capturedTask?.cancel()
@@ -1057,7 +1064,14 @@ extension LlamaBackend: CancellableModelLoading {
     /// `isModelLoadInFlight` is `false` the instant this returns.
     public func awaitModelLoadSettled() async {
         let task = withStateLock { _activeLoadTask }
-        _ = try? await task?.value
+        do {
+            _ = try await task?.value
+        } catch {
+            // The load error is surfaced to the original loadModel caller.
+            // awaitModelLoadSettled() provides a timing guarantee only
+            // (isModelLoadInFlight false on return), not an error contract.
+            Self.logger.debug("LlamaBackend.awaitModelLoadSettled: settled with error (already surfaced to caller): \(error)")
+        }
     }
 }
 

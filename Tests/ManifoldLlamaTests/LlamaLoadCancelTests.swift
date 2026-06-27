@@ -24,18 +24,26 @@ import ManifoldLlama
 /// `unloadAndWait()` in teardown to drain detached cleanup tasks.
 final class LlamaLoadCancelTests: XCTestCase {
 
+    override func setUp() async throws {
+        try await super.setUp()
+        try XCTSkipUnless(
+            HardwareRequirements.isPhysicalDevice,
+            "LlamaBackend requires Metal (unavailable in simulator)"
+        )
+        try XCTSkipUnless(
+            HardwareRequirements.isAppleSilicon,
+            "LlamaBackend requires Apple Silicon"
+        )
+    }
+
     // MARK: - Headless
 
     func test_isModelLoadInFlight_falseByDefault() {
-        guard HardwareRequirements.isPhysicalDevice else { return }
-        guard HardwareRequirements.isAppleSilicon else { return }
         let backend = LlamaBackend()
         XCTAssertFalse(backend.isModelLoadInFlight, "No load started — flag must be false")
     }
 
     func test_cancelModelLoad_isNoOp_whenNotLoading() {
-        guard HardwareRequirements.isPhysicalDevice else { return }
-        guard HardwareRequirements.isAppleSilicon else { return }
         let backend = LlamaBackend()
         // Must not crash; flag must remain false.
         backend.cancelModelLoad()
@@ -43,8 +51,6 @@ final class LlamaLoadCancelTests: XCTestCase {
     }
 
     func test_awaitModelLoadSettled_returnsImmediately_whenIdle() async {
-        guard HardwareRequirements.isPhysicalDevice else { return }
-        guard HardwareRequirements.isAppleSilicon else { return }
         let backend = LlamaBackend()
         // Fast path: nothing in flight → returns without suspending.
         await backend.awaitModelLoadSettled()
@@ -52,8 +58,6 @@ final class LlamaLoadCancelTests: XCTestCase {
     }
 
     func test_conformsToCancellableModelLoading() {
-        guard HardwareRequirements.isPhysicalDevice else { return }
-        guard HardwareRequirements.isAppleSilicon else { return }
         let backend = LlamaBackend()
         // The cast is the assertion: LlamaBackend must conform at runtime.
         XCTAssertNotNil(backend as? any CancellableModelLoading,
@@ -68,14 +72,6 @@ final class LlamaLoadCancelTests: XCTestCase {
     ///   2. `awaitModelLoadSettled()` returns only after the native work unwinds.
     ///   3. `isModelLoadInFlight` is `false` the instant `awaitModelLoadSettled()` returns.
     func test_cancelModelLoad_abortsInFlightLoad_andSettles() async throws {
-        try XCTSkipUnless(
-            HardwareRequirements.isPhysicalDevice,
-            "LlamaBackend requires Metal (unavailable in simulator)"
-        )
-        try XCTSkipUnless(
-            HardwareRequirements.isAppleSilicon,
-            "LlamaBackend requires Apple Silicon"
-        )
         guard let modelURL = HardwareRequirements.findGGUFModel() else {
             throw XCTSkip("No GGUF model on disk — set LLAMA_TEST_MODEL or place a .gguf in ~/Documents/Models/.")
         }
@@ -147,14 +143,6 @@ final class LlamaLoadCancelTests: XCTestCase {
     /// `generate` must produce output — proving no corrupted half-built context
     /// from the prior aborted load poisons the next load cycle.
     func test_cancelledLoad_followedBySuccessfulLoadAndGenerate() async throws {
-        try XCTSkipUnless(
-            HardwareRequirements.isPhysicalDevice,
-            "LlamaBackend requires Metal (unavailable in simulator)"
-        )
-        try XCTSkipUnless(
-            HardwareRequirements.isAppleSilicon,
-            "LlamaBackend requires Apple Silicon"
-        )
         guard let modelURL = HardwareRequirements.findGGUFModel() else {
             throw XCTSkip("No GGUF model on disk — set LLAMA_TEST_MODEL or place a .gguf in ~/Documents/Models/.")
         }
