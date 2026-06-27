@@ -360,18 +360,24 @@ import ManifoldInference
         "t5encoder",    // T5 encoder-only checkpoints
         "stablediffusion", // diffusion UNet weights
         "sd3",          // stable-diffusion-3
-        // Fused-multimodal Gemma checkpoints (Gemma 3n / "gemma4"): a single
-        // GGUF carries the text tower plus separate audio (`a.*`) and vision
-        // (`v.*`) towers and an mm projector (`mm.*`). The pinned llama.cpp
-        // build (b9744) recognizes the `gemma4` arch but its text-model loader
-        // only claims the text-tower tensors, then aborts in
-        // `done_getting_tensors` ("wrong number of tensors; expected N, got M")
-        // because the audio/vision/mmproj tensors are unclaimed. Until the
-        // pinned build can load these (or the model is re-packaged as a
-        // text-only GGUF + standalone mmproj), surface a typed
-        // `unsupportedModelArchitecture` instead of a cryptic nil-load failure.
-        // See issue #62.
-        "gemma4",       // Gemma 4 fused-multimodal (audio + vision + text)
+        // Fused-multimodal Gemma checkpoints (Gemma 3n): a single GGUF carries
+        // the text tower plus separate audio (`a.*`) and vision (`v.*`) towers
+        // and an mm projector (`mm.*`). The pinned llama.cpp build (b9744)
+        // recognizes the arch but its text-model loader only claims the
+        // text-tower tensors, then aborts in `done_getting_tensors` ("wrong
+        // number of tensors; expected N, got M") because the audio/vision/mmproj
+        // tensors are unclaimed. Surface a typed `unsupportedModelArchitecture`
+        // instead of a cryptic nil-load failure. See issue #62.
+        //
+        // NOTE: `gemma4` was previously denylisted here for the same reason, but
+        // text-only gemma4 GGUFs (e.g. unsloth/gemma-4-E4B-it-GGUF, a single
+        // text-tower file with no `a.*`/`v.*`/`mm.*` tensors) load fine on b9744.
+        // The denylist entry existed for the older FUSED single-GGUF packaging.
+        // Tradeoff of removing it: a FUSED gemma4 file will now fail later with
+        // the cryptic llama.cpp tensor-count error instead of our clean typed
+        // error — acceptable, since a fused single-GGUF is not a supported
+        // text-inference input. `gemma3n` stays denylisted (not yet verified as
+        // loadable in a text-only repack).
         "gemma3n",      // Gemma 3n fused-multimodal (the HF/upstream arch name)
     ]
 

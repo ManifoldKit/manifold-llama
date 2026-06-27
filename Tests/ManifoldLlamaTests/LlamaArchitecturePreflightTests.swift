@@ -45,26 +45,33 @@ final class LlamaArchitecturePreflightTests: XCTestCase {
         XCTAssertTrue(LlamaModelLoader.isUnsupportedArchitecture("sd3"))
     }
 
-    /// Fused-multimodal Gemma (Gemma 3n / "gemma4") ships text + audio + vision
-    /// + mmproj tensors in one GGUF. The pinned llama.cpp build recognizes the
-    /// arch but its text-model loader only claims the text tower and aborts in
+    /// Fused-multimodal Gemma 3n ships text + audio + vision + mmproj tensors in
+    /// one GGUF. The pinned llama.cpp build recognizes the arch but its
+    /// text-model loader only claims the text tower and aborts in
     /// `done_getting_tensors` ("wrong number of tensors"). Deny it so the user
     /// gets a typed error instead of a cryptic nil-load failure. See issue #62.
     ///
-    /// Sabotage check: remove `"gemma4"` from `unsupportedArchitectures` and this
-    /// assertion fails.
+    /// Note: `gemma4` was previously denylisted alongside `gemma3n`, but
+    /// text-only gemma4 GGUFs load fine on b9744, so it was removed (see
+    /// `test_denylist_stillAcceptsTextOnlyGemma`). `gemma3n` stays — it has not
+    /// been verified as loadable in a text-only repack.
+    ///
+    /// Sabotage check: remove `"gemma3n"` from `unsupportedArchitectures` and
+    /// this assertion fails.
     func test_denylist_rejectsFusedMultimodalGemma() {
-        XCTAssertTrue(LlamaModelLoader.isUnsupportedArchitecture("gemma4"))
         XCTAssertTrue(LlamaModelLoader.isUnsupportedArchitecture("gemma3n"))
         // Casing is normalized, matching how HF/converter tooling emits these.
-        XCTAssertTrue(LlamaModelLoader.isUnsupportedArchitecture("Gemma4"))
         XCTAssertTrue(LlamaModelLoader.isUnsupportedArchitecture("Gemma3n"))
     }
 
     /// The fused-multimodal deny must not spill onto the text-only Gemma
-    /// architectures the backend loads fine today.
+    /// architectures the backend loads fine today. `gemma4` joined this set once
+    /// text-only gemma4 GGUFs were confirmed loadable on b9744 (issue #62) — a
+    /// FUSED gemma4 file now fails later in llama.cpp rather than via our typed
+    /// error, an accepted tradeoff since fused single-GGUFs aren't a supported
+    /// text-inference input.
     func test_denylist_stillAcceptsTextOnlyGemma() {
-        for arch in ["gemma", "gemma2", "gemma3"] {
+        for arch in ["gemma", "gemma2", "gemma3", "gemma4", "Gemma4"] {
             XCTAssertFalse(
                 LlamaModelLoader.isUnsupportedArchitecture(arch),
                 "Text-only Gemma architecture '\(arch)' must remain loadable"
@@ -82,17 +89,19 @@ final class LlamaArchitecturePreflightTests: XCTestCase {
     /// Sabotage check: have `readArchitectureFromHeader` always return nil and
     /// this assertion fails — the cryptic generic load failure returns.
     func test_headerReader_extractsArchitectureFromMinimalGGUF() throws {
-        let url = try Self.writeMinimalGGUF(architecture: "gemma4")
+        // Uses `gemma3n` (still denylisted) — `gemma4` is now an accepted
+        // text-only arch and would not throw at preflight (see issue #62).
+        let url = try Self.writeMinimalGGUF(architecture: "gemma3n")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        XCTAssertEqual(LlamaModelLoader.readArchitectureFromHeader(at: url), "gemma4")
+        XCTAssertEqual(LlamaModelLoader.readArchitectureFromHeader(at: url), "gemma3n")
         XCTAssertThrowsError(try LlamaModelLoader.preflightArchitecture(
             LlamaModelLoader.readArchitectureFromHeader(at: url)
         )) { error in
             guard case InferenceError.unsupportedModelArchitecture(let arch) = error else {
                 return XCTFail("Expected unsupportedModelArchitecture, got \(error)")
             }
-            XCTAssertEqual(arch, "gemma4")
+            XCTAssertEqual(arch, "gemma3n")
         }
     }
 
