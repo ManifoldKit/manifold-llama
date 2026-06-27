@@ -2,16 +2,20 @@
 
 ## [0.2.15](https://github.com/roryford/manifold-llama/compare/v0.2.14...v0.2.15) (2026-06-27)
 
+### Highlights
+
+**`LlamaBackend` now conforms to `CancellableModelLoading`** ([#110](https://github.com/roryford/manifold-llama/pull/110), [#2037](https://github.com/roryford/manifold-llama/issues/2037)) — a host can now observe, cooperatively cancel, and await the true completion of an in-flight native model load. `llama_model_load_from_file` ignores Swift `Task` cancellation; when a host's load deadline fires the native call keeps mutating the backend on a background thread, and touching it then SIGSEGVs in `ggml_backend_graph_compute_async`. The new conformance wires a `progress_callback` abort path (`cancelModelLoad()`), a true-completion signal (`awaitModelLoadSettled()` returns only after the C call unwinds), and an `isModelLoadInFlight` flag so hosts can latch precisely instead of guessing. Companion to ManifoldKit [#2054](https://github.com/roryford/ManifoldKit/issues/2054).
+
+**Tracks ManifoldKit 0.62** ([#114](https://github.com/roryford/manifold-llama/pull/114)) — the core pin moves to `.upToNextMinor(from: "0.62.0")`, which is the release that ships `CancellableModelLoading`, the `ConformanceRecord`/`MatrixRenderer` cross-backend scoring APIs, and the `RenderConsistencyChecker` load-time gate.
 
 ### Features
 
-* **backend:** adopt CancellableModelLoading on LlamaBackend ([6840f2e](https://github.com/roryford/manifold-llama/commit/6840f2ed2fed4828df908f7186e7be4efa6d569e))
-* **backend:** adopt CancellableModelLoading on LlamaBackend ([#2037](https://github.com/roryford/manifold-llama/issues/2037)) ([8955b73](https://github.com/roryford/manifold-llama/commit/8955b73be567eec8db97e2662455b2dbeb9db9ac))
-
+* **backend:** adopt CancellableModelLoading on LlamaBackend ([#110](https://github.com/roryford/manifold-llama/pull/110), [#2037](https://github.com/roryford/manifold-llama/issues/2037)) ([8955b73](https://github.com/roryford/manifold-llama/commit/8955b73be567eec8db97e2662455b2dbeb9db9ac))
 
 ### Bug Fixes
 
-* **backend:** address code-review findings on CancellableModelLoading ([#2037](https://github.com/roryford/manifold-llama/issues/2037)) ([f73abfe](https://github.com/roryford/manifold-llama/commit/f73abfe144eb421fb78927517773cc37e99a62e4))
+* **backend:** address code-review findings on CancellableModelLoading ([#110](https://github.com/roryford/manifold-llama/pull/110)) ([f73abfe](https://github.com/roryford/manifold-llama/commit/f73abfe144eb421fb78927517773cc37e99a62e4))
+* **deps:** bump ManifoldKit to 0.62.0 ([#114](https://github.com/roryford/manifold-llama/pull/114)) ([22116012](https://github.com/roryford/manifold-llama/commit/22116012))
 
 ## [0.2.14](https://github.com/roryford/manifold-llama/compare/v0.2.13...v0.2.14) (2026-06-25)
 
