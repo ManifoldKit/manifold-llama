@@ -21,10 +21,10 @@ let package = Package(
         .executable(name: "manifold-tools-llama", targets: ["manifold-tools-llama"]),
     ],
     dependencies: [
-        // The ManifoldBackendTestKit / ManifoldTestSupport products this package
-        // needs exist only on main until the 0.48 tags ship.
-        // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.61.0")),
+        // Pinned to the commit that ships CancellableModelLoading (#2054) — the
+        // protocol the LlamaBackend conformance in this PR depends on. Update to
+        // `.upToNextMinor(from: "0.62.0")` once that tag is cut.
+        .package(url: "https://github.com/roryford/ManifoldKit", revision: "5337b9a857ae1cc08a4a82fcc315ff2a4ed17070"),
         // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
         // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
         // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable

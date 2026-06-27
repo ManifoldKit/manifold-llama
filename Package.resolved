@@ -33,8 +33,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/roryford/ManifoldKit",
       "state" : {
-        "revision" : "28c23a6a6b479080988ba3d9331e8ccd136a1bc7",
-        "version" : "0.61.0"
+        "revision" : "5337b9a857ae1cc08a4a82fcc315ff2a4ed17070"
       }
     },
     {
