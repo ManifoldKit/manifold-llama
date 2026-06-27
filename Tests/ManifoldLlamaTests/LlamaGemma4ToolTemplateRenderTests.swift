@@ -283,4 +283,118 @@ final class LlamaGemma4ToolTemplateRenderTests: XCTestCase {
             callRange.lowerBound, resultRange.lowerBound,
             "The tool result must render after the tool call it answers")
     }
+
+    // MARK: - Deliverable 3: byte-exact render → parse round-trip
+
+    /// A minimal Jinja template that renders an assistant tool call in the
+    /// gemma-4 **native emission grammar** the runtime parser actually consumes:
+    /// `<|tool_call>call:NAME{key:<|"|>value<|"|>,…}<|end_of_turn>`.
+    ///
+    /// This is deliberately NOT the `name(json)` body that
+    /// `gemma4NativeToolTemplate` (used by the multi-turn ordering test above)
+    /// emits. That simplified body was only ever a *fixture artifact* chosen to
+    /// assert call/result *ordering* in the rendered prompt — it is not the
+    /// spelling any runtime component produces or consumes. The authoritative
+    /// emission grammar lives in `LlamaToolMarkers.parseGemma4NativeCall`
+    /// (the `call:`-prefixed brace body) closed by `LlamaToolMarkers.gemma4EndTurn`
+    /// (`<|end_of_turn>`). This template encodes that grammar so the rendered
+    /// string round-trips through the *real* parser unchanged.
+    ///
+    /// `arguments` is exposed as a parsed object (mirroring
+    /// `JinjaPromptRenderer.argumentsValue`) so `.items()` resolves; the quoted
+    /// `<|"|>` token is the literal `LlamaToolMarkers.gemma4QuoteToken` the parser
+    /// substitutes back to `"` before decoding.
+    static let gemma4NativeEmissionTemplate = """
+    {%- for tc in calls %}
+    <|tool_call>call:{{ tc.name }}{{ "{" }}{% for key, value in tc.arguments.items() %}{{ key }}:<|"|>{{ value }}<|"|>{% if not loop.last %},{% endif %}{% endfor %}{{ "}" }}<|end_of_turn>
+    {%- endfor %}
+    """
+
+    /// Render ONE assistant tool call through the real swift-jinja engine in the
+    /// gemma-4 native emission grammar, then feed that **exact** rendered string
+    /// back through the runtime parser (`ToolCallTransform` +
+    /// `LlamaToolMarkers.markers()`) and assert the recovered structured call
+    /// matches the original. One shared emission, no GGUF, no network — this is
+    /// the byte-exact render→parse round-trip proving the renderer's spelling and
+    /// the parser's spelling are identical.
+    func test_renderParseRoundTrip_gemma4NativeEmission_recoversOriginalCall() throws {
+        let original = ToolCall(
+            id: "call_rt1",
+            toolName: "get_weather",
+            arguments: #"{"location":"Tokyo"}"#)
+
+        // Expose arguments as a parsed object exactly as JinjaPromptRenderer does,
+        // so the template's `.items()` iteration resolves the key/value pairs.
+        let argsObject = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: Data(original.arguments.utf8)) as? [String: Any],
+            "fixture arguments must parse as a JSON object")
+        let callContext: [String: Any] = [
+            "name": original.toolName,
+            "arguments": argsObject,
+        ]
+
+        // Same whitespace semantics as JinjaPromptRenderer (`lstripBlocks`/`trimBlocks`).
+        let template = try Template(
+            Self.gemma4NativeEmissionTemplate,
+            with: .init(lstripBlocks: true, trimBlocks: true))
+        let rendered = try template.render([
+            "calls": try Value(any: [callContext]),
+        ])
+
+        // Bind the round-trip to the REAL runtime delimiters via markers() (so any
+        // drift in LlamaToolMarkers is caught here, not just against string literals).
+        let gemmaMarker = try XCTUnwrap(
+            LlamaToolMarkers.markers().first { $0.open == "<|tool_call>" },
+            "markers() must expose the gemma-4 native pair")
+
+        // Faithfulness guards: the rendered emission must use the native grammar —
+        // the real open/close delimiters, the `call:` prefix, and the `<|\"|>` quote
+        // token — NOT the simplified name(json) fixture body.
+        XCTAssertTrue(
+            rendered.contains(gemmaMarker.open),
+            "render must emit the native open delimiter. Rendered:\n\(rendered)")
+        XCTAssertTrue(
+            rendered.contains(gemmaMarker.close),
+            "render must close on the native turn delimiter. Rendered:\n\(rendered)")
+        XCTAssertTrue(
+            rendered.contains("call:get_weather{"),
+            "render must use the parser's `call:NAME{…}` body grammar. Rendered:\n\(rendered)")
+        XCTAssertTrue(
+            rendered.contains(#"location:<|"|>Tokyo<|"|>"#),
+            "render must quote string values with the gemma-4 <|\"|> token. Rendered:\n\(rendered)")
+
+        // Feed the EXACT rendered string through the runtime parser.
+        var transform = ToolCallTransform(markers: LlamaToolMarkers.markers())
+        var events = transform.process([.token(rendered)])
+        events += transform.finalize()
+
+        let calls = events.compactMap { event -> ToolCall? in
+            if case .toolCall(let tc) = event { return tc }
+            return nil
+        }
+        XCTAssertEqual(
+            calls.count, 1,
+            "the rendered native emission must parse back to exactly one tool call. "
+            + "Events: \(events.map { "\($0)" }.joined(separator: ", "))")
+
+        let recovered = try XCTUnwrap(calls.first)
+        // Name round-trips exactly. (The id is parser-generated — `llama-<name>-<uuid>`
+        // — so it intentionally differs from the original; name + arguments are the
+        // round-trip invariants.)
+        XCTAssertEqual(
+            recovered.toolName, original.toolName,
+            "recovered tool name must match the rendered call")
+
+        let recoveredArgs = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: Data(recovered.arguments.utf8)) as? [String: Any],
+            "recovered arguments must parse as a JSON object. Raw: \(recovered.arguments)")
+        XCTAssertEqual(
+            recoveredArgs["location"] as? String, "Tokyo",
+            "the argument value must survive the render→parse round-trip")
+        XCTAssertEqual(
+            recoveredArgs.count, argsObject.count,
+            "no spurious arguments may appear after the round-trip")
+    }
 }
