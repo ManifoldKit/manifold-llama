@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.15](https://github.com/roryford/manifold-llama/compare/v0.2.14...v0.2.15) (2026-06-27)
+
+
+### Features
+
+* **backend:** adopt CancellableModelLoading on LlamaBackend ([6840f2e](https://github.com/roryford/manifold-llama/commit/6840f2ed2fed4828df908f7186e7be4efa6d569e))
+* **backend:** adopt CancellableModelLoading on LlamaBackend ([#2037](https://github.com/roryford/manifold-llama/issues/2037)) ([8955b73](https://github.com/roryford/manifold-llama/commit/8955b73be567eec8db97e2662455b2dbeb9db9ac))
+
+
+### Bug Fixes
+
+* **backend:** address code-review findings on CancellableModelLoading ([#2037](https://github.com/roryford/manifold-llama/issues/2037)) ([f73abfe](https://github.com/roryford/manifold-llama/commit/f73abfe144eb421fb78927517773cc37e99a62e4))
+
 ## [0.2.14](https://github.com/roryford/manifold-llama/compare/v0.2.13...v0.2.14) (2026-06-25)
 
 ### Highlights
