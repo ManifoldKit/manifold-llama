@@ -842,7 +842,7 @@ To re-cut it for a new build:
      --latest=false --notes "…"
    ```
    The resulting asset URL is
-   `https://github.com/roryford/manifold-llama/releases/download/vendor-llama-b<NNNN>/llama-b<NNNN>-slim.xcframework.zip`.
+   `https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b<NNNN>/llama-b<NNNN>-slim.xcframework.zip`.
 3. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
    asset and its `checksum` to the value the script printed (the package
    checksum of the slim zip, *not* the upstream zip), then run
