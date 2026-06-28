@@ -288,7 +288,7 @@ final class LlamaGemma4ToolTemplateRenderTests: XCTestCase {
 
     /// A minimal Jinja template that renders an assistant tool call in the
     /// gemma-4 **native emission grammar** the runtime parser actually consumes:
-    /// `<|tool_call>call:NAME{key:<|"|>value<|"|>,…}<|end_of_turn>`.
+    /// `<|tool_call>call:NAME{key:<|"|>value<|"|>,…}<tool_call|>`.
     ///
     /// This is deliberately NOT the `name(json)` body that
     /// `gemma4NativeToolTemplate` (used by the multi-turn ordering test above)
@@ -296,9 +296,11 @@ final class LlamaGemma4ToolTemplateRenderTests: XCTestCase {
     /// assert call/result *ordering* in the rendered prompt — it is not the
     /// spelling any runtime component produces or consumes. The authoritative
     /// emission grammar lives in `LlamaToolMarkers.parseGemma4NativeCall`
-    /// (the `call:`-prefixed brace body) closed by `LlamaToolMarkers.gemma4EndTurn`
-    /// (`<|end_of_turn>`). This template encodes that grammar so the rendered
-    /// string round-trips through the *real* parser unchanged.
+    /// (the `call:`-prefixed brace body) closed by `LlamaToolMarkers.gemma4CloseTag`
+    /// (`<tool_call|>` — pipe before the bracket, the token a real gemma-4 GGUF
+    /// emits; an EOG special token, NOT `<|end_of_turn>`, follows). This template
+    /// encodes that grammar so the rendered string round-trips through the *real*
+    /// parser unchanged.
     ///
     /// `arguments` is exposed as a parsed object (mirroring
     /// `JinjaPromptRenderer.argumentsValue`) so `.items()` resolves; the quoted
@@ -306,7 +308,7 @@ final class LlamaGemma4ToolTemplateRenderTests: XCTestCase {
     /// substitutes back to `"` before decoding.
     static let gemma4NativeEmissionTemplate = """
     {%- for tc in calls %}
-    <|tool_call>call:{{ tc.name }}{{ "{" }}{% for key, value in tc.arguments.items() %}{{ key }}:<|"|>{{ value }}<|"|>{% if not loop.last %},{% endif %}{% endfor %}{{ "}" }}<|end_of_turn>
+    <|tool_call>call:{{ tc.name }}{{ "{" }}{% for key, value in tc.arguments.items() %}{{ key }}:<|"|>{{ value }}<|"|>{% if not loop.last %},{% endif %}{% endfor %}{{ "}" }}<tool_call|>
     {%- endfor %}
     """
 

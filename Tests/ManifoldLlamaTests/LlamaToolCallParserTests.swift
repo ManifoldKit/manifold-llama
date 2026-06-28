@@ -31,7 +31,7 @@ final class LlamaToolCallParserTests: XCTestCase {
 
     func test_gemma4NativeCall_singleCall_emitsToolCallEvent() throws {
         var parser = LlamaToolCallParser()
-        let input = "<|tool_call>\ncall:get_weather{city:<|\"|>London<|\"|>,units:<|\"|>celsius<|\"|>}\n<|end_of_turn>"
+        let input = "<|tool_call>\ncall:get_weather{city:<|\"|>London<|\"|>,units:<|\"|>celsius<|\"|>}\n<tool_call|>"
         let events = parser.process(input)
 
         let toolCalls = events.compactMap { event -> ToolCall? in
@@ -56,7 +56,7 @@ final class LlamaToolCallParserTests: XCTestCase {
         // native call fell back to `arguments == "{}"`. This test exists so
         // that regression cannot reappear silently.
         var parser = LlamaToolCallParser()
-        let input = "<|tool_call>\ncall:rate{score:5,active:true,note:<|\"|>ok<|\"|>}\n<|end_of_turn>"
+        let input = "<|tool_call>\ncall:rate{score:5,active:true,note:<|\"|>ok<|\"|>}\n<tool_call|>"
         let events = parser.process(input)
         let toolCalls = events.compactMap { event -> ToolCall? in
             if case .toolCall(let tc) = event { return tc }
@@ -76,7 +76,7 @@ final class LlamaToolCallParserTests: XCTestCase {
 
     func test_gemma4NativeCall_noArgs_emitsToolCallWithEmptyArgs() {
         var parser = LlamaToolCallParser()
-        let input = "<|tool_call>\ncall:list_files{}\n<|end_of_turn>"
+        let input = "<|tool_call>\ncall:list_files{}\n<tool_call|>"
         let events = parser.process(input)
 
         let toolCalls = events.compactMap { event -> ToolCall? in
@@ -89,7 +89,7 @@ final class LlamaToolCallParserTests: XCTestCase {
 
     func test_gemma4NativeCall_prefixText_emitsTokenBeforeToolCall() {
         var parser = LlamaToolCallParser()
-        let input = "Sure, let me check that.<|tool_call>\ncall:get_time{}\n<|end_of_turn>"
+        let input = "Sure, let me check that.<|tool_call>\ncall:get_time{}\n<tool_call|>"
         let events = parser.process(input)
 
         let tokens = events.compactMap { event -> String? in
@@ -146,7 +146,7 @@ final class LlamaToolCallParserTests: XCTestCase {
 
         // Split "<|tool_call>" across two chunks.
         let events1 = parser.process("<|tool_")
-        let events2 = parser.process("call>\ncall:ping{}\n<|end_of_turn>")
+        let events2 = parser.process("call>\ncall:ping{}\n<tool_call|>")
         let all = events1 + events2
 
         let toolCalls = all.compactMap { event -> ToolCall? in
@@ -528,7 +528,7 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
 
     func test_gemma4_noBraces_producesNoToolCall() {
         var p = Parser()
-        let events = p.process("<|tool_call>\ncall:tool_no_braces\n<|end_of_turn>")
+        let events = p.process("<|tool_call>\ncall:tool_no_braces\n<tool_call|>")
         XCTAssertTrue(toolCalls(from: events).isEmpty,
                       "A call: body without braces must not produce a tool call")
     }
@@ -537,7 +537,7 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
 
     func test_gemma4_emptyName_producesNoToolCall() {
         var p = Parser()
-        let events = p.process("<|tool_call>\ncall:{}\n<|end_of_turn>")
+        let events = p.process("<|tool_call>\ncall:{}\n<tool_call|>")
         XCTAssertTrue(toolCalls(from: events).isEmpty,
                       "A call: body with an empty tool name must not produce a tool call")
     }
@@ -546,7 +546,7 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
 
     func test_gemma4_unterminatedString_producesToolCallWithEmptyArgs() {
         var p = Parser()
-        let events = p.process("<|tool_call>\ncall:my_tool{key:<|\"|>no closing quote\n<|end_of_turn>")
+        let events = p.process("<|tool_call>\ncall:my_tool{key:<|\"|>no closing quote\n<tool_call|>")
         let calls = toolCalls(from: events)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls.first?.toolName, "my_tool")
@@ -558,7 +558,7 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
 
     func test_gemma4_doubleValue_isPreservedInArguments() throws {
         var p = Parser()
-        let events = p.process("<|tool_call>\ncall:score{threshold:0.75}\n<|end_of_turn>")
+        let events = p.process("<|tool_call>\ncall:score{threshold:0.75}\n<tool_call|>")
         let calls = toolCalls(from: events)
         XCTAssertEqual(calls.count, 1)
         let tc = try XCTUnwrap(calls.first)
@@ -572,7 +572,7 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
 
     func test_gemma4_nullValue_isPreservedInArguments() throws {
         var p = Parser()
-        let events = p.process("<|tool_call>\ncall:op{cursor:null}\n<|end_of_turn>")
+        let events = p.process("<|tool_call>\ncall:op{cursor:null}\n<tool_call|>")
         let calls = toolCalls(from: events)
         XCTAssertEqual(calls.count, 1)
         let tc = try XCTUnwrap(calls.first)
@@ -586,7 +586,7 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
 
     func test_gemma4_mixedBareValues_allTypesPresent() throws {
         var p = Parser()
-        let events = p.process("<|tool_call>\ncall:multi{n:7,ratio:1.5,ok:false,ptr:null}\n<|end_of_turn>")
+        let events = p.process("<|tool_call>\ncall:multi{n:7,ratio:1.5,ok:false,ptr:null}\n<tool_call|>")
         let calls = toolCalls(from: events)
         XCTAssertEqual(calls.count, 1)
         let tc = try XCTUnwrap(calls.first)

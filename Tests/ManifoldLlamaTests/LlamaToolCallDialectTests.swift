@@ -28,8 +28,8 @@ final class LlamaToolCallDialectTests: XCTestCase {
         backend.injectArchitectureForTesting("gemma")
         let dialect = backend.capabilities.toolDialect
         XCTAssertEqual(dialect?.family, .gemma)
-        XCTAssertEqual(dialect?.openDelimiter, "<|tool_call|>")
-        XCTAssertEqual(dialect?.closeDelimiter, "<|end_of_turn>")
+        XCTAssertEqual(dialect?.openDelimiter, "<|tool_call>")
+        XCTAssertEqual(dialect?.closeDelimiter, "<tool_call|>")
         XCTAssertEqual(dialect?.argEncoding, .json)
         XCTAssertEqual(dialect?.extractability, .buried)
     }

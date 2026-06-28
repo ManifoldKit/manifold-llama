@@ -53,7 +53,7 @@ final class LlamaGrammarConformanceTests: XCTestCase {
 
     /// Tool-call envelope dialect for a family. Local to the test target — the live
     /// codebase has no `ToolCallMarker.Dialect`; `LlamaToolMarkers` ships two marker
-    /// delimiter pairs (Gemma-4 native `<|tool_call>`…`<|end_of_turn>` and the JSON
+    /// delimiter pairs (Gemma-4 native `<|tool_call>`…`<tool_call|>` and the JSON
     /// fallback `<tool_call>`…`</tool_call>`). This enum only records intent for the
     /// C5 envelope fixture; all non-Gemma families exercise the JSON fallback envelope.
     enum ToolDialect: String {

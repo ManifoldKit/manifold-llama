@@ -680,7 +680,7 @@ import ManifoldHardware
 
         // Tool-call parser: active when the config carries at least one tool definition.
         // Processes `.token` events from the thinking layer (or raw decoded text) and
-        // re-routes `<|tool_call>…<|end_of_turn>` / `<tool_call>…</tool_call>` blocks
+        // re-routes `<|tool_call>…<tool_call|>` / `<tool_call>…</tool_call>` blocks
         // into `.toolCall` events. When no tools are configured the parser is skipped
         // entirely — zero overhead on non-tool-calling generation paths.
         let useToolParser = !config.tools.isEmpty
