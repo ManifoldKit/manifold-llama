@@ -179,7 +179,7 @@ final class LlamaToolCallE2ETests: XCTestCase {
             StructuredMessage(role: "user", content: "What is the weather in Tokyo?"),
             StructuredMessage(
                 role: "assistant",
-                parts: [.text("<|tool_call>\ncall:get_weather{city:<|\"|>Tokyo<|\"|>}\n<|end_of_turn>")]),
+                parts: [.text("<|tool_call>\ncall:get_weather{city:<|\"|>Tokyo<|\"|>}\n<tool_call|>")]),
             StructuredMessage(
                 role: "tool",
                 parts: [.toolResult(ToolResult(
