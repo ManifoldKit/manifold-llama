@@ -119,7 +119,7 @@ jobs:
           set -euo pipefail
           BRANCH="auto/bump-manifoldkit-${TAG}"
           git config user.name "manifold-release-bot"
-          git config user.email "noreply@roryford.com"
+          git config user.email "noreply@github.com"
           git checkout -b "$BRANCH"
           git add Package.swift Package.resolved
           git commit -m "fix: bump ManifoldKit pin to ${TAG}"
