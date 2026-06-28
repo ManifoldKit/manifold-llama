@@ -21,13 +21,16 @@ enum LlamaToolCallDialect {
 
         if arch.hasPrefix("gemma") {
             // Gemma 3 / gemma2 / gemma emit a native `<|tool_call>` block with a
-            // custom `call:name{key:value}` body; closed by `<|end_of_turn>`.
-            // The JSON body alternative (`<tool_call>…</tool_call>`) is also
-            // supported via LlamaToolMarkers but the native path is primary.
+            // custom `call:name{key:value}` body; closed by the `<tool_call|>`
+            // token (pipe before the bracket — verified byte-for-byte against a
+            // real gemma-4 GGUF). The turn-end EOG that follows is a special
+            // token, not literal text. The JSON body alternative
+            // (`<tool_call>…</tool_call>`) is also supported via LlamaToolMarkers
+            // but the native path is primary.
             return ToolCallDialect(
                 family: .gemma,
-                openDelimiter: "<|tool_call|>",
-                closeDelimiter: "<|end_of_turn>",
+                openDelimiter: "<|tool_call>",
+                closeDelimiter: "<tool_call|>",
                 argEncoding: .json,
                 extractability: .buried
             )

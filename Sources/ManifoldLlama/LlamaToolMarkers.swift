@@ -12,8 +12,15 @@ import ManifoldInference
 /// `ToolCallTransform` resolves ties by array order, matching the original
 /// parser's earliest-of-two behavior):
 ///
-/// 1. **Gemma 4 native** — `<|tool_call>` … `<|end_of_turn>` with a
-///    `call:name{key:<|"|>value<|"|>}` brace body.
+/// 1. **Gemma 4 native** — `<|tool_call>` … `<tool_call|>` with a
+///    `call:name{key:<|"|>value<|"|>}` brace body. The close delimiter is the
+///    `<tool_call|>` token (pipe BEFORE the angle bracket), NOT `<|end_of_turn>`:
+///    a real gemma-4 GGUF emits `<|tool_call>call:NAME{…}<tool_call|>` and then
+///    an end-of-turn EOG *special token* (which the driver consumes as EOG, never
+///    as literal text). Pairing the open with `<|end_of_turn>` — a string the
+///    model never emits as text — left the whole call body held back and dropped
+///    at finalize (0 dispatches). Verified byte-for-byte against the text-only
+///    gemma-4-E4B GGUF.
 /// 2. **JSON fallback** — `<tool_call>` … `</tool_call>` with a
 ///    `{"name":…,"arguments":…}` body (Qwen-style fine-tunes).
 /// 3. **Mistral `[TOOL_CALLS]`** — a literal `[TOOL_CALLS]` open token followed
@@ -40,8 +47,11 @@ import ManifoldInference
 
     /// Gemma 4 native open token.
     static let gemma4OpenTag = "<|tool_call>"
-    /// Gemma 4 turn-end token used to close a native tool call.
-    static let gemma4EndTurn = "<|end_of_turn>"
+    /// Gemma 4 native close token. A gemma-4 GGUF closes a tool call with the
+    /// `<tool_call|>` token (pipe before the bracket) — NOT `<|end_of_turn>`.
+    /// The turn-end that follows is an EOG special token the driver consumes
+    /// directly, so it never reaches the parser as literal text.
+    static let gemma4CloseTag = "<tool_call|>"
     /// Gemma 4 string-quoting token substituted with `"` before parsing.
     static let gemma4QuoteToken = "<|\"|>"
 
@@ -72,7 +82,7 @@ import ManifoldInference
     /// readability.
     public static func markers() -> [ToolCallMarker] {
         [
-            ToolCallMarker(open: gemma4OpenTag, close: gemma4EndTurn) { body in
+            ToolCallMarker(open: gemma4OpenTag, close: gemma4CloseTag) { body in
                 parseCallBuffer(body)
             },
             ToolCallMarker(open: jsonOpenTag, close: jsonCloseTag) { body in
@@ -208,6 +218,25 @@ import ManifoldInference
                     value = decoded
                 } else {
                     value = raw
+                }
+            } else if inner[idx] == "[" || inner[idx] == "{" {
+                // Array or nested object — scan to the matching close bracket,
+                // then parse the captured literal as JSON.
+                var cursor = idx
+                var depth = 0
+                while cursor < end {
+                    let ch = inner[cursor]
+                    if ch == "[" || ch == "{" { depth += 1 }
+                    else if ch == "]" || ch == "}" { depth -= 1; if depth == 0 { cursor = inner.index(after: cursor); break } }
+                    cursor = inner.index(after: cursor)
+                }
+                let literal = inner[idx..<cursor].trimmingCharacters(in: .whitespaces)
+                idx = cursor
+                if let data = literal.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                    value = parsed
+                } else {
+                    value = literal
                 }
             } else {
                 // Bare literal — number, true, false, or null. Read up to next comma.

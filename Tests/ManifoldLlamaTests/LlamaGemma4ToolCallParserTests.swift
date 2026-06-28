@@ -42,12 +42,14 @@ final class LlamaGemma4MarkerInventoryTests: XCTestCase {
 
     func test_markers_containsGemma4NativeCloseTag() {
         let markers = LlamaToolMarkers.markers()
-        // Pair: open == "<|tool_call>" should have close == "<|end_of_turn>"
+        // Pair: open == "<|tool_call>" should have close == "<tool_call|>"
+        // (pipe before the bracket — the token a real gemma-4 GGUF actually
+        // emits to close a tool call; `<|end_of_turn>` is never produced as text).
         let gemma4Pair = markers.first { $0.open == "<|tool_call>" }
         XCTAssertNotNil(gemma4Pair,
                         "markers() must contain a pair whose open is <|tool_call>")
-        XCTAssertEqual(gemma4Pair?.close, "<|end_of_turn>",
-                       "The gemma-4 native pair must use <|end_of_turn> as its close token")
+        XCTAssertEqual(gemma4Pair?.close, "<tool_call|>",
+                       "The gemma-4 native pair must use <tool_call|> as its close token")
     }
 
     func test_markers_containsJSONFallbackPair() {
@@ -97,7 +99,7 @@ final class LlamaGemma4ToolCallParserE2ETests: XCTestCase {
         // Sabotage: remove the gemma-4 marker pair from `LlamaToolMarkers.markers()`
         // and `calls.count` drops to 0, failing the XCTAssertEqual below.
         var parser = Parser()
-        let chunk = "<|tool_call>\ncall:get_weather{city:<|\"|>Paris<|\"|>}\n<|end_of_turn>"
+        let chunk = "<|tool_call>\ncall:get_weather{city:<|\"|>Paris<|\"|>}\n<tool_call|>"
         let events = parser.process(chunk)
 
         let calls = toolCalls(from: events)
@@ -130,7 +132,7 @@ final class LlamaGemma4ToolCallParserE2ETests: XCTestCase {
         // Split the open tag across two chunks to verify holdback / reassembly.
         var all: [GenerationEvent] = []
         all += parser.process("<|tool_")
-        all += parser.process("call>\ncall:ping{}\n<|end_of_turn>")
+        all += parser.process("call>\ncall:ping{}\n<tool_call|>")
 
         let calls = toolCalls(from: all)
         XCTAssertEqual(calls.count, 1)
@@ -225,7 +227,7 @@ final class LlamaBackendStructuredHistoryStorageTests: XCTestCase {
         let backend = LlamaBackend()
         let messages: [StructuredMessage] = [
             StructuredMessage(role: "user", content: "What is the weather in Tokyo?"),
-            StructuredMessage(role: "assistant", content: "<|tool_call>\ncall:get_weather{city:<|\"|>Tokyo<|\"|>}\n<|end_of_turn>"),
+            StructuredMessage(role: "assistant", content: "<|tool_call>\ncall:get_weather{city:<|\"|>Tokyo<|\"|>}\n<tool_call|>"),
         ]
 
         backend.setStructuredHistory(messages)
