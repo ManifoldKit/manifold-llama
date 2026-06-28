@@ -191,6 +191,17 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
     private let stateLock = NSLock()
     private var _isReady = false
 
+    // MARK: - CancellableModelLoading state (guarded by stateLock)
+
+    private var _isModelLoadInFlight = false
+    private var _activeLoadTask: Task<LoadedReranker, Error>?
+    private var nextLoadToken: UInt64 = 0
+    private var activeLoadToken: UInt64 = 0
+
+    // Separate lock so cancelModelLoad() is callable while serializedLoad holds loadLock.
+    private let cancelContextLock = NSLock()
+    private var _cancelContext: LlamaModelLoader.ProgressCallbackContext?
+
     /// `true` once a RANK-pooling GGUF is resident. Reads are lock-guarded so a
     /// concurrent `loadModel` / `unloadModel` cannot expose a half-installed
     /// context to a scoring call.
@@ -223,16 +234,54 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
     /// Loads a cross-encoder reranker GGUF and makes the instance ``isReady``.
     ///
     /// - Throws: ``RerankerError/modelLoadFailed`` when the GGUF cannot be
-    ///   opened or a RANK context cannot be created.
+    ///   opened or a RANK context cannot be created, or `CancellationError` when
+    ///   a cooperative cancel via ``cancelModelLoad()`` aborted the native load.
     public func loadModel(from url: URL) async throws {
         await storage.unload()
-        stateLock.withLock { _isReady = false }
+
+        let loadToken = stateLock.withLock {
+            _isReady = false
+            nextLoadToken &+= 1
+            activeLoadToken = nextLoadToken
+            return activeLoadToken
+        }
+
+        let loadTask = Task.detached(priority: .userInitiated) { [weak self] in
+            // Set in-flight before any work so the flag tracks native load lifetime.
+            // Both the set and clear happen inside the task to eliminate the TOCTOU
+            // where a fast-failing task's defer fires before the spawning thread can
+            // reach its own stateLock{_isModelLoadInFlight = true}.
+            self?.stateLock.withLock {
+                if self?.activeLoadToken == loadToken {
+                    self?._isModelLoadInFlight = true
+                }
+            }
+
+            let cancelCtx = LlamaModelLoader.ProgressCallbackContext()
+            self?.cancelContextLock.withLock { self?._cancelContext = cancelCtx }
+
+            defer {
+                self?.cancelContextLock.withLock { self?._cancelContext = nil }
+                self?.stateLock.withLock {
+                    // Guard: unloadModel() bumps activeLoadToken so a superseded
+                    // detached task cannot mistakenly flip the flag after unload.
+                    if self?.activeLoadToken == loadToken {
+                        self?._isModelLoadInFlight = false
+                        self?._activeLoadTask = nil
+                    }
+                }
+            }
+
+            return try Self.serializedLoad(from: url, callbackContext: cancelCtx)
+        }
+
+        stateLock.withLock { _activeLoadTask = loadTask }
 
         let loaded: LoadedReranker
         do {
-            loaded = try await Task.detached(priority: .userInitiated) {
-                try Self.serializedLoad(from: url)
-            }.value
+            loaded = try await loadTask.value
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as RerankerError {
             throw error
         } catch {
@@ -255,7 +304,16 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
     /// Unloads the model, flipping ``isReady`` to `false` immediately. Any
     /// in-flight scoring finishes first via the actor's serial executor.
     public func unloadModel() {
-        stateLock.withLock { _isReady = false }
+        stateLock.withLock {
+            _isReady = false
+            // Bump the load token so the in-flight task's defer skips its flag-clear,
+            // then clear the flag immediately so callers see the unloaded state.
+            nextLoadToken &+= 1
+            activeLoadToken = nextLoadToken
+            _isModelLoadInFlight = false
+            // _activeLoadTask is intentionally NOT cleared here — awaitModelLoadSettled()
+            // reads it to suspend until the native C work truly finishes.
+        }
         let storage = storage
         Task.detached(priority: .utility) {
             await storage.unload()
@@ -331,14 +389,42 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
         "jina-bert-v2",
     ]
 
-    private static func serializedLoad(from url: URL) throws -> LoadedReranker {
+    private static func serializedLoad(
+        from url: URL,
+        callbackContext: LlamaModelLoader.ProgressCallbackContext? = nil
+    ) throws -> LoadedReranker {
         loadLock.lock()
         defer { loadLock.unlock() }
 
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = LlamaSamplingPolicy.gpuLayerCount()
 
+        // Wire cancel callback when a context is provided. The C callback returns
+        // false when cancelRequested is set, instructing llama_model_load_from_file
+        // to abort. callbackAborted is set only when the callback actually returned
+        // false — distinct from cancelRequested, which a racing cancelModelLoad()
+        // call could set after a genuine OOM failure, misclassifying it as
+        // CancellationError.
+        var callbackContextRef: Unmanaged<LlamaModelLoader.ProgressCallbackContext>?
+        if let ctx = callbackContext {
+            callbackContextRef = Unmanaged.passRetained(ctx)
+            modelParams.progress_callback_user_data = callbackContextRef!.toOpaque()
+            modelParams.progress_callback = { _, userData -> Bool in
+                guard let ptr = userData else { return true }
+                let ctx = LlamaModelLoader.progressContext(fromOpaque: ptr)
+                if ctx.cancelRequested.load(ordering: .sequentiallyConsistent) {
+                    ctx.callbackAborted.store(true, ordering: .sequentiallyConsistent)
+                    return false
+                }
+                return true
+            }
+        }
+        defer { callbackContextRef?.release() }
+
         guard let rawModel = llama_model_load_from_file(url.path, modelParams) else {
+            if callbackContext?.callbackAborted.load(ordering: .sequentiallyConsistent) == true {
+                throw CancellationError()
+            }
             throw RerankerError.modelLoadFailed(underlying: NSError(
                 domain: "LlamaReranker",
                 code: -1,
@@ -407,6 +493,42 @@ public final class LlamaReranker: Reranker, @unchecked Sendable {
     /// other. Eventually funnels through GGML's process-global init lock, so
     /// cross-pool serialisation with generation / embedding loads is implicit.
     private static let loadLock = NSLock()
+}
+
+// MARK: - CancellableModelLoading
+
+extension LlamaReranker: CancellableModelLoading {
+
+    /// Whether a native reranker model load is currently mutating state on a
+    /// background thread. Stays `true` from the moment the detached load task
+    /// starts until it truly finishes — which may be *after* the `async loadModel`
+    /// await has already thrown (e.g. a host deadline fired mid-load). Guarded by
+    /// `stateLock`.
+    public var isModelLoadInFlight: Bool {
+        stateLock.withLock { _isModelLoadInFlight }
+    }
+
+    /// Requests that the in-flight native reranker load unwind at its next
+    /// progress callback. Best-effort and cooperative — if no progress callback
+    /// fires before the load completes, this is a no-op. Always follow with
+    /// `awaitModelLoadSettled()` before reusing the reranker.
+    public func cancelModelLoad() {
+        cancelContextLock.withLock { _cancelContext }?
+            .cancelRequested.store(true, ordering: .sequentiallyConsistent)
+    }
+
+    /// Suspends until any in-flight native reranker load has truly finished —
+    /// whether it completed normally, failed, or unwound cooperatively via
+    /// `cancelModelLoad()`. Returns immediately when no load is in flight.
+    /// `isModelLoadInFlight` is `false` the instant this returns.
+    public func awaitModelLoadSettled() async {
+        let task = stateLock.withLock { _activeLoadTask }
+        do {
+            _ = try await task?.value
+        } catch {
+            Self.logger.debug("LlamaReranker.awaitModelLoadSettled: settled with error (already surfaced to caller): \(error)")
+        }
+    }
 }
 
 // MARK: - RerankerError

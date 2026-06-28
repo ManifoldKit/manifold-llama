@@ -206,3 +206,98 @@ final class LlamaRerankerErrorPathTests: XCTestCase {
                       "modelLoadFailed description must include the underlying error message")
     }
 }
+
+// MARK: - CancellableModelLoading tests
+
+final class LlamaRerankerLoadCancelTests: XCTestCase {
+
+    override func setUp() async throws {
+        try await super.setUp()
+        try XCTSkipUnless(
+            HardwareRequirements.isPhysicalDevice,
+            "LlamaReranker requires Metal (unavailable in simulator)"
+        )
+        try XCTSkipUnless(
+            HardwareRequirements.isAppleSilicon,
+            "LlamaReranker requires Apple Silicon"
+        )
+    }
+
+    // MARK: - Headless
+
+    func test_isModelLoadInFlight_falseByDefault() {
+        let reranker = LlamaReranker()
+        XCTAssertFalse(reranker.isModelLoadInFlight, "No load started — flag must be false")
+    }
+
+    func test_cancelModelLoad_isNoOp_whenNotLoading() {
+        let reranker = LlamaReranker()
+        reranker.cancelModelLoad()
+        XCTAssertFalse(reranker.isModelLoadInFlight)
+    }
+
+    func test_awaitModelLoadSettled_returnsImmediately_whenIdle() async {
+        let reranker = LlamaReranker()
+        await reranker.awaitModelLoadSettled()
+        XCTAssertFalse(reranker.isModelLoadInFlight)
+    }
+
+    func test_conformsToCancellableModelLoading() {
+        let reranker = LlamaReranker()
+        XCTAssertNotNil(reranker as? any CancellableModelLoading,
+                        "LlamaReranker must conform to CancellableModelLoading")
+    }
+
+    // MARK: - Model-gated: cooperative cancel
+
+    func test_cancelModelLoad_abortsInFlightLoad_andSettles() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let rawPath = env["LLAMA_RERANKER_MODEL"], !rawPath.isEmpty else {
+            throw XCTSkip("Set LLAMA_RERANKER_MODEL=<path to a cross-encoder reranker GGUF> to run the in-flight cancel test.")
+        }
+        let modelURL = URL(filePath: (rawPath as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: modelURL.path) else {
+            throw XCTSkip("LLAMA_RERANKER_MODEL does not point at an existing file: \(modelURL.path)")
+        }
+
+        let reranker = LlamaReranker()
+        addTeardownBlock { reranker.unloadModel() }
+
+        let loadTask = Task<Result<Void, any Error>, Never> {
+            do {
+                try await reranker.loadModel(from: modelURL)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+
+        // Poll until the native load is in flight, then request cooperative cancel.
+        let deadline = Date().addingTimeInterval(30)
+        while !reranker.isModelLoadInFlight && Date() < deadline {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+
+        guard reranker.isModelLoadInFlight else {
+            _ = await loadTask.value
+            throw XCTSkip("Model loaded before in-flight window was observable — fast-load path, not a failure.")
+        }
+
+        reranker.cancelModelLoad()
+        let loadResult = await loadTask.value
+        await reranker.awaitModelLoadSettled()
+
+        XCTAssertFalse(
+            reranker.isModelLoadInFlight,
+            "isModelLoadInFlight must be false the moment awaitModelLoadSettled() returns"
+        )
+
+        if case .failure(let error) = loadResult {
+            XCTAssertTrue(
+                error is CancellationError,
+                "cancelled load must throw CancellationError; got: \(error)"
+            )
+            XCTAssertFalse(reranker.isReady, "a cancelled load must not mark the reranker ready")
+        }
+    }
+}
