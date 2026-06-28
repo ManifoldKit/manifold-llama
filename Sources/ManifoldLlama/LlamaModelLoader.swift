@@ -360,18 +360,20 @@ import ManifoldInference
         "t5encoder",    // T5 encoder-only checkpoints
         "stablediffusion", // diffusion UNet weights
         "sd3",          // stable-diffusion-3
-        // Fused-multimodal Gemma checkpoints (Gemma 3n / "gemma4"): a single
-        // GGUF carries the text tower plus separate audio (`a.*`) and vision
-        // (`v.*`) towers and an mm projector (`mm.*`). The pinned llama.cpp
-        // build (b9744) recognizes the `gemma4` arch but its text-model loader
-        // only claims the text-tower tensors, then aborts in
-        // `done_getting_tensors` ("wrong number of tensors; expected N, got M")
-        // because the audio/vision/mmproj tensors are unclaimed. Until the
-        // pinned build can load these (or the model is re-packaged as a
-        // text-only GGUF + standalone mmproj), surface a typed
-        // `unsupportedModelArchitecture` instead of a cryptic nil-load failure.
-        // See issue #62.
-        "gemma4",       // Gemma 4 fused-multimodal (audio + vision + text)
+        // Fused-multimodal Gemma checkpoints: a single GGUF carries the text
+        // tower plus separate audio (`a.*`) and vision (`v.*`) towers and an mm
+        // projector (`mm.*`); the llama.cpp text loader only claims the text-tower
+        // tensors, then aborts in `done_getting_tensors` ("wrong number of
+        // tensors; expected N, got M") because the audio/vision/mmproj tensors are
+        // unclaimed. See issue #62.
+        //
+        // NOTE: `gemma4` is intentionally NOT denylisted — the pinned build
+        // (b9744) loads TEXT-ONLY gemma4 GGUFs (e.g. unsloth/gemma-4-E4B-it-GGUF)
+        // fine; only the older FUSED single-GGUF packaging trips the tensor-count
+        // abort, and a fused single-GGUF is not a supported text-inference input
+        // (it now surfaces llama.cpp's tensor-count error rather than our typed
+        // error — an acceptable tradeoff). `gemma3n` stays denied: its fused
+        // packaging is the only common form and its text loader is unverified here.
         "gemma3n",      // Gemma 3n fused-multimodal (the HF/upstream arch name)
     ]
 
