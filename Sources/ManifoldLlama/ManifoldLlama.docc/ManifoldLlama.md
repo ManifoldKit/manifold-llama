@@ -35,7 +35,7 @@ backend with the shared ``InferenceService`` so any `.gguf` model can load.
 
 ```swift,no-build
 // Package.swift
-.package(url: "https://github.com/roryford/manifold-llama", from: "0.1.0"),
+.package(url: "https://github.com/ManifoldKit/manifold-llama", from: "0.1.0"),
 ```
 
 ```swift,no-build

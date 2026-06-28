@@ -21,7 +21,7 @@ let package = Package(
         .executable(name: "manifold-tools-llama", targets: ["manifold-tools-llama"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.62.0")),
+        .package(url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.62.0")),
         // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
         // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
         // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable
@@ -33,7 +33,7 @@ let package = Package(
     targets: [
         // llama.cpp (GGUF) inference, generation driver, process-lifecycle
         // refcount, embedding backend, GGUF-specific tool call parser,
-        // tokenizer adapters. Imported from roryford/ManifoldKit (see the
+        // tokenizer adapters. Imported from ManifoldKit/ManifoldKit (see the
         // Imported-From commit trailer); the `#if Llama` / `#if HuggingFace`
         // trait gates were stripped at import — both are always-on here.
         .target(
@@ -67,7 +67,7 @@ let package = Package(
         // cutting a new vendor-llama-<build> release.
         .binaryTarget(
             name: "llama-cpp",
-            url: "https://github.com/roryford/manifold-llama/releases/download/vendor-llama-b9744/llama-b9744-slim.xcframework.zip",
+            url: "https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b9744/llama-b9744-slim.xcframework.zip",
             checksum: "ec27ea729522906d06f2618ea30c9cf9427dd45d2552dc4377224486cfd6339c"
         ),
         // Thin re-export shim: `@_exported @preconcurrency import llama` so the

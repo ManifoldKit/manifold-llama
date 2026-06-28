@@ -199,7 +199,7 @@ echo "  Slim checksum:       ${CHECKSUM}"
 echo "--------------------------------------------------------------------------"
 echo "  Paste into Package.swift (.binaryTarget name: \"llama-cpp\"):"
 echo
-echo "    url: \"https://github.com/roryford/manifold-llama/releases/download/<TAG>/llama-${BUILD}-slim.xcframework.zip\","
+echo "    url: \"https://github.com/ManifoldKit/manifold-llama/releases/download/<TAG>/llama-${BUILD}-slim.xcframework.zip\","
 echo "    checksum: \"${CHECKSUM}\""
 echo
 echo "  NOTE: the url above is a PLACEHOLDER. Host ${SLIM_ZIP##*/} as a"

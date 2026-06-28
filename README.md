@@ -1,6 +1,6 @@
 # manifold-llama
 
-llama.cpp (GGUF) inference backend for [ManifoldKit](https://github.com/roryford/ManifoldKit) — the `ManifoldLlama` module, split out of the core package as part of the v0.48 packaging release (ManifoldKit#1749) so that `swift build` of core never drags the llama.cpp xcframework, and heavy backends are one `.package` line away.
+llama.cpp (GGUF) inference backend for [ManifoldKit](https://github.com/ManifoldKit/ManifoldKit) — the `ManifoldLlama` module, split out of the core package as part of the v0.48 packaging release (ManifoldKit#1749) so that `swift build` of core never drags the llama.cpp xcframework, and heavy backends are one `.package` line away.
 
 It wraps llama.cpp (via the prebuilt xcframework from the upstream [`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp) releases, pinned by `url` + `checksum` in a local `.binaryTarget`) behind ManifoldKit's `InferenceBackend` contract: GGUF model loading, streaming generation, KV-cache persistence/reuse, embeddings, reranking, grammar/DRY/XTC/Mirostat sampling, and GGUF tool-call parsing.
 
@@ -11,8 +11,8 @@ It wraps llama.cpp (via the prebuilt xcframework from the upstream [`ggml-org/ll
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/roryford/ManifoldKit", branch: "main"),
-    .package(url: "https://github.com/roryford/manifold-llama", branch: "main"),
+    .package(url: "https://github.com/ManifoldKit/ManifoldKit", branch: "main"),
+    .package(url: "https://github.com/ManifoldKit/manifold-llama", branch: "main"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
@@ -51,7 +51,7 @@ The suite is the Llama-family subset of core's `ManifoldBackendsTests` plus the 
 
 ## Provenance & history
 
-Imported as a fresh copy from `roryford/ManifoldKit` (see the `Imported-From:` trailer on the import commit). **History before 2026-06 lives in [ManifoldKit](https://github.com/roryford/ManifoldKit)** — `git log` there for the archaeology. The llama.cpp upgrade procedure and C-API contract notes are in [`docs/LLAMA_CONTRACT.md`](docs/LLAMA_CONTRACT.md).
+Imported as a fresh copy from `ManifoldKit/ManifoldKit` (see the `Imported-From:` trailer on the import commit). **History before 2026-06 lives in [ManifoldKit](https://github.com/ManifoldKit/ManifoldKit)** — `git log` there for the archaeology. The llama.cpp upgrade procedure and C-API contract notes are in [`docs/LLAMA_CONTRACT.md`](docs/LLAMA_CONTRACT.md).
 
 ## License
 
