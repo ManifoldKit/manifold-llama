@@ -639,4 +639,34 @@ final class LlamaToolMarkerEdgeCaseTests: XCTestCase {
         XCTAssertTrue(toolCalls(from: events).isEmpty,
                       "A whitespace-only body must not produce a tool call")
     }
+
+    // MARK: - Gemma 4: array-valued argument preserves full array
+
+    func test_gemma4_arrayValue_isNotSplitOnInnerComma() throws {
+        var p = Parser()
+        let events = p.process("<|tool_call>\ncall:geocode{coords:[46.6, 1.8]}\n<tool_call|>")
+        let calls = toolCalls(from: events)
+        XCTAssertEqual(calls.count, 1)
+        let tc = try XCTUnwrap(calls.first)
+        XCTAssertEqual(tc.toolName, "geocode")
+        let data = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let coords = try XCTUnwrap(decoded["coords"] as? [Double])
+        XCTAssertEqual(coords.count, 2)
+        XCTAssertEqual(coords[0], 46.6, accuracy: 1e-9)
+        XCTAssertEqual(coords[1], 1.8, accuracy: 1e-9)
+    }
+
+    func test_gemma4_arrayValueMixedWithScalar_bothParsedCorrectly() throws {
+        var p = Parser()
+        let events = p.process("<|tool_call>\ncall:fn{ids:[1,2,3],limit:10}\n<tool_call|>")
+        let calls = toolCalls(from: events)
+        XCTAssertEqual(calls.count, 1)
+        let tc = try XCTUnwrap(calls.first)
+        let data = try XCTUnwrap(tc.arguments.data(using: .utf8))
+        let decoded = try XCTUnwrap(try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let ids = try XCTUnwrap(decoded["ids"] as? [Int])
+        XCTAssertEqual(ids, [1, 2, 3])
+        XCTAssertEqual(decoded["limit"] as? Int, 10)
+    }
 }

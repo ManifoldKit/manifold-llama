@@ -219,6 +219,25 @@ import ManifoldInference
                 } else {
                     value = raw
                 }
+            } else if inner[idx] == "[" || inner[idx] == "{" {
+                // Array or nested object — scan to the matching close bracket,
+                // then parse the captured literal as JSON.
+                var cursor = idx
+                var depth = 0
+                while cursor < end {
+                    let ch = inner[cursor]
+                    if ch == "[" || ch == "{" { depth += 1 }
+                    else if ch == "]" || ch == "}" { depth -= 1; if depth == 0 { cursor = inner.index(after: cursor); break } }
+                    cursor = inner.index(after: cursor)
+                }
+                let literal = inner[idx..<cursor].trimmingCharacters(in: .whitespaces)
+                idx = cursor
+                if let data = literal.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                    value = parsed
+                } else {
+                    value = literal
+                }
             } else {
                 // Bare literal — number, true, false, or null. Read up to next comma.
                 var cursor = idx
