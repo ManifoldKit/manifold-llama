@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.16](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.15...v0.2.16) (2026-06-28)
+
+### Highlights
+
+**Gemma-4 tool calls now terminate at the right delimiter (0/25 → 16/25 BFCL AST).** The Gemma-4 family's tool-call close delimiter was wrong, so generated calls ran past their boundary and failed to parse — scoring 0/25 on the BFCL AST track. Correcting the delimiter lifts Gemma-4 to 16/25, restoring native tool calling for the family ([#116](https://github.com/ManifoldKit/manifold-llama/issues/116)). Text-only Gemma-4 GGUFs also load now, after dropping a stale architecture-denylist entry that had been rejecting them ([#115](https://github.com/ManifoldKit/manifold-llama/issues/115)).
+
+**Tracks ManifoldKit 0.63** ([#120](https://github.com/ManifoldKit/manifold-llama/issues/120)) — the core pin moves to `.upToNextMinor(from: "0.63.0")`, the release that ships the on-device `Score`/`EvalScorer` eval surface, the `ManifoldTelemetryOTLP` OTLP/HTTP span exporter, and AGENTS.md ambient-instruction skills support. Re-resolved, built, and tested green against the new core.
+
+### Features
+
+* **reranker:** adopt `CancellableModelLoading` on `LlamaReranker`, so a host can observe, cooperatively cancel, and await the true completion of an in-flight reranker model load ([#113](https://github.com/ManifoldKit/manifold-llama/issues/113), [#118](https://github.com/ManifoldKit/manifold-llama/issues/118))
+
+### Bug Fixes
+
+* **tools:** correct the Gemma-4 tool-call close delimiter — 0/25 → 16/25 BFCL AST ([#116](https://github.com/ManifoldKit/manifold-llama/issues/116))
+* **llama:** load text-only Gemma-4 GGUFs by dropping a stale arch-denylist entry ([#115](https://github.com/ManifoldKit/manifold-llama/issues/115))
+* **deps:** bump ManifoldKit pin to v0.63.0 ([#120](https://github.com/ManifoldKit/manifold-llama/issues/120))
+
 ## [0.2.15](https://github.com/roryford/manifold-llama/compare/v0.2.14...v0.2.15) (2026-06-27)
 
 ### Highlights
