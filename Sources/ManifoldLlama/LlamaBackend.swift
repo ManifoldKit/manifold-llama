@@ -117,6 +117,28 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { self.vocab = vocab }
     }
 
+    /// Tokenizes `prompt` exactly as ``generate(prompt:systemPrompt:config:)``
+    /// does — against the loaded vocab, with `addBos: true` and special-token
+    /// parsing on — and returns the resulting token ids as `[Int]`.
+    ///
+    /// This exposes the *exact* input token sequence the next raw-prompt
+    /// generation will decode from. The `manifold-llama-eval` runner records it
+    /// as `inputTokenIds` in the `RawRun` record so the manifold-eval
+    /// differential harness can compare the tokenization of the same GGUF string
+    /// across backends (llama.cpp vs Ollama). Mirrors `generate()`'s
+    /// snapshot-under-`stateLock` discipline (see the tokenize call there) so the
+    /// vocab read cannot race `unloadModel()` niling the pointer. Returns `[]`
+    /// when no model (and hence no vocab) is loaded.
+    ///
+    /// `@_spi(Testing)` rather than fully public: it mirrors the existing
+    /// `vocab` / ``LlamaTokenization`` test surface and is consumed by the
+    /// eval-runner kit and its tests via `@_spi(Testing) import ManifoldLlama`,
+    /// not by the library's stable public API.
+    @_spi(Testing) public func inputTokenIds(forPrompt prompt: String) -> [Int] {
+        guard let vocab = withStateLock({ vocab }) else { return [] }
+        return LlamaTokenization.tokenize(prompt, vocab: vocab, addBos: true).map(Int.init)
+    }
+
     /// Per-token resident cost (bytes) learned from the most recent prefill via
     /// ``PrefillFootprintEstimator`` (issue #1592), or `nil` if no prefill has
     /// produced a stable sample yet. Callers that rebuild a ``ModelLoadPlan`` for

@@ -19,6 +19,12 @@ let package = Package(
         // the published `ManifoldTools` library product from ManifoldKit — no
         // changes to core are needed.
         .executable(name: "manifold-tools-llama", targets: ["manifold-tools-llama"]),
+        // Raw-prompt eval runner: loads a GGUF, runs ONE raw-prompt generation
+        // through LlamaBackend (no chat template), and emits one `RawRun` JSON
+        // object on stdout — the llama.cpp leg of the manifold-eval same-GGUF
+        // cross-backend differential (vs Ollama). See
+        // ManifoldKit docs/plans/manifold-eval-repo-v2-override.md §13b.
+        .executable(name: "manifold-llama-eval", targets: ["manifold-llama-eval"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.63.0")),
@@ -114,10 +120,33 @@ let package = Package(
                 .copy("Scenarios"),
             ]
         ),
+        // Raw-prompt eval runner core: the `RawRun` wire record + metadata
+        // helpers (prompt SHA-256, quant parse, core-commit resolution) + the
+        // `EvalRunner` that drives one raw-prompt generation through
+        // `LlamaBackend`. Split out of the executable so the pure JSON-encoding
+        // and metadata logic is unit-testable in CI without a model.
+        .target(
+            name: "ManifoldLlamaEvalKit",
+            dependencies: [
+                "ManifoldLlama",
+                .product(name: "ManifoldInference", package: "ManifoldKit"),
+                .product(name: "ManifoldContract", package: "ManifoldKit"),
+            ],
+            path: "Sources/ManifoldLlamaEvalKit"
+        ),
+        // Thin CLI over `ManifoldLlamaEvalKit`: arg parsing + one RawRun to stdout.
+        .executableTarget(
+            name: "manifold-llama-eval",
+            dependencies: ["ManifoldLlamaEvalKit"],
+            path: "Sources/manifold-llama-eval"
+        ),
         .testTarget(
             name: "ManifoldLlamaTests",
             dependencies: [
                 "ManifoldLlama",
+                // Raw-prompt eval runner core, exercised by the RawRun JSON
+                // unit test (CI) and the model-gated EvalRunner integration test.
+                "ManifoldLlamaEvalKit",
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "ManifoldHardware", package: "ManifoldKit"),
                 // Test-only: load the vendored tool-calling scenario JSONs via
