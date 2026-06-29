@@ -54,6 +54,32 @@ final class RawPromptEvalRunnerTests: XCTestCase {
         XCTAssertEqual(decoded.sampler.temperature, 0.0)
     }
 
+    /// Pins the EXACT wire key set. A Codable round-trip shares `CodingKeys`, so it
+    /// passes through a silent key rename — manifold-eval parses these names
+    /// independently, so drift on any of them would ship green without this.
+    func test_rawRun_pinsExactWireKeys() throws {
+        let run = RawRun(
+            backend: "llama.cpp", model: "m", quant: "Q4_K_M",
+            promptSha256: "h", inputTokenIds: [1], output: "o", outputTokenIds: [],
+            sampler: RawRun.Sampler(
+                temperature: 0, seed: 0, topK: 0, repeatPenalty: 1, maxTokens: 1),
+            coreCommit: "c", toolingVersions: RawRun.ToolingVersions(llamaCpp: "b"),
+            repeatIndex: 0)
+
+        let data = Data(try run.encodedJSONLine().utf8)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(obj.keys), [
+            "backend", "model", "quant", "promptSha256", "inputTokenIds", "output",
+            "outputTokenIds", "sampler", "coreCommit", "toolingVersions", "repeatIndex",
+        ], "RawRun top-level wire keys drifted")
+        let sampler = try XCTUnwrap(obj["sampler"] as? [String: Any])
+        XCTAssertEqual(Set(sampler.keys),
+                       ["temperature", "seed", "topK", "repeatPenalty", "maxTokens"],
+                       "RawRun.sampler wire keys drifted")
+        let tooling = try XCTUnwrap(obj["toolingVersions"] as? [String: Any])
+        XCTAssertEqual(Set(tooling.keys), ["llama.cpp"], "toolingVersions wire key drifted")
+    }
+
     /// Quant extraction handles the common GGUF file-name conventions.
     func test_parseQuant_recognizesCommonTags() {
         XCTAssertEqual(EvalMetadata.parseQuant(fromFileName: "Qwen3-0.6B-Q4_K_M.gguf"), "Q4_K_M")

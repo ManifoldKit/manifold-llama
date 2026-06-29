@@ -72,11 +72,16 @@ public enum EvalError: Error, LocalizedError {
 /// the same string + tokenization both the recorded `promptSha256` and
 /// `inputTokenIds` describe.
 ///
-/// **Neutral, deterministic sampler.** To keep the cross-backend diff a function
-/// of the model (not sampler luck), the run disables repetition penalty
-/// (`repeatPenalty = 1.0`) and top-p (`topP = 1.0`). `temperature == 0` selects
-/// true greedy (argmax) decoding in the driver; the seed is plumbed through for
-/// the temperature > 0 case.
+/// **Neutral, deterministic sampler — greedy (temperature 0) is the supported
+/// mode.** To keep the cross-backend diff a function of the model (not sampler
+/// luck), the run disables repetition penalty (`repeatPenalty = 1.0`) and top-p
+/// (`topP = 1.0`). `temperature == 0` selects true greedy (argmax) decoding in the
+/// driver, which short-circuits top-k entirely — so the recorded `sampler.topK = 0`
+/// accurately means "not applied". The seed is plumbed for completeness.
+///
+/// > Note: `temperature > 0` is NOT a supported deterministic-diff mode. Above 0
+/// > the driver applies its default top-k (40) and min-p (0.05), which the recorded
+/// > `sampler` does not reflect — the differential only ever runs greedy.
 public enum EvalRunner {
 
     public static func run(_ options: EvalOptions) async throws -> RawRun {
