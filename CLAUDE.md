@@ -25,7 +25,7 @@ Most suites in `Tests/ManifoldLlamaTests` are model-gated: they `XCTSkip` unless
 
 ## Pin / release model
 
-This repo pins ManifoldKit with `.upToNextMinor(from: "…")` in `Package.swift`. `.github/workflows/core-bump.yml` listens for ManifoldKit's `core-release` repository_dispatch, rewrites the pin, builds/tests, and admin-merges a `fix:` PR — which trips this repo's own release-please into cutting a patch release. Never hand-edit the pin or hand-tag a release. Conventional Commits are required; CI lints PR titles the same way core does.
+This repo pins ManifoldKit with `.upToNextMinor(from: "…")` in `Package.swift`. `.github/workflows/core-bump.yml` listens for ManifoldKit's `core-release` repository_dispatch, rewrites the pin, builds/tests, and admin-merges a `fix:` PR — which trips this repo's own release-please into cutting a patch release. Never hand-edit the pin or hand-tag a release. Conventional Commits are required for release-please to version correctly — unlike core, this repo has no CI job that lints PR titles (the only required check is `test`); self-police the format.
 
 ## Vendored data — drift risk
 
