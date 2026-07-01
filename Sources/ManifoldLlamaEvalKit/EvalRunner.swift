@@ -20,6 +20,18 @@ public struct EvalOptions: Sendable {
     /// Requested context size for the load plan. Not a CLI flag; the planner
     /// clamps it to the model's trained context.
     public var requestedContextSize: Int
+    /// Top-k sampling cutoff (`--top-k`). `0` (the default) means "not applied" —
+    /// the neutral default that keeps the differential's default mode a clean
+    /// function of the model rather than sampler luck. Positive values are
+    /// forwarded to `GenerationConfig.topK`; note that at `temperature == 0`
+    /// (the only supported diff mode) the driver decodes greedily and top-k has
+    /// no effect regardless of this value.
+    public var topK: Int
+    /// Repetition penalty (`--repeat-penalty`). `1.0` (the default) is
+    /// llama.cpp's no-op value — the neutral default. Overriding it lets an
+    /// operator force-match samplers across the Ollama/llama.cpp differential
+    /// legs when debugging a divergence.
+    public var repeatPenalty: Double
 
     public init(
         modelPath: String,
@@ -28,7 +40,9 @@ public struct EvalOptions: Sendable {
         seed: Int,
         maxTokens: Int,
         repeatIndex: Int,
-        requestedContextSize: Int = 8192
+        requestedContextSize: Int = 8192,
+        topK: Int = 0,
+        repeatPenalty: Double = 1.0
     ) {
         self.modelPath = modelPath
         self.promptFile = promptFile
@@ -37,6 +51,8 @@ public struct EvalOptions: Sendable {
         self.maxTokens = maxTokens
         self.repeatIndex = repeatIndex
         self.requestedContextSize = requestedContextSize
+        self.topK = topK
+        self.repeatPenalty = repeatPenalty
     }
 }
 
@@ -72,16 +88,25 @@ public enum EvalError: Error, LocalizedError {
 /// the same string + tokenization both the recorded `promptSha256` and
 /// `inputTokenIds` describe.
 ///
-/// **Neutral, deterministic sampler — greedy (temperature 0) is the supported
-/// mode.** To keep the cross-backend diff a function of the model (not sampler
-/// luck), the run disables repetition penalty (`repeatPenalty = 1.0`) and top-p
-/// (`topP = 1.0`). `temperature == 0` selects true greedy (argmax) decoding in the
-/// driver, which short-circuits top-k entirely — so the recorded `sampler.topK = 0`
-/// accurately means "not applied". The seed is plumbed for completeness.
+/// **Neutral by default, overridable sampler — greedy (temperature 0) is the
+/// supported mode.** To keep the cross-backend diff a function of the model
+/// (not sampler luck) *by default*, `EvalOptions.repeatPenalty` defaults to
+/// `1.0` (llama.cpp's no-op value) and `EvalOptions.topK` defaults to `0`
+/// ("not applied"; `temperature == 0` also selects true greedy/argmax decoding
+/// in the driver, which short-circuits top-k entirely regardless of the
+/// configured value). `topP` stays fixed at `1.0` and is not exposed as a flag.
+/// Both `repeatPenalty` and `topK` are overridable (`--repeat-penalty` /
+/// `--top-k`) so an operator can force-match samplers across the
+/// Ollama/llama.cpp differential legs when debugging a divergence — the
+/// recorded `sampler` always reflects the values actually passed to
+/// `GenerationConfig`, never a hardcoded stand-in. The seed is plumbed for
+/// completeness.
 ///
 /// > Note: `temperature > 0` is NOT a supported deterministic-diff mode. Above 0
-/// > the driver applies its default top-k (40) and min-p (0.05), which the recorded
-/// > `sampler` does not reflect — the differential only ever runs greedy.
+/// > the driver applies min-p (0.05) by default, and falls back to a top-k of 40
+/// > when `topK` is left at its neutral default — neither is guaranteed to match
+/// > the recorded `sampler` when `temperature > 0`; the differential only ever
+/// > runs greedy.
 public enum EvalRunner {
 
     public static func run(_ options: EvalOptions) async throws -> RawRun {
@@ -118,8 +143,8 @@ public enum EvalRunner {
             var config = GenerationConfig(
                 temperature: Float(options.temperature),
                 topP: 1.0,
-                repeatPenalty: 1.0,
-                topK: nil,
+                repeatPenalty: Float(options.repeatPenalty),
+                topK: options.topK > 0 ? Int32(options.topK) : nil,
                 maxOutputTokens: options.maxTokens)
             config.seed = options.seed >= 0 ? UInt64(options.seed) : nil
 
@@ -142,10 +167,12 @@ public enum EvalRunner {
             let sampler = RawRun.Sampler(
                 temperature: options.temperature,
                 seed: options.seed,
-                // Greedy (temperature 0) ignores top-k, and top-k is disabled for
-                // the neutral diff; 0 marks "not applied".
-                topK: 0,
-                repeatPenalty: 1.0,
+                // Record the values actually used, not a hardcoded stand-in —
+                // at the neutral defaults this is topK: 0 ("not applied") and
+                // repeatPenalty: 1.0 (no-op), unchanged from before this was
+                // overridable.
+                topK: options.topK,
+                repeatPenalty: options.repeatPenalty,
                 maxTokens: options.maxTokens)
 
             return RawRun(

@@ -23,6 +23,8 @@ struct CLI {
     var seed: Int = 0
     var maxTokens: Int = 256
     var repeatIndex: Int = 0
+    var topK: Int = 0
+    var repeatPenalty: Double = 1.0
 
     /// Argument errors exit 2 via stderr + `exit(2)` rather than trapping.
     private static func fail(_ message: String) -> Never {
@@ -67,6 +69,18 @@ struct CLI {
                     fail("--repeat-index requires a non-negative integer")
                 }
                 cli.repeatIndex = value
+            case "--top-k":
+                let raw = nextValue("--top-k")
+                guard let value = Int(raw), value >= 0 else {
+                    fail("--top-k requires a non-negative integer")
+                }
+                cli.topK = value
+            case "--repeat-penalty":
+                let raw = nextValue("--repeat-penalty")
+                guard let value = Double(raw), value > 0 else {
+                    fail("--repeat-penalty requires a positive number")
+                }
+                cli.repeatPenalty = value
             case "--help", "-h":
                 printUsage()
                 exit(0)
@@ -84,16 +98,23 @@ struct CLI {
 
         USAGE
           manifold-llama-eval --model <path.gguf> --prompt-file <path> \\
-              [--temperature <d>] [--seed <n>] [--max-tokens <n>] [--repeat-index <n>]
+              [--temperature <d>] [--seed <n>] [--max-tokens <n>] [--repeat-index <n>] \\
+              [--top-k <n>] [--repeat-penalty <d>]
 
         FLAGS
-          --model <path>        Path to the .gguf model file. REQUIRED.
-          --prompt-file <path>  File whose bytes are the raw prompt (fed verbatim,
-                                NO chat template). REQUIRED.
-          --temperature <d>     Sampling temperature. 0 → greedy. Default: 0.
-          --seed <n>            Sampling seed. Default: 0.
-          --max-tokens <n>      Max tokens to generate. Default: 256.
-          --repeat-index <n>    0-based index within a repeat sweep. Default: 0.
+          --model <path>          Path to the .gguf model file. REQUIRED.
+          --prompt-file <path>    File whose bytes are the raw prompt (fed verbatim,
+                                  NO chat template). REQUIRED.
+          --temperature <d>       Sampling temperature. 0 → greedy. Default: 0.
+          --seed <n>              Sampling seed. Default: 0.
+          --max-tokens <n>        Max tokens to generate. Default: 256.
+          --repeat-index <n>      0-based index within a repeat sweep. Default: 0.
+          --top-k <n>             Top-k sampling cutoff. 0 → not applied (the
+                                  neutral default; also has no effect at
+                                  temperature 0, which always decodes greedily
+                                  regardless of this value). Default: 0.
+          --repeat-penalty <d>    Repetition penalty (1.0 = no-op, llama.cpp's
+                                  neutral default). Default: 1.0.
 
         OUTPUT
           Exactly one RawRun JSON object on stdout. Diagnostics go to stderr.
@@ -129,7 +150,9 @@ func runMain() async -> Int32 {
         temperature: cli.temperature,
         seed: cli.seed,
         maxTokens: cli.maxTokens,
-        repeatIndex: cli.repeatIndex)
+        repeatIndex: cli.repeatIndex,
+        topK: cli.topK,
+        repeatPenalty: cli.repeatPenalty)
 
     do {
         let run = try await EvalRunner.run(options)

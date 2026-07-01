@@ -97,6 +97,25 @@ final class RawPromptEvalRunnerTests: XCTestCase {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 
+    /// `EvalOptions.topK` / `EvalOptions.repeatPenalty` default to the neutral
+    /// values `EvalRunner` used to hardcode (`0` = "not applied", `1.0` =
+    /// llama.cpp's no-op value) — any existing caller that omits them (like
+    /// `manifold-llama-eval`'s CLI when its own new flags are left unset) must
+    /// observe identical behavior to before these fields existed.
+    func test_evalOptions_topKAndRepeatPenalty_defaultToNeutralValues() {
+        let options = EvalOptions(
+            modelPath: "/dev/null",
+            promptFile: "/dev/null",
+            temperature: 0.0,
+            seed: 0,
+            maxTokens: 16,
+            repeatIndex: 0)
+        XCTAssertEqual(options.topK, 0,
+                       "default topK must match the prior hardcoded 'not applied' value")
+        XCTAssertEqual(options.repeatPenalty, 1.0,
+                       "default repeatPenalty must match the prior hardcoded no-op value")
+    }
+
     /// Core-commit resolution reads a ManifoldKit pin's revision out of a
     /// `Package.resolved` (preferring revision over version).
     func test_resolveCoreCommit_readsManifoldKitPinRevision() throws {
@@ -177,11 +196,59 @@ final class RawPromptEvalRunnerTests: XCTestCase {
         XCTAssertEqual(run.sampler.temperature, 0.0)
         XCTAssertEqual(run.sampler.maxTokens, 16)
         XCTAssertEqual(run.sampler.seed, 42)
+        XCTAssertEqual(run.sampler.topK, 0,
+                       "default (unset) topK must remain the neutral 'not applied' value")
+        XCTAssertEqual(run.sampler.repeatPenalty, 1.0,
+                       "default (unset) repeatPenalty must remain the neutral no-op value")
         XCTAssertEqual(run.toolingVersions.llamaCpp, EvalMetadata.llamaCppBuild)
 
         // The record must encode to a single parseable JSON line.
         let line = try run.encodedJSONLine()
         XCTAssertFalse(line.contains("\n"))
         _ = try JSONDecoder().decode(RawRun.self, from: Data(line.utf8))
+    }
+
+    /// Overridden `topK` / `repeatPenalty` must reach `GenerationConfig` (i.e.
+    /// actually drive the run, not just get recorded) and be reported truthfully
+    /// in the emitted `RawRun.Sampler` — not a hardcoded stand-in. This is the
+    /// same gating tier as `test_evalRunner_producesWellFormedRawRun`.
+    func test_evalRunner_recordsOverriddenTopKAndRepeatPenalty() async throws {
+        try XCTSkipUnless(HardwareRequirements.isPhysicalDevice,
+                          "LlamaBackend requires Metal (unavailable in simulator)")
+        try XCTSkipUnless(HardwareRequirements.isAppleSilicon,
+                          "LlamaBackend requires Apple Silicon")
+        guard let modelURL = HardwareRequirements.findGGUFModel() else {
+            throw XCTSkip("No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or "
+                        + "MANIFOLD_DISCOVER_LOCAL_MODELS=1 with a `.gguf` in ~/Documents/Models/.")
+        }
+
+        let promptURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("rawrun-prompt-override-\(UUID().uuidString).txt")
+        let promptText = "The capital of France is"
+        try Data(promptText.utf8).write(to: promptURL)
+        defer { try? FileManager.default.removeItem(at: promptURL) }
+
+        let options = EvalOptions(
+            modelPath: modelURL.path,
+            promptFile: promptURL.path,
+            temperature: 0.0,
+            seed: 42,
+            maxTokens: 16,
+            repeatIndex: 0,
+            requestedContextSize: 512,
+            topK: 5,
+            repeatPenalty: 1.2)
+
+        let run = try await EvalRunner.run(options)
+
+        // The recorded sampler must reflect the OVERRIDDEN values, not the old
+        // hardcoded neutral ones — a stale hardcoded record would silently pass
+        // `test_evalRunner_producesWellFormedRawRun` (which never overrides) but
+        // fail here.
+        XCTAssertEqual(run.sampler.topK, 5,
+                       "recorded sampler.topK must reflect the overridden value actually used")
+        XCTAssertEqual(run.sampler.repeatPenalty, 1.2,
+                       "recorded sampler.repeatPenalty must reflect the overridden value actually used")
+        XCTAssertFalse(run.output.isEmpty, "generation must still produce output with overridden sampler settings")
     }
 }
