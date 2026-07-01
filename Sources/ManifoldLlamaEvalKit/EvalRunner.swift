@@ -30,7 +30,10 @@ public struct EvalOptions: Sendable {
     /// Repetition penalty (`--repeat-penalty`). `1.0` (the default) is
     /// llama.cpp's no-op value — the neutral default. Overriding it lets an
     /// operator force-match samplers across the Ollama/llama.cpp differential
-    /// legs when debugging a divergence.
+    /// legs when debugging a divergence. Must be `> 0`; values in `(0, 1.0]`
+    /// are accepted but have no effect — the driver only applies the penalty
+    /// sampler when the effective value is `> 1.0` (see
+    /// `LlamaGenerationDriver`'s `penaltiesActive` gate).
     public var repeatPenalty: Double
 
     public init(

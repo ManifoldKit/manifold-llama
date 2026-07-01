@@ -70,6 +70,16 @@ final class EvalCLIArgumentParsingTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("--top-k"), "got: \(result.stderr)")
     }
 
+    /// `GenerationConfig.topK` is `Int32?`; `EvalRunner` converts via the
+    /// non-failable `Int32(_:)` initializer, which TRAPS on overflow rather than
+    /// failing gracefully. The CLI must reject values above `Int32.max` itself
+    /// so a bad value is a clean `exit(2)`, never a crash.
+    func test_topK_rejectsValueAboveInt32Max() throws {
+        let result = try runCLI(["--top-k", "99999999999"])
+        XCTAssertEqual(result.exitCode, 2, "out-of-Int32-range --top-k must be a bad-argument exit (2), not a crash; stderr: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("--top-k"), "got: \(result.stderr)")
+    }
+
     func test_topK_acceptsZeroAndPositiveValues() throws {
         // `0` and positive values must NOT be rejected at the parsing stage —
         // only the (missing) --model/--prompt-file requirement should fire next,

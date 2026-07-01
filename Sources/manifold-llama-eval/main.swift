@@ -71,12 +71,23 @@ struct CLI {
                 cli.repeatIndex = value
             case "--top-k":
                 let raw = nextValue("--top-k")
-                guard let value = Int(raw), value >= 0 else {
-                    fail("--top-k requires a non-negative integer")
+                // Upper-bounded by Int32.max: `GenerationConfig.topK` is `Int32?`
+                // (see ManifoldKit's ManifoldContract), and `EvalRunner` converts
+                // via the non-failable `Int32(_:)` initializer, which TRAPS on
+                // overflow rather than failing gracefully. Reject out-of-range
+                // values here so a bad value is a clean exit(2), not a crash.
+                guard let value = Int(raw), value >= 0, value <= Int(Int32.max) else {
+                    fail("--top-k requires a non-negative integer no greater than \(Int32.max)")
                 }
                 cli.topK = value
             case "--repeat-penalty":
                 let raw = nextValue("--repeat-penalty")
+                // Only rejects <= 0 (not <= 1.0): llama.cpp's own CLI doesn't
+                // reject sub-1.0 values either, and the differential's more
+                // permissive default mode may want to explore below the no-op
+                // threshold. Note this means values in (0, 1.0] are accepted but
+                // inert — see the driver's `effectiveRepetitionPenalty > 1.0`
+                // gate in LlamaGenerationDriver.swift, and the FLAGS note below.
                 guard let value = Double(raw), value > 0 else {
                     fail("--repeat-penalty requires a positive number")
                 }
@@ -114,7 +125,10 @@ struct CLI {
                                   temperature 0, which always decodes greedily
                                   regardless of this value). Default: 0.
           --repeat-penalty <d>    Repetition penalty (1.0 = no-op, llama.cpp's
-                                  neutral default). Default: 1.0.
+                                  neutral default). Must be > 0; values <= 1.0
+                                  are accepted but have no effect (the driver
+                                  only applies the penalty above 1.0).
+                                  Default: 1.0.
 
         OUTPUT
           Exactly one RawRun JSON object on stdout. Diagnostics go to stderr.
