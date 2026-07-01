@@ -29,6 +29,15 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Check vendored-scenario sync (warn-only)
+        # Detects drift between the hand-copied Scenarios/Fixtures trees and
+        # ManifoldKit core at the resolved pin (scripts/check-vendored-sync.sh).
+        # Needs no build — network-only against raw.githubusercontent.com — so
+        # it runs before toolchain selection. continue-on-error because this
+        # is advisory: it already exits 0 on drift/network failure by default,
+        # but this belt-and-suspenders keeps it from ever blocking merges.
+        run: scripts/check-vendored-sync.sh
+        continue-on-error: true
       - name: Select newest Xcode 26 toolchain
         # The image default (Xcode 16.4 / Swift 6.1) mis-resolves the
         # dependency graph: its SwiftPM does not prune AnyLanguageModel's
