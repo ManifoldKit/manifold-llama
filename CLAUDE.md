@@ -10,7 +10,7 @@ llama.cpp (GGUF) inference backend family for [ManifoldKit](https://github.com/M
 | `LlamaSwift` | Thin `@_exported @preconcurrency import llama` shim over the vendored `llama-cpp` binary target. |
 | `ManifoldLlamaEvalKit` | `RawRun` JSON record + metadata (prompt SHA-256, quant parse, core-commit resolution) + `EvalRunner` — the raw-prompt eval core, unit-testable without a model. |
 | `manifold-llama-eval` | Thin CLI over `ManifoldLlamaEvalKit`: loads a GGUF, runs one raw-prompt generation, emits one `RawRun` JSON object to stdout. The llama.cpp leg of manifold-eval's cross-backend differential. |
-| `manifold-tools-llama` | Tool-calling scenario CLI. Links ManifoldKit's published `ManifoldTools` product + this repo's `ManifoldLlama`. Ships its own vendored copies of the scenario JSONs and fixture tree (see Vendored data below) because `ScenarioLoader.loadBuiltIn()` / `ReadFileTool.defaultRoot()` resolve source-relative paths that don't exist in this package. |
+| `manifold-tools-llama` | Tool-calling scenario CLI. Links ManifoldKit's published `ManifoldTools` product + this repo's `ManifoldLlama`. Ships its own vendored copies of the scenario JSONs and fixture tree (see Vendored data below). The scenario copies predate core 0.62, where `ScenarioLoader.loadBuiltIn()` became `Bundle.module`-based (#2042) — they can now be replaced by `loadBuiltIn()` (planned migration); the fixture copies are still required because `ReadFileTool.defaultRoot()` resolves a source-relative path until core ships a bundled accessor. |
 
 ## Testing
 
