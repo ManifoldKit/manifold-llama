@@ -1,22 +1,19 @@
 name: Release Please
 
+# Thin caller shim: the actual googleapis/release-please-action invocation
+# lives in the org-shared `companion-release-please.yml` reusable workflow
+# (ManifoldKit/.github). See that repo's WORKFLOWS.md for why the
+# permissions block below is required (it caps the action's GITHUB_TOKEN,
+# not just documentation).
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   release-please:
-    runs-on: ubuntu-latest
-    concurrency:
-      group: release-please
-      cancel-in-progress: true
-    steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
-        with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+    uses: ManifoldKit/.github/.github/workflows/companion-release-please.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
