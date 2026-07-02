@@ -59,12 +59,12 @@ let package = Package(
             path: "Sources/ManifoldLlama"
         ),
         // llama.cpp consumed as a self-hosted *slim* repackage of the upstream
-        // ggml-org b9744 release asset (dSYMs stripped, and the unused
+        // ggml-org b9859 release asset (dSYMs stripped, and the unused
         // tvOS/visionOS slices dropped — only the macOS + iOS-device +
         // iOS-simulator slices this package declares remain). Produced once by
         // scripts/repackage-xcframework.sh and hosted as the manifold-llama
-        // `vendor-llama-b9744` release asset; this cut the pinned artifact from
-        // ~208 MB to ~8 MB (627 MB → 24 MB extracted). No third-party wrapper,
+        // `vendor-llama-b9859` release asset; this cut the pinned artifact from
+        // ~257 MB to ~11 MB (769 MB → 30 MB extracted). No third-party wrapper,
         // no git-tag resolution: `url` + `checksum` still pin the exact
         // pre-built xcframework deterministically, so the "unable to read tree"
         // CI flake that floating wrapper tags caused cannot occur. Bump the
@@ -73,8 +73,8 @@ let package = Package(
         // cutting a new vendor-llama-<build> release.
         .binaryTarget(
             name: "llama-cpp",
-            url: "https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b9744/llama-b9744-slim.xcframework.zip",
-            checksum: "ec27ea729522906d06f2618ea30c9cf9427dd45d2552dc4377224486cfd6339c"
+            url: "https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b9859/llama-b9859-slim.xcframework.zip",
+            checksum: "88e382d47d12e41c786fcf36d5c829c24004d0ee7e3a11483bf4fb63e1d7b190"
         ),
         // Thin re-export shim: `@_exported @preconcurrency import llama` so the
         // ManifoldLlama sources keep importing `LlamaSwift` unchanged, and the

@@ -12,8 +12,8 @@
 #   - macos-arm64_x86_64
 #   - ios-arm64
 #   - ios-arm64_x86_64-simulator
-# with all dSYMs dropped. Measured for b9744: ~627 MB → ~24 MB extracted,
-# ~208 MB → ~8.4 MB zipped.
+# with all dSYMs dropped. Measured for b9859: ~769 MB → ~30 MB extracted,
+# ~257 MB → ~11 MB zipped.
 #
 # It then zips the slim framework, computes the SwiftPM package checksum, and
 # prints the exact `url` + `checksum` lines to paste into Package.swift. The URL
@@ -22,13 +22,13 @@
 # docs/LLAMA_CONTRACT.md ("Slimming the xcframework").
 #
 # Usage:
-#   scripts/repackage-xcframework.sh                 # build b9744 (default)
-#   BUILD=b9800 scripts/repackage-xcframework.sh     # override the upstream build
-#   scripts/repackage-xcframework.sh b9800           # same, as a positional arg
+#   scripts/repackage-xcframework.sh                 # build b9859 (default)
+#   BUILD=b9900 scripts/repackage-xcframework.sh     # override the upstream build
+#   scripts/repackage-xcframework.sh b9900           # same, as a positional arg
 #   WORK_DIR=/tmp/x scripts/repackage-xcframework.sh # override the work dir
 #
 # Env vars / args:
-#   BUILD       upstream build tag (default: b9744). First positional arg wins.
+#   BUILD       upstream build tag (default: b9859). First positional arg wins.
 #   WORK_DIR    working directory for download/unpack/output
 #               (default: <repo>/tmp/repackage-xcframework).
 #
@@ -39,7 +39,7 @@ set -euo pipefail
 
 # --- configuration ----------------------------------------------------------
 
-BUILD="${1:-${BUILD:-b9744}}"
+BUILD="${1:-${BUILD:-b9859}}"
 UPSTREAM_URL="https://github.com/ggml-org/llama.cpp/releases/download/${BUILD}/llama-${BUILD}-xcframework.zip"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
