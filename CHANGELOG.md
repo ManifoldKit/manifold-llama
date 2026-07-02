@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.17](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.16...v0.2.17) (2026-07-02)
+
+### Highlights
+
+**manifold-eval differential leg: raw-prompt eval runner** ([#121](https://github.com/ManifoldKit/manifold-llama/issues/121)) — new `manifold-llama-eval` CLI loads a GGUF, runs one raw-prompt generation through `LlamaBackend` (no chat template), and emits a single `RawRun` JSON object — the llama.cpp leg of the manifold-eval same-GGUF cross-backend differential against Ollama. `--top-k`/`--repeat-penalty` are now overridable on the CLI ([#122](https://github.com/ManifoldKit/manifold-llama/issues/122)) so the runner can force-match samplers across legs.
+
+**Tracks ManifoldKit 0.64** ([#125](https://github.com/ManifoldKit/manifold-llama/issues/125)) — the core pin moves to `.upToNextMinor(from: "0.64.0")`, the release that ships the sticky "approve for the run" tool-approval policy on `UIToolApprovalGate` and the public `ToolFixtures`/`VLModelDetector`/`ScenarioCLIHarness` conformance-harness surface. Re-resolved, built, and tested green against the new core.
+
+### Features
+
+* **eval:** add `manifold-llama-eval`, a raw-prompt eval runner emitting `RawRun` for the manifold-eval differential leg ([#121](https://github.com/ManifoldKit/manifold-llama/issues/121))
+* **eval:** make `--top-k`/`--repeat-penalty` overridable in the eval runner ([#122](https://github.com/ManifoldKit/manifold-llama/issues/122))
+
+### Bug Fixes
+
+* **deps:** bump ManifoldKit pin to v0.64.0 ([#125](https://github.com/ManifoldKit/manifold-llama/issues/125))
+
 ## [0.2.16](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.15...v0.2.16) (2026-06-28)
 
 ### Highlights
