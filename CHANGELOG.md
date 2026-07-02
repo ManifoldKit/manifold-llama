@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.18](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.17...v0.2.18) (2026-07-02)
+
+
+### Bug Fixes
+
+* **deps:** bump vendored llama.cpp xcframework pin to b9859 ([#127](https://github.com/ManifoldKit/manifold-llama/issues/127)) ([6ff3f3f](https://github.com/ManifoldKit/manifold-llama/commit/6ff3f3f137f6fea3801e10767daf9d1c80d6831c))
+
 ## [0.2.17](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.16...v0.2.17) (2026-07-02)
 
 ### Highlights
