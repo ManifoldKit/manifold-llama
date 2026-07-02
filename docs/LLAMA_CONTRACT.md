@@ -6,9 +6,10 @@ invariants, capacity limits, ownership semantics, and known failure modes. It
 is generated from a careful read of `LlamaBackend.swift`,
 `LlamaGenerationDriver.swift`, `LlamaModelLoader.swift`,
 `LlamaEmbeddingBackend.swift`, and the vendored `docs/vendor/llama.h` (llama.cpp
-build **b9744**; the public C API header is byte-identical to b9553, so the
+build **b9859**; versus b9744 the header adds one new unused symbol,
+`llama_model_n_layer_nextn`, and is otherwise byte-identical, so the
 contract tables below are unchanged). The xcframework is consumed as a
-**self-hosted slim repackage of the upstream `ggml-org/llama.cpp` b9744 release**
+**self-hosted slim repackage of the upstream `ggml-org/llama.cpp` b9859 release**
 (dSYMs and the unused tvOS/visionOS slices removed) via a local
 `.binaryTarget(url:checksum:)` in `Package.swift` — there is no
 `mattt/llama.swift` wrapper in the dependency graph anymore (see *Binary vs.
@@ -659,7 +660,7 @@ are unaffected because Invariant #1 kicks in.
 | Affected symbol | `llama_sampler_init_grammar` → internal `llama_grammar_advance_stack()` |
 | Vulnerability | A buffer overflow in the grammar stack-advance logic allowed a crafted GBNF grammar string (or a JSON Schema with certain constructs) to overflow an internal stack buffer, enabling potential arbitrary code execution. |
 | Fixed in | llama.cpp build **b8774** |
-| Vendored build | **b9744** (upstream `ggml-org/llama.cpp` release) — **fix is included** (b9744 ≫ b8774) |
+| Vendored build | **b9859** (upstream `ggml-org/llama.cpp` release) — **fix is included** (b9859 ≫ b8774) |
 | Status | ✅ **Mitigated in the vendored binary.** |
 
 #### Defence in depth
@@ -680,7 +681,7 @@ just the CVE PoC shapes:
 
 Callers that pass a GBNF string directly via `GenerationConfig.grammar` (not
 via tool definitions) are still not covered by the pre-validator. Those
-strings are now safe against the CVE on the b9744 binary, but a malformed
+strings are now safe against the CVE on the b9859 binary, but a malformed
 GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 (see Violation #6).
 
@@ -720,7 +721,7 @@ The llama.cpp xcframework is consumed as a **pre-built binary** — but as a
 rather than the upstream asset directly. `Package.swift` declares a local
 `.binaryTarget(name: "llama-cpp", url:checksum:)` pointing at the
 `llama-b<NNNN>-slim.xcframework.zip` hosted on the manifold-llama
-`vendor-llama-b<NNNN>` release (currently **b9744**), and a one-file local
+`vendor-llama-b<NNNN>` release (currently **b9859**), and a one-file local
 `LlamaSwift` target (`Sources/LlamaSwift/Llama.swift`:
 `@_exported @preconcurrency import llama`) re-exports the C module so the
 `ManifoldLlama` sources keep importing `LlamaSwift` unchanged. The slim asset is
@@ -794,8 +795,8 @@ The opacity of binary diffs is mitigated by two practices:
 
 ### Slimming the xcframework
 
-The upstream `llama-b<NNNN>-xcframework.zip` is heavy: ~208 MB zipped and
-~627 MB extracted (measured for b9744). It ships **seven** platform slices
+The upstream `llama-b<NNNN>-xcframework.zip` is heavy: ~257 MB zipped and
+~769 MB extracted (measured for b9859). It ships **seven** platform slices
 (ios, ios-simulator, macos, tvos, tvos-simulator, xros, xros-simulator) and
 bundles a fat **dSYM** in every slice. But `Package.swift` only declares
 `.iOS(.v18)` and `.macOS(.v15)`, so the tvOS and visionOS slices are
@@ -807,14 +808,14 @@ unreachable dead weight, and dSYMs are never needed to build, link, or run a
 the three usable slices — `macos-arm64_x86_64`, `ios-arm64`,
 `ios-arm64_x86_64-simulator` — with dSYMs dropped (it runs
 `xcodebuild -create-xcframework -framework <slice>/llama.framework …` and
-deliberately omits `-debug-symbols`). Measured result for b9744:
-**~627 MB → ~24 MB extracted, ~208 MB → ~8.4 MB zipped.**
+deliberately omits `-debug-symbols`). Measured result for b9859:
+**~769 MB → ~30 MB extracted, ~257 MB → ~11 MB zipped.**
 
 **This slim asset is the production pin.** `Package.swift`'s
 `.binaryTarget(name: "llama-cpp", …)` points at the self-hosted
-`vendor-llama-b9744` release asset
-(`llama-b9744-slim.xcframework.zip`), not at upstream's
-`llama-b9744-xcframework.zip`. The url + checksum still pin it deterministically;
+`vendor-llama-b9859` release asset
+(`llama-b9859-slim.xcframework.zip`), not at upstream's
+`llama-b9859-xcframework.zip`. The url + checksum still pin it deterministically;
 only the hosting moved (upstream → this repo's releases) and the bytes shrank.
 
 > **Determinism caveat — produce once, host that exact file.** The slim zip is
@@ -825,7 +826,7 @@ only the hosting moved (upstream → this repo's releases) and the bytes shrank.
 
 To re-cut it for a new build:
 
-1. Run `scripts/repackage-xcframework.sh` (defaults to `b9744`; override with
+1. Run `scripts/repackage-xcframework.sh` (defaults to `b9859`; override with
    `BUILD=b<NNNN>` or a positional arg). It downloads the upstream asset
    (re-downloading only if the cached zip is missing or fails an `unzip -t`
    integrity check), builds the slim `llama.xcframework`, asserts it contains

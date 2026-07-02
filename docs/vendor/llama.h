@@ -1,11 +1,7 @@
 // Read-only reference copy of llama.cpp's public C API header.
-// Source: ggml-org/llama.cpp release b9744 — llama-b9744-xcframework.zip
-// xcframework checksum: 8839b12b8819b38a64e1b7d6495914d514bf4b5d5751222377cc1afdbe77a4fc
+// Source: ggml-org/llama.cpp release b9859 — llama-b9859-xcframework.zip
+// xcframework checksum: 88e382d47d12e41c786fcf36d5c829c24004d0ee7e3a11483bf4fb63e1d7b190
 // Do not edit; refresh per docs/LLAMA_CONTRACT.md upgrade procedure on each pin bump.
-#ifndef LLAMA_H
-#define LLAMA_H
-
-#include "ggml.h"
 #include "ggml-cpu.h"
 #include "ggml-backend.h"
 #include "ggml-opt.h"
@@ -562,14 +558,15 @@ extern "C" {
     LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
     LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
 
-    LLAMA_API int32_t llama_model_n_ctx_train(const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_embd     (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_embd_inp (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_embd_out (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_layer    (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_head     (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
-    LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_ctx_train  (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_embd       (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_embd_inp   (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_embd_out   (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_layer      (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
+    LLAMA_API int32_t llama_model_n_swa        (const struct llama_model * model);
 
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);

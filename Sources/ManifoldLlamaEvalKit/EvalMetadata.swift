@@ -10,10 +10,10 @@ public enum EvalMetadata {
     /// `toolingVersions["llama.cpp"]`.
     ///
     /// **Keep in sync with `Package.swift`'s `llama-cpp` binary target URL**
-    /// (`vendor-llama-b9744/llama-b9744-slim.xcframework.zip`) and
+    /// (`vendor-llama-b9859/llama-b9859-slim.xcframework.zip`) and
     /// `docs/LLAMA_CONTRACT.md`. There is no public llama.cpp API that reports
     /// its own build string, so this is sourced from the pin, not queried.
-    public static let llamaCppBuild = "b9744"
+    public static let llamaCppBuild = "b9859"
 
     /// SHA-256 hex digest of `data` (the exact prompt string bytes).
     public static func sha256Hex(_ data: Data) -> String {
