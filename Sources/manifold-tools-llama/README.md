@@ -20,7 +20,8 @@ is copied into this repo for those. The one exception is
 `Sources/manifold-tools-llama/ScenarioOverrides/` — four scenario ids
 (`shopping-list-budget`, `parallel-readme-comparison`, `oversize-tool-output`,
 `structured-json-extraction`) whose assertion wording is deliberately tuned
-for llama/gemma soak behavior (looser `containsAny`/`containsAll` sets than
+for llama/gemma soak behavior (divergent `containsAny`/`containsAll` sets —
+mostly looser, though `08-oversize-tool-output` is stricter — than
 core's stricter literal-match wording). `loadScenarios()` in `main.swift`
 loads core's full corpus, then splices these four in by id.
 
