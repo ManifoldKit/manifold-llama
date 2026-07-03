@@ -2,12 +2,16 @@
 // against a real llama.cpp / GGUF model.
 //
 // This reuses the published `ManifoldTools` library product from ManifoldKit
-// (bundled scenarios + reference tools + scenario runner) and drives them
-// through this package's `LlamaBackend`. There are NO changes to ManifoldKit
-// core — the only Llama-specific wiring is the backend construction and model
-// load, plus a vendored copy of the fixture tree the file/dir tools read
-// (ManifoldTools' `ReadFileTool.defaultRoot()` resolves to a ManifoldKit test
-// path that does not travel with the library product).
+// (bundled scenarios + fixture tree + reference tools + scenario runner +
+// `ScenarioCLIHarness`, MK 0.64+) and drives them through this package's
+// `LlamaBackend`. There are NO changes to ManifoldKit core — the only
+// Llama-specific wiring is the backend construction, model load, decoy-tool
+// padding, result-grounding system-prompt injection, and grammar-constrained
+// final-answer decoding (none of which `ScenarioCLIHarness` owns — it
+// deliberately leaves model-loading policy and registry scoping to each
+// consumer; see its doc comment). Four scenarios still carry a vendored
+// override — see `Sources/manifold-tools-llama/ScenarioOverrides/` and
+// `loadScenarios()` below.
 //
 // Real-hardware tool: requires Apple Silicon + Metal (llama.cpp uses a
 // process-global backend init and has no Metal support in the simulator) and
@@ -18,27 +22,23 @@ import ManifoldModelCatalog
 import ManifoldTools
 import ManifoldLlama
 
-/// Hand-rolled argument parser — mirrors `manifold-tools` in ManifoldKit core.
-/// Pulling in swift-argument-parser for a ~150-line harness is not worth the
-/// Package.swift churn; the syntax is small enough to parse in place.
+/// Hand-rolled argument parser for the flags `ScenarioCLIHarness.parseCommonFlags`
+/// doesn't own (`--model`, `--describe`, `--bench` and its sub-flags). Common
+/// flags (`--scenario`, `--output`, `--fixtures-root`, `--extra-tools`,
+/// `--list`, `--help`/`-h`) are parsed by the shared harness in `CLI.parse`
+/// below; this struct only carries this CLI's own remainder.
 struct CLI {
 
-    var scenarioFilter: String = "all"
+    /// Flags shared with the companion CLIs (`manifold-tools`,
+    /// `manifold-tools-mlx`) — parsed by `ScenarioCLIHarness`.
+    var common: ScenarioCLIHarness.Options
     var modelPath: String? = nil
-    var output: URL? = nil
-    var fixturesRoot: URL? = nil
-    var list: Bool = false
     /// Static tool-call capability report (issue #2005 layers 1+2): parses the
     /// model's embedded chat template into a `ChatTemplateToolDescriptor` and
     /// runs `RenderConsistencyChecker`. Reads GGUF metadata only — NO weights,
     /// no Metal, no generation. Distinct from the scenario soak (the measured
     /// positive verdict) and from `--bench` (timing).
     var describe: Bool = false
-    /// Number of decoy (distractor) tools to advertise alongside each scenario's
-    /// required tool(s). Used to measure how a model's tool selection degrades as
-    /// the advertised tool set grows. Default 0 preserves the original behaviour
-    /// (advertise only the scenario's `requiredTools`).
-    var extraTools: Int = 0
 
     /// Cold-vs-warm generation benchmark mode (see Benchmark.swift). Bypasses the
     /// scenario runner entirely — drives `LlamaBackend` directly to time the
@@ -65,65 +65,60 @@ struct CLI {
         exit(2)
     }
 
+    /// Parses the flags common to every scenario-CLI harness consumer via
+    /// `ScenarioCLIHarness`, then walks the remainder for this CLI's own
+    /// flags (`--model`, `--describe`, `--bench`, `--flash`, `--bench-prompt`,
+    /// `--max-tokens`, `--warm-runs`, `--context`).
     static func parse(_ argv: [String]) -> CLI {
-        var cli = CLI()
+        let commonOptions: ScenarioCLIHarness.Options
+        let remainder: [String]
+        switch ScenarioCLIHarness.parseCommonFlags(argv, defaultOutput: defaultOutputURL()) {
+        case .options(let options, let rest):
+            commonOptions = options
+            remainder = rest
+        case .helpRequested:
+            printUsage()
+            exit(0)
+        case .failure(let message):
+            fail(message)
+        }
+
+        var cli = CLI(common: commonOptions)
         var i = 0
-        while i < argv.count {
-            let arg = argv[i]
+        while i < remainder.count {
+            let arg = remainder[i]
             switch arg {
-            case "--scenario":
-                i += 1
-                guard i < argv.count else { fail("--scenario requires a value") }
-                cli.scenarioFilter = argv[i]
             case "--model":
                 i += 1
-                guard i < argv.count else { fail("--model requires a value") }
-                cli.modelPath = argv[i]
-            case "--output":
-                i += 1
-                guard i < argv.count else { fail("--output requires a value") }
-                cli.output = URL(fileURLWithPath: argv[i])
-            case "--fixtures-root":
-                i += 1
-                guard i < argv.count else { fail("--fixtures-root requires a value") }
-                cli.fixturesRoot = URL(fileURLWithPath: argv[i], isDirectory: true)
-            case "--extra-tools":
-                i += 1
-                guard i < argv.count else { fail("--extra-tools requires a value") }
-                guard let n = Int(argv[i]), n >= 0 else { fail("--extra-tools requires a non-negative integer") }
-                cli.extraTools = n
+                guard i < remainder.count else { fail("--model requires a value") }
+                cli.modelPath = remainder[i]
             case "--bench":
                 cli.bench = true
             case "--flash":
                 i += 1
-                guard i < argv.count else { fail("--flash requires a value (on|off|both)") }
-                cli.flash = argv[i]
+                guard i < remainder.count else { fail("--flash requires a value (on|off|both)") }
+                cli.flash = remainder[i]
             case "--bench-prompt":
                 i += 1
-                guard i < argv.count else { fail("--bench-prompt requires a value") }
-                cli.benchPrompt = argv[i]
+                guard i < remainder.count else { fail("--bench-prompt requires a value") }
+                cli.benchPrompt = remainder[i]
             case "--max-tokens":
                 i += 1
-                guard i < argv.count else { fail("--max-tokens requires a value") }
-                guard let n = Int(argv[i]), n > 0 else { fail("--max-tokens requires a positive integer") }
+                guard i < remainder.count else { fail("--max-tokens requires a value") }
+                guard let n = Int(remainder[i]), n > 0 else { fail("--max-tokens requires a positive integer") }
                 cli.maxTokens = n
             case "--warm-runs":
                 i += 1
-                guard i < argv.count else { fail("--warm-runs requires a value") }
-                guard let n = Int(argv[i]), n >= 0 else { fail("--warm-runs requires a non-negative integer") }
+                guard i < remainder.count else { fail("--warm-runs requires a value") }
+                guard let n = Int(remainder[i]), n >= 0 else { fail("--warm-runs requires a non-negative integer") }
                 cli.warmRuns = n
             case "--context":
                 i += 1
-                guard i < argv.count else { fail("--context requires a value") }
-                guard let n = Int(argv[i]), n > 0 else { fail("--context requires a positive integer") }
+                guard i < remainder.count else { fail("--context requires a value") }
+                guard let n = Int(remainder[i]), n > 0 else { fail("--context requires a positive integer") }
                 cli.context = n
             case "--describe":
                 cli.describe = true
-            case "--list":
-                cli.list = true
-            case "--help", "-h":
-                printUsage()
-                exit(0)
             default:
                 fail("unknown argument: \(arg)")
             }
@@ -533,43 +528,38 @@ func runScenarioWithGrammar(
     return GrammarRunOutcome(finalAnswer: accumulatedText, assertions: assertionOutcomes)
 }
 
-/// Loads the bundled tool-calling scenarios.
+/// Loads the tool-calling scenario corpus: ManifoldKit core's bundled
+/// `built-in` scenarios (MK 0.64+ `ScenarioLoader.loadBuiltIn()`) with four
+/// llama/gemma-tolerant overrides spliced in by id.
 ///
-/// `ScenarioLoader.loadBuiltIn()` is unusable here: it resolves a ManifoldKit
-/// *source*-relative path (`<cwd>/Sources/ManifoldTools/Scenarios/built-in`)
-/// that exists only when run from the ManifoldKit package root. We vendor the
-/// scenario JSONs as a bundled `.copy` resource and drive the public
-/// `ScenarioLoader.load(from:)` against that directory instead.
+/// Nine of the ten scenario ids core ships are used verbatim. Four —
+/// `shopping-list-budget`, `parallel-readme-comparison`,
+/// `oversize-tool-output`, `structured-json-extraction` — carry intentional
+/// wording differences in this package (looser `containsAny`/`containsAll`
+/// assertion sets tuned from real llama/gemma soak runs; core's copies use
+/// stricter literal-match wording). Those four stay vendored under
+/// `ScenarioOverrides/` (a bundled `.copy` resource) and replace the
+/// core-sourced scenario of the same id here.
 func loadScenarios() throws -> [Scenario] {
-    guard let dir = Bundle.module.url(forResource: "Scenarios", withExtension: nil) else {
+    let base = try ScenarioLoader.loadBuiltIn()
+
+    guard let overridesDir = Bundle.module.url(forResource: "ScenarioOverrides", withExtension: nil) else {
         throw NSError(
             domain: "manifold-tools-llama", code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "bundled Scenarios directory not found in resource bundle"])
+            userInfo: [NSLocalizedDescriptionKey: "bundled ScenarioOverrides directory not found in resource bundle"])
     }
-    return try ScenarioLoader.load(from: dir)
+    let overrides = try ScenarioLoader.load(from: overridesDir)
+    let overridesByID = Dictionary(uniqueKeysWithValues: overrides.map { ($0.id, $0) })
+
+    return base.map { overridesByID[$0.id] ?? $0 }
 }
 
 /// Resolves the fixture root the file/dir tools read against. Prefers an
-/// explicit `--fixtures-root`, otherwise the bundled copy resource. Exits 2 if
-/// neither resolves — the file/dir scenarios would otherwise fail confusingly.
+/// explicit `--fixtures-root`, otherwise `ManifoldTools`'s own bundled fixture
+/// tree (`ToolFixtures.bundledRoot()`, via `ScenarioCLIHarness`) — no longer
+/// vendored in this package.
 func resolveFixturesRoot(_ override: URL?) -> URL {
-    if let override {
-        return override
-    }
-    // SwiftPM's `.copy("Fixtures/manifold-tools")` flattens to the trailing
-    // path component, so the tree lands at the bundle root as `manifold-tools/`
-    // — there is no `Fixtures/` subdirectory in the built bundle. Look it up at
-    // the root (no `subdirectory:`); passing `subdirectory: "Fixtures"` returns
-    // nil and would wrongly exit(2) on every real run.
-    guard let bundled = Bundle.module.url(
-        forResource: "manifold-tools",
-        withExtension: nil)
-    else {
-        FileHandle.standardError.write(Data(
-            "manifold-tools-llama: bundled fixtures not found — pass --fixtures-root <dir>\n".utf8))
-        exit(2)
-    }
-    return bundled
+    ScenarioCLIHarness.resolveFixturesRoot(override)
 }
 
 /// `--describe`: static tool-call capability report (issue #2005 layers 1+2).
@@ -632,7 +622,7 @@ func runCLI() async -> Int32 {
         return 1
     }
 
-    if cli.list {
+    if cli.common.list {
         print("Available scenarios:")
         for s in scenarios {
             print("  \(s.id) — \(s.description)")
@@ -676,22 +666,19 @@ func runCLI() async -> Int32 {
     }
 
     let filtered: [Scenario]
-    if cli.scenarioFilter == "all" {
-        filtered = scenarios
-    } else {
-        filtered = scenarios.filter { $0.id == cli.scenarioFilter }
-        if filtered.isEmpty {
-            FileHandle.standardError.write(Data("no scenario matches id '\(cli.scenarioFilter)'\n".utf8))
-            return 1
-        }
+    do {
+        filtered = try ScenarioCLIHarness.filterScenarios(scenarios, matching: cli.common.scenarioFilter)
+    } catch {
+        FileHandle.standardError.write(Data("\(error)\n".utf8))
+        return 1
     }
 
-    let fixturesRoot = resolveFixturesRoot(cli.fixturesRoot)
+    let fixturesRoot = resolveFixturesRoot(cli.common.fixturesRoot)
     print("Fixtures root: \(fixturesRoot.path)")
 
     let logger: TranscriptLogger
     do {
-        logger = try TranscriptLogger(url: cli.output ?? CLI.defaultOutputURL())
+        logger = try TranscriptLogger(url: cli.common.output)
     } catch {
         FileHandle.standardError.write(Data("failed to open log: \(error)\n".utf8))
         return 1
@@ -724,9 +711,9 @@ func runCLI() async -> Int32 {
     // Decoy padding (--extra-tools): register N distractor tools into the shared
     // registry so the runner can advertise them alongside each scenario's real
     // tool. Names are spliced into each scenario's `requiredTools` below.
-    let decoyNames = registerDecoys(count: cli.extraTools, into: registry)
+    let decoyNames = registerDecoys(count: cli.common.extraTools, into: registry)
     if !decoyNames.isEmpty {
-        print("Decoy tools (--extra-tools \(cli.extraTools)): \(decoyNames.joined(separator: ", "))")
+        print("Decoy tools (--extra-tools \(cli.common.extraTools)): \(decoyNames.joined(separator: ", "))")
     }
     let service = InferenceService(toolRegistry: registry)
     // Register the GGUF backend factory so `loadModel(from:plan:)` constructs and
@@ -890,13 +877,7 @@ func runCLI() async -> Int32 {
         service.unloadModel()
     }
 
-    if allPassed {
-        print("\nAll scenarios passed.")
-        return 0
-    } else {
-        print("\nOne or more scenarios failed — see \(logger.destination.path)")
-        return 1
-    }
+    return ScenarioCLIHarness.finish(allPassed: allPassed, transcriptPath: logger.destination)
 }
 
 let exitCode = await runCLI()

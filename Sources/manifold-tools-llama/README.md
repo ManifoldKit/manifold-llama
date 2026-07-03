@@ -5,28 +5,29 @@ tool-calling **scenarios** against a real llama.cpp / GGUF model and prints a
 PASS/FAIL verdict per assertion.
 
 It reuses the published `ManifoldTools` library product from ManifoldKit — the
-scenarios, the six reference tools, the scenario runner, and the JSONL
-transcript logger all come from there. The only Llama-specific wiring is
-constructing `LlamaBackend` and loading the GGUF; **no changes to ManifoldKit
-core are needed**.
+bundled scenario corpus, the bundled fixture tree, the six reference tools,
+the scenario runner, the JSONL transcript logger, and the shared
+`ScenarioCLIHarness` (common flag parsing, bundled-scenario loading,
+transcript-summary printing) all come from there (MK 0.64+). Llama-specific
+wiring — backend construction and model load, decoy-tool padding, tool-result
+grounding, and grammar-constrained final-answer decoding — is layered on top;
+**no changes to ManifoldKit core are needed**.
 
-Two resources are vendored here as bundled `.copy` resources because the
-corresponding ManifoldTools defaults resolve to ManifoldKit source/test paths
-that do not travel with the library product:
+The bundled scenario corpus and fixture tree are consumed *live* from
+`ManifoldTools`'s own resource bundle (`ScenarioLoader.loadBuiltIn()` /
+`ToolFixtures.bundledRoot()`, reached through `ScenarioCLIHarness`) — nothing
+is copied into this repo for those. The one exception is
+`Sources/manifold-tools-llama/ScenarioOverrides/` — four scenario ids
+(`shopping-list-budget`, `parallel-readme-comparison`, `oversize-tool-output`,
+`structured-json-extraction`) whose assertion wording is deliberately tuned
+for llama/gemma soak behavior (looser `containsAny`/`containsAll` sets than
+core's stricter literal-match wording). `loadScenarios()` in `main.swift`
+loads core's full corpus, then splices these four in by id.
 
-- **The scenario JSONs** (`Scenarios/`). `ScenarioLoader.loadBuiltIn()`
-  resolves `<cwd>/Sources/ManifoldTools/Scenarios/built-in`, which only exists
-  when run from the ManifoldKit package root. We ship our own copy and drive
-  the public `ScenarioLoader.load(from:)` against the bundled directory.
-- **The fixture tree** (`Fixtures/manifold-tools/`) the file/dir tools read.
-  `ReadFileTool.defaultRoot()` resolves to a ManifoldKit test path; we pass the
-  bundled root (or a `--fixtures-root` override) explicitly.
-
-> **These are vendored copies and can drift from ManifoldKit.** The scenario
-> JSONs and fixtures are hand-copied from ManifoldKit's `Sources/ManifoldTools/`
-> (no remote fetch — vendoring is deliberate). If ManifoldKit changes the
-> bundled scenarios or fixtures, re-copy them here. Do not de-duplicate via a
-> network fetch.
+> **The four overrides are intentional divergences, not drift to reconcile.**
+> `scripts/check-vendored-sync.sh` checks only that each override still
+> targets a scenario id core still ships — not content equality (byte
+> comparison would always "fail" on these four by design).
 
 ## Usage
 
