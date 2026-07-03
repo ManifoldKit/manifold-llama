@@ -27,9 +27,9 @@
 #
 # Usage:
 #   scripts/check-vendored-sync.sh [--warn|--strict]
-#     --warn    (default) always exit 0; prints ORPHAN as a warning only.
-#     --strict  exit 1 if any override is orphaned. Network failures never
-#                cause a non-zero exit in either mode.
+#     --strict  (default) exit 1 if any override is orphaned. Network failures
+#                never cause a non-zero exit in either mode.
+#     --warn    always exit 0; prints ORPHAN as a warning only.
 
 set -uo pipefail
 

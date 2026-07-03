@@ -38,7 +38,6 @@ jobs:
         # on a real orphan; network failures still exit 0 (advisory only when
         # connectivity itself is the problem, not when the check actually ran).
         run: scripts/check-vendored-sync.sh
-        continue-on-error: true
       - name: Select newest Xcode 26 toolchain
         # The image default (Xcode 16.4 / Swift 6.1) mis-resolves the
         # dependency graph: its SwiftPM does not prune AnyLanguageModel's
