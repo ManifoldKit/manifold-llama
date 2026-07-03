@@ -12,11 +12,13 @@ import ManifoldTools
 /// before running it (`groundScenario` in the harness `main.swift`).
 ///
 /// The directive composition lives in the executable target, which a test target
-/// cannot import, so this suite pins the *intent*: it loads the vendored scenario
-/// JSONs from the source tree, replays the same one-line composition rule, and
-/// asserts the grounding text lands on tool-using scenarios and is withheld from
-/// toolless ones. A drift in the directive wording or the toolless carve-out
-/// breaks this test, which is the guard we want around a prompt change.
+/// cannot import, so this suite pins the *intent*: it loads the same corpus the
+/// harness runs against (`ScenarioCorpusFixture` — core's bundled `built-in`
+/// scenarios spliced with this package's vendored `ScenarioOverrides`), replays
+/// the same one-line composition rule, and asserts the grounding text lands on
+/// tool-using scenarios and is withheld from toolless ones. A drift in the
+/// directive wording or the toolless carve-out breaks this test, which is the
+/// guard we want around a prompt change.
 ///
 /// No model is loaded — this is a pure data/string assertion that runs in CI.
 final class LlamaResultGroundingPromptTests: XCTestCase {
@@ -39,25 +41,33 @@ final class LlamaResultGroundingPromptTests: XCTestCase {
         return trimmed + " " + directive
     }
 
-    /// Resolves the vendored scenario JSON directory from the test source file
-    /// location so the suite does not depend on the executable's resource bundle.
-    private func scenarioDirectory() -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // ManifoldLlamaTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // package root
-            .appendingPathComponent("Sources/manifold-tools-llama/Scenarios", isDirectory: true)
-    }
-
+    /// `manifold-tools-llama` no longer vendors the full scenario corpus — it
+    /// consumes ManifoldKit core's bundled `built-in` corpus and splices in
+    /// four llama/gemma-tolerant overrides by id (see `loadScenarios()` in
+    /// `main.swift`). The invariant this test pins is the one
+    /// `scripts/check-vendored-sync.sh` also enforces: the vendored
+    /// `ScenarioOverrides` directory exists, is non-empty, and every override
+    /// id it ships still targets a scenario id core's bundled corpus provides
+    /// (an orphaned override would silently stop being spliced in).
     func testScenarioDirectoryIsPresent() throws {
-        let dir = scenarioDirectory()
+        let overridesDir = ScenarioCorpusFixture.overridesDirectory()
         XCTAssertTrue(
-            FileManager.default.fileExists(atPath: dir.path),
-            "vendored Scenarios directory not found at \(dir.path)")
+            FileManager.default.fileExists(atPath: overridesDir.path),
+            "vendored ScenarioOverrides directory not found at \(overridesDir.path)")
+
+        let overrides = try ScenarioLoader.load(from: overridesDir)
+        XCTAssertFalse(overrides.isEmpty, "ScenarioOverrides directory is empty")
+
+        let coreIDs = Set(try ScenarioLoader.loadBuiltIn().map(\.id))
+        for override in overrides {
+            XCTAssertTrue(
+                coreIDs.contains(override.id),
+                "override '\(override.id)' does not target any core-shipped scenario id — orphaned override")
+        }
     }
 
     func testToolUsingScenariosGainTheGroundingDirective() throws {
-        let scenarios = try ScenarioLoader.load(from: scenarioDirectory())
+        let scenarios = try ScenarioCorpusFixture.load()
         XCTAssertFalse(scenarios.isEmpty, "no scenarios decoded — directory empty or unreadable")
 
         var groundedCount = 0
@@ -79,7 +89,7 @@ final class LlamaResultGroundingPromptTests: XCTestCase {
     }
 
     func testToollessScenariosAreLeftUnchanged() throws {
-        let scenarios = try ScenarioLoader.load(from: scenarioDirectory())
+        let scenarios = try ScenarioCorpusFixture.load()
         for scenario in scenarios where scenario.requiredTools.isEmpty {
             let prompt = Self.grounded(
                 base: scenario.systemPrompt,
