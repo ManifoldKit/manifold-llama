@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.18](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.17...v0.2.18) (2026-07-03)
+
+### Highlights
+
+**Tracks ManifoldKit 0.65** ([#131](https://github.com/ManifoldKit/manifold-llama/issues/131)) — the core pin moves to `.upToNextMinor(from: "0.65.0")`, the release that honors advertised structured-output and cache-usage capabilities on cloud backends and removes dead public surface flagged by the inert-code audit. Re-resolved, built, and tested green against the new core.
+
+**Refreshed vendored llama.cpp** ([#127](https://github.com/ManifoldKit/manifold-llama/issues/127)) — the prebuilt llama.cpp xcframework pin advances to build b9859.
+
+### Bug Fixes
+
+* Bump ManifoldKit pin to v0.65.0 ([#131](https://github.com/ManifoldKit/manifold-llama/issues/131))
+* **deps:** bump vendored llama.cpp xcframework pin to b9859 ([#127](https://github.com/ManifoldKit/manifold-llama/issues/127))
+
 ## [0.2.17](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.16...v0.2.17) (2026-07-02)
 
 ### Highlights
