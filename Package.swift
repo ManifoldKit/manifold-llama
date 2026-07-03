@@ -86,11 +86,23 @@ let package = Package(
             path: "Sources/LlamaSwift"
         ),
         // Tool-calling scenario CLI. Links the published `ManifoldTools`
-        // library product (the bundled scenarios + reference tools travel with
-        // it) plus this package's `ManifoldLlama` for the real GGUF backend.
-        // The fixture tree the file/dir tools read is vendored as a bundled
-        // `.copy` resource — `ReadFileTool.defaultRoot()` resolves to a
-        // ManifoldKit test path that does not exist here.
+        // library product (bundled scenarios + fixture tree + reference tools
+        // + `ScenarioCLIHarness` travel with it, MK 0.64+) plus this package's
+        // `ManifoldLlama` for the real GGUF backend.
+        //
+        // The fixture tree the file/dir tools read is NO LONGER vendored here
+        // — `ManifoldTools.ToolFixtures.bundledRoot()` (via
+        // `ScenarioCLIHarness.resolveFixturesRoot`) resolves it from
+        // `ManifoldTools`'s own resource bundle. Five of this package's nine
+        // scenario JSONs are likewise no longer vendored — they're byte-
+        // identical to core's bundled `built-in` corpus (verified by content
+        // diff) and load via `ScenarioLoader.loadBuiltIn()`. Four scenarios
+        // (`shopping-list-budget`, `parallel-readme-comparison`,
+        // `oversize-tool-output`, `structured-json-extraction`) carry
+        // intentional llama/gemma-tolerant assertion wording that DIFFERS from
+        // core's copies — those stay vendored under `ScenarioOverrides/` and
+        // are spliced in by id at load time (see `loadScenarios()` in
+        // main.swift).
         .executableTarget(
             name: "manifold-tools-llama",
             dependencies: [
@@ -110,14 +122,10 @@ let package = Package(
             // emit an "unhandled resource" warning for it.
             exclude: ["README.md"],
             resources: [
-                .copy("Fixtures/manifold-tools"),
-                // The bundled scenario JSONs are vendored here too:
-                // `ScenarioLoader.loadBuiltIn()` resolves a ManifoldKit
-                // source-relative path (`<cwd>/Sources/ManifoldTools/...`) that
-                // does not exist in this package, so we ship our own copy and
-                // drive the public `ScenarioLoader.load(from:)` against the
-                // bundled directory instead.
-                .copy("Scenarios"),
+                // Only the four scenarios whose assertions genuinely diverge
+                // from core's bundled corpus are vendored — see the target
+                // comment above.
+                .copy("ScenarioOverrides"),
             ]
         ),
         // Raw-prompt eval runner core: the `RawRun` wire record + metadata

@@ -51,16 +51,6 @@ final class LlamaStructuredJsonGrammarTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// Resolves the vendored scenario JSON directory from this file's source
-    /// location, matching `LlamaResultGroundingPromptTests`.
-    private func scenarioDirectory() -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // ManifoldLlamaTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // package root
-            .appendingPathComponent("Sources/manifold-tools-llama/Scenarios", isDirectory: true)
-    }
-
     /// Builds a `LlamaBackend` with an injected architecture so capability
     /// flags reflect a specific model family without loading a GGUF.
     private func backend(architecture: String) -> LlamaBackend {
@@ -75,10 +65,10 @@ final class LlamaStructuredJsonGrammarTests: XCTestCase {
     /// `structured-json-extraction` scenario on a grammar-capable (non-Gemma)
     /// backend, and the grammar must begin with the GBNF root rule.
     func test_grammarForScenario_structuredJsonExtraction_returnsGrammar() throws {
-        let scenarios = try ScenarioLoader.load(from: scenarioDirectory())
+        let scenarios = try ScenarioCorpusFixture.load()
         let target = try XCTUnwrap(
             scenarios.first(where: { $0.id == "structured-json-extraction" }),
-            "structured-json-extraction scenario not found in Scenarios/")
+            "structured-json-extraction scenario not found in the bundle+overrides corpus")
 
         let g = try XCTUnwrap(
             Self.grammarForScenario(target, backend: backend(architecture: "llama")),
@@ -95,7 +85,7 @@ final class LlamaStructuredJsonGrammarTests: XCTestCase {
     /// == false` for the family. `grammarForScenario` must return `nil` rather
     /// than shipping a grammar that would silence the model.
     func test_grammarForScenario_gemmaBackend_returnsNil() throws {
-        let scenarios = try ScenarioLoader.load(from: scenarioDirectory())
+        let scenarios = try ScenarioCorpusFixture.load()
         let target = try XCTUnwrap(
             scenarios.first(where: { $0.id == "structured-json-extraction" }),
             "structured-json-extraction scenario not found")
@@ -114,7 +104,7 @@ final class LlamaStructuredJsonGrammarTests: XCTestCase {
     /// that would mask the tool-dispatch envelope. `grammarForScenario` must
     /// return `nil` for any scenario with `requiredTools` populated.
     func test_grammarForScenario_toolUsingScenarios_returnNil() throws {
-        let scenarios = try ScenarioLoader.load(from: scenarioDirectory())
+        let scenarios = try ScenarioCorpusFixture.load()
         let toolUsing = scenarios.filter { !$0.requiredTools.isEmpty }
         XCTAssertFalse(toolUsing.isEmpty,
             "test precondition: expected tool-using scenarios to be present")

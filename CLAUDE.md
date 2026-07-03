@@ -27,18 +27,16 @@ Most suites in `Tests/ManifoldLlamaTests` are model-gated: they `XCTSkip` unless
 
 This repo pins ManifoldKit with `.upToNextMinor(from: "…")` in `Package.swift`. `.github/workflows/core-bump.yml` listens for ManifoldKit's `core-release` repository_dispatch, rewrites the pin, builds/tests, and admin-merges a `fix:` PR — which trips this repo's own release-please into cutting a patch release. Never hand-edit the pin or hand-tag a release. Conventional Commits are required for release-please to version correctly — unlike core, this repo has no CI job that lints PR titles (the only required check is `test`); self-police the format.
 
-## Vendored data — drift risk
+## Vendored data — orphan risk
 
-`Sources/manifold-tools-llama/Scenarios/*.json` and `Sources/manifold-tools-llama/Fixtures/manifold-tools/**` are hand-copied from ManifoldKit core (`Sources/ManifoldTools/Scenarios/built-in/` and `Tests/Fixtures/manifold-tools/` respectively) and nothing keeps them in sync automatically — core can change a scenario's assertions and this repo's copy silently goes stale.
+As of the D1 refactor (MK 0.64+), this repo no longer hand-copies core's full scenario corpus or fixture tree — both are consumed live from the published `ManifoldTools` product (`ScenarioLoader.loadBuiltIn()` / `ToolFixtures.bundledRoot()`, reached through `ScenarioCLIHarness`). The only vendored content left is `Sources/manifold-tools-llama/ScenarioOverrides/*.json` — four scenario ids (`shopping-list-budget`, `parallel-readme-comparison`, `oversize-tool-output`, `structured-json-extraction`) whose assertion wording is deliberately tuned for llama/gemma soak behavior and is *meant* to diverge from core's copy at the same id (spliced in by id in `loadScenarios()`, `Sources/manifold-tools-llama/main.swift`).
 
-`scripts/check-vendored-sync.sh` compares this repo's vendored files against core at the tag matching the resolved ManifoldKit pin (via `raw.githubusercontent.com`). It runs warn-only in CI (`continue-on-error: true`); run it locally with `--strict` to fail on real drift:
+`scripts/check-vendored-sync.sh` no longer does content-drift comparison (that would false-positive on every override, since divergence is the point). It instead checks that each override still has a same-named counterpart in core's bundled corpus at the resolved pin (`raw.githubusercontent.com`) — an ORPHAN means core renamed or retired that scenario id and the override silently stopped being spliced in. It hard-fails in CI by default (`--strict`); network failures still exit 0:
 
 ```bash
-scripts/check-vendored-sync.sh          # warn mode, always exits 0
-scripts/check-vendored-sync.sh --strict # exit 1 on DRIFT/MISSING-UPSTREAM
+scripts/check-vendored-sync.sh          # strict mode (default), exit 1 on ORPHAN
+scripts/check-vendored-sync.sh --warn   # advisory only, always exits 0
 ```
-
-As of this writing it reports real drift on 4 of 9 scenario files (`06`, `07`, `08`, `09`) — investigate and reconcile by hand; the script only detects, it does not resync.
 
 ## Other references
 
