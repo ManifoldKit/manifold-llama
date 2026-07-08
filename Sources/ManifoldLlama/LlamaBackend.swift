@@ -555,7 +555,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     public func generate(
         prompt: String,
         systemPrompt: String?,
-        config: GenerationConfig
+        config: GenerationConfig,
+        hints: GenerationRuntimeHints
     ) throws -> GenerationStream {
         // The Task body re-reads context under stateLock below to avoid the
         // use-after-free window between here and `self.generationTask = task`
@@ -712,7 +713,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             // Manual override beats auto-detection. When neither is present,
             // markers stays nil and the driver skips ThinkingTransform entirely.
             let autoDetected = self.withStateLock { self._autoDetectedThinkingMarkers }
-            let resolvedMarkers = config.thinkingMarkers ?? autoDetected
+            let resolvedMarkers = hints.thinkingMarkers ?? autoDetected
             let kvCoherent = await driver.run(
                 context: context,
                 vocab: vocab,

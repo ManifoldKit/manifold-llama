@@ -127,7 +127,7 @@ final class LlamaGenerationGuardTests: XCTestCase {
         // Force the thinking parser on regardless of the model's chat-template
         // auto-detection, so the test pins the budget wiring rather than marker
         // discovery. `.qwen3` uses <think>…</think>, the dominant convention.
-        config.thinkingMarkers = .qwen3
+        let hints = GenerationRuntimeHints(thinkingMarkers: .qwen3)
 
         // The backend tokenizes the raw `prompt` verbatim (no chat-template
         // application), so we hand it a Qwen3-formatted prompt that ends at the
@@ -142,7 +142,8 @@ final class LlamaGenerationGuardTests: XCTestCase {
         let stream = try backend.generate(
             prompt: prompt,
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: hints
         )
 
         var thinkingTokens = 0
