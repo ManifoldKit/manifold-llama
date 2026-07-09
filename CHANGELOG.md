@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.19...v0.3.0) (2026-07-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt GenerationRuntimeHints (config→hints split, core #2152) ([#136](https://github.com/ManifoldKit/manifold-llama/issues/136))
+
+### Features
+
+* adopt GenerationRuntimeHints (config→hints split, core [#2152](https://github.com/ManifoldKit/manifold-llama/issues/2152)) ([#136](https://github.com/ManifoldKit/manifold-llama/issues/136)) ([2446fda](https://github.com/ManifoldKit/manifold-llama/commit/2446fda4660047630b544ba2e9066a0c17acb2e3))
+
 ## [0.2.19](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.18...v0.2.19) (2026-07-07)
 
 
