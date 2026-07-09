@@ -107,11 +107,12 @@ final class LlamaGemma4ToolRenderE2ETests: XCTestCase {
             tools: [Self.weatherTool()]
         )
         // Surface the prompt the render seam actually produced (#1909).
-        config.captureRenderedPrompt = true
+        let hints = GenerationRuntimeHints(captureRenderedPrompt: true)
 
         let (_, stream) = try service.enqueue(
             messages: [.user("What is the weather in Paris right now?")],
-            config: config
+            config: config,
+            hints: hints
         )
 
         var renderedPrompt: String?

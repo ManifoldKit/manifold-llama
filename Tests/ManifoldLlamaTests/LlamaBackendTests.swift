@@ -1007,13 +1007,14 @@ final class LlamaBackendTests: XCTestCase {
         // thinkingMarkers = .qwen3 would normally activate the parser.
         // maxThinkingTokens = 0 must override that and keep the parser off.
         var config = GenerationConfig(temperature: 0.1, maxOutputTokens: 64)
-        config.thinkingMarkers = .qwen3
         config.maxThinkingTokens = 0
+        let hints = GenerationRuntimeHints(thinkingMarkers: .qwen3)
 
         let stream = try backend.generate(
             prompt: "Reply with just the word 'ok'.",
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: hints
         )
 
         var thinkingTokenCount = 0
