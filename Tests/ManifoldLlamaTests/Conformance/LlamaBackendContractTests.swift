@@ -26,6 +26,11 @@ final class LlamaBackendContractTests: XCTestCase,
 
     let contractBackendName = "LlamaBackend"
 
+    // Instance-scoped: XCTest instantiates a fresh test case per method, so
+    // this registry starts empty for every method invocation. See
+    // BackendContractChecks.ClaimRegistry.
+    let capabilityClaimRegistry = BackendContractChecks.ClaimRegistry()
+
     func makeContractBackend() -> LlamaBackend {
         LlamaBackend()
     }
@@ -55,34 +60,41 @@ final class LlamaBackendContractTests: XCTestCase,
     func test_contract_allCapabilityClaims() {
         // Reset first so a prior run of this method in the same process doesn't
         // leave stale claims that could mask a newly-removed flag.
-        BackendContractChecks.resetCapabilityClaims(forBackend: contractBackendName)
+        BackendContractChecks.resetCapabilityClaims(capabilityClaimRegistry, forBackend: contractBackendName)
 
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsToolCalling"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsThinking"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsTokenCounting"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsKVCachePersistence"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsGrammarConstrainedSampling"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsParallelToolCalls"
         )
 
         BackendContractChecks.assertCapabilityMetaContract(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             capabilities: LlamaBackend().capabilities
         )
