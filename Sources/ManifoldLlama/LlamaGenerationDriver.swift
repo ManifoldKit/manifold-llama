@@ -743,17 +743,25 @@ import ManifoldHardware
                 // that the single-token window misses. Live fuzz runs on smollm2-135m
                 // surfaced loops with repeating units such as ASCII-art phrases, HTML
                 // timestamp blocks, and RTL override sequences.
+                //
+                // Exempt grammar-constrained runs (issue #141): a GBNF grammar can
+                // legitimately require repeated near-identical structured blocks (e.g.
+                // duplicate JSON entity entries during extraction). Hard-breaking the
+                // loop mid-phrase there leaves unterminated, unparseable JSON — the
+                // opposite of what "grammar guarantees parse" promises. The single-token
+                // runaway guard above (`repeatWindow` / `maxRepeatWindow`) is unaffected
+                // and keeps running under grammar.
                 phraseWindow.append(text)
                 if phraseWindow.count > Self.phraseWindowCap {
                     phraseWindow.removeFirst()
                 }
-                let maxScanLen = min(Self.maxPhraseLen, phraseWindow.count / Self.minPhraseRepeats)
-                if maxScanLen >= 2 {
-                    for phraseLen in 2...maxScanLen {
-                        if Self.tailRepeats(phraseWindow, phraseLen: phraseLen, minRepeats: Self.minPhraseRepeats) {
-                            break generationLoop
-                        }
-                    }
+                if Self.phraseGuardShouldTrip(
+                    hasGrammar: hasGrammar,
+                    window: phraseWindow,
+                    maxPhraseLen: Self.maxPhraseLen,
+                    minRepeats: Self.minPhraseRepeats
+                ) {
+                    break generationLoop
                 }
 
                 // Route the decoded token through the unified chain. The session
@@ -947,6 +955,35 @@ import ManifoldHardware
     }
 
     // MARK: - Phrase Detection
+
+    /// Decides whether the phrase-level repetition guard should terminate the
+    /// generation loop for the current decoded-token window (issue #141).
+    ///
+    /// Grammar-constrained (GBNF) runs are exempt: a grammar can legitimately
+    /// require repeated near-identical structured output (e.g. duplicate JSON
+    /// entity entries during extraction), and hard-breaking the loop mid-phrase
+    /// there leaves unterminated, unparseable JSON — defeating the grammar's
+    /// whole purpose. Non-grammar runs keep the original scan-and-trip
+    /// behaviour unchanged (smollm2-class runaway protection).
+    ///
+    /// Extracted from the generation loop so the decision is unit-testable
+    /// without a real model — mirrors the existing `tailRepeats` test seam.
+    @_spi(Testing) public static func phraseGuardShouldTrip(
+        hasGrammar: Bool,
+        window: [String],
+        maxPhraseLen: Int,
+        minRepeats: Int
+    ) -> Bool {
+        guard !hasGrammar else { return false }
+        let maxScanLen = min(maxPhraseLen, window.count / minRepeats)
+        guard maxScanLen >= 2 else { return false }
+        for phraseLen in 2...maxScanLen {
+            if tailRepeats(window, phraseLen: phraseLen, minRepeats: minRepeats) {
+                return true
+            }
+        }
+        return false
+    }
 
     /// Returns true when the tail of `window` contains `minRepeats` consecutive
     /// identical phrases of length `phraseLen`.
