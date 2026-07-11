@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/ManifoldKit/manifold-llama/compare/v0.3.0...v0.3.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.68.0 ([#138](https://github.com/ManifoldKit/manifold-llama/issues/138)) ([e3e6b08](https://github.com/ManifoldKit/manifold-llama/commit/e3e6b08684e2ef1330d437cd0f0b1fc664794802))
+* bump ManifoldKit pin to v0.69.0 (wave-2 ClaimRegistry adapt) ([#140](https://github.com/ManifoldKit/manifold-llama/issues/140)) ([e1744c7](https://github.com/ManifoldKit/manifold-llama/commit/e1744c71bb07ad55e0b0f95b81daf82c9ca3fd9d))
+* **driver:** exempt grammar-constrained runs from the phrase-repetition early exit ([#143](https://github.com/ManifoldKit/manifold-llama/issues/143)) ([2d8e385](https://github.com/ManifoldKit/manifold-llama/commit/2d8e3856032b955bfef4a1acdf16683dc7fbc9c8))
+
 ## [0.3.0](https://github.com/ManifoldKit/manifold-llama/compare/v0.2.19...v0.3.0) (2026-07-09)
 
 
