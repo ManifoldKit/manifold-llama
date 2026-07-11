@@ -7,7 +7,16 @@ on:
   # release PR stays BLOCKED and must be admin-merged (gh api PUT .../merge) —
   # which is already the release flow (Highlights rewrite is hand-merged). Any
   # PR touching Sources/Package/etc. is unaffected and still runs the gate.
+  #
+  # `types:` is load-bearing: the shared swift-ci.yml reusable workflow skips
+  # draft PRs, and a skipped job counts as passing for branch protection. The
+  # bare `pull_request:` default types (opened, synchronize, reopened) don't
+  # include `ready_for_review`, so a PR opened as draft and later marked ready
+  # would fire no event this workflow subscribes to — it would become
+  # mergeable with CI never having actually run. See
+  # ManifoldKit/.github WORKFLOWS.md.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - 'CHANGELOG.md'
       - '.release-please-manifest.json'
@@ -18,56 +27,35 @@ on:
       - '.release-please-manifest.json'
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  # Not covered by the shared swift-ci.yml (build+test only) — kept as its
+  # own job here rather than folded into the reusable workflow. Runs on
+  # macos-15 with no Xcode toolchain selection: the script is network-only
+  # (raw.githubusercontent.com) and is written to stay macOS /bin/bash 3.2
+  # compatible, matching where it ran before this migration.
+  scenario-override-sync:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Check scenario-override sync
         # Detects orphaned entries in Sources/manifold-tools-llama/ScenarioOverrides
         # (an override whose id no longer exists in ManifoldKit core's bundled
-        # corpus at the resolved pin — scripts/check-vendored-sync.sh). Needs no
-        # build — network-only against raw.githubusercontent.com — so it runs
-        # before toolchain selection. Hard-fails (--strict, the script's default)
-        # on a real orphan; network failures still exit 0 (advisory only when
-        # connectivity itself is the problem, not when the check actually ran).
+        # corpus at the resolved pin — scripts/check-vendored-sync.sh). Hard-fails
+        # (--strict, the script's default) on a real orphan; network failures
+        # still exit 0 (advisory only when connectivity itself is the problem,
+        # not when the check actually ran).
         run: scripts/check-vendored-sync.sh
-      - name: Select newest Xcode 26 toolchain
-        # The image default (Xcode 16.4 / Swift 6.1) mis-resolves the
-        # dependency graph: its SwiftPM does not prune AnyLanguageModel's
-        # trait-disabled mlx-swift-lm 2.x edge inside core, producing a bogus
-        # "could not be resolved" conflict with mlx-swift-lm 3.x. Swift 6.3
-        # (Xcode 26.3) prunes it correctly — same toolchain as the local gate.
-        run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
-          swift --version
-      - name: Cache SwiftPM dependency material
-        uses: actions/cache@v4
-        with:
-          # Dependency material only (clones, registries, prebuilt binary
-          # artifacts — for manifold-llama the big win is the cached checkout of the
-          # heavy ML dependency tree). Own-module .build/debug objects are
-          # deliberately NOT cached: SwiftPM embeds absolute paths in module
-          # fingerprints, so restored objects go stale on miss (same lesson
-          # as core's ci.yml).
-          path: |
-            ~/.swiftpm
-            .build/artifacts
-            .build/checkouts
-            .build/repositories
-          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-swiftpm-
-      - name: Build
-        run: swift build
-      - name: Test
-        # NO --parallel: ManifoldBackendTestKit's BackendContractChecks claims
-        # registry is process-global; explicit parallelism interleaves backend
-        # test classes and races it.
-        run: swift test
+
+  # Required status check context becomes "test / build-and-test" (reusable
+  # workflow calls report as "<caller job id> / <called job id>") — see the
+  # "Required-check rename needed" note in the PR body. Job id kept as `test`
+  # (matching the pre-migration required context name) to stay as close as
+  # possible to the current required check.
+  test:
+    uses: ManifoldKit/.github/.github/workflows/swift-ci.yml@main
