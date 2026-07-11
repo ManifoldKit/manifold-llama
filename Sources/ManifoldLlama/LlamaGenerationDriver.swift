@@ -743,17 +743,35 @@ import ManifoldHardware
                 // that the single-token window misses. Live fuzz runs on smollm2-135m
                 // surfaced loops with repeating units such as ASCII-art phrases, HTML
                 // timestamp blocks, and RTL override sequences.
+                //
+                // Exempt grammar-constrained tokens (issue #141): a GBNF grammar can
+                // legitimately require repeated near-identical structured blocks (e.g.
+                // duplicate JSON entity entries during extraction). Hard-breaking the
+                // loop mid-phrase there leaves unterminated, unparseable JSON — the
+                // opposite of what "grammar guarantees parse" promises.
+                //
+                // Key off `grammarGate.isGrammarActive`, NOT the static `hasGrammar`:
+                // under the thinking+grammar gating path (#1595) the grammar does not
+                // constrain the `<think>…</think>` reasoning tokens — those are sampled
+                // from the permissive chain and remain free-form prose. The gate is
+                // read here before this iteration's `grammarGate.observe(...)` (below),
+                // so it reflects the exact constraint state under which the current
+                // `text` token was sampled (line ~727 selected the sampler from the same
+                // pre-observe state). Exempting only genuinely grammar-constrained tokens
+                // keeps the runaway phrase guard alive during unconstrained reasoning.
+                // The single-token runaway guard above (`repeatWindow` /
+                // `maxRepeatWindow`) is unaffected and keeps running regardless.
                 phraseWindow.append(text)
                 if phraseWindow.count > Self.phraseWindowCap {
                     phraseWindow.removeFirst()
                 }
-                let maxScanLen = min(Self.maxPhraseLen, phraseWindow.count / Self.minPhraseRepeats)
-                if maxScanLen >= 2 {
-                    for phraseLen in 2...maxScanLen {
-                        if Self.tailRepeats(phraseWindow, phraseLen: phraseLen, minRepeats: Self.minPhraseRepeats) {
-                            break generationLoop
-                        }
-                    }
+                if Self.phraseGuardShouldTrip(
+                    grammarActive: grammarGate.isGrammarActive,
+                    window: phraseWindow,
+                    maxPhraseLen: Self.maxPhraseLen,
+                    minRepeats: Self.minPhraseRepeats
+                ) {
+                    break generationLoop
                 }
 
                 // Route the decoded token through the unified chain. The session
@@ -947,6 +965,40 @@ import ManifoldHardware
     }
 
     // MARK: - Phrase Detection
+
+    /// Decides whether the phrase-level repetition guard should terminate the
+    /// generation loop for the current decoded-token window (issue #141).
+    ///
+    /// When the grammar is *actively constraining* the current token
+    /// (`grammarActive == true`), the guard is exempt: a GBNF grammar can
+    /// legitimately require repeated near-identical structured output (e.g.
+    /// duplicate JSON entity entries during extraction), and hard-breaking the
+    /// loop mid-phrase there leaves unterminated, unparseable JSON — defeating
+    /// the grammar's whole purpose. Callers must pass the per-token constraint
+    /// state (`GrammarPhaseGate.isGrammarActive`), NOT the static "a grammar was
+    /// requested" flag: under thinking+grammar gating the reasoning phase is
+    /// unconstrained free text and must keep the runaway protection. Tokens the
+    /// grammar does not constrain keep the original scan-and-trip behaviour
+    /// (smollm2-class runaway protection).
+    ///
+    /// Extracted from the generation loop so the decision is unit-testable
+    /// without a real model — mirrors the existing `tailRepeats` test seam.
+    @_spi(Testing) public static func phraseGuardShouldTrip(
+        grammarActive: Bool,
+        window: [String],
+        maxPhraseLen: Int,
+        minRepeats: Int
+    ) -> Bool {
+        guard !grammarActive else { return false }
+        let maxScanLen = min(maxPhraseLen, window.count / minRepeats)
+        guard maxScanLen >= 2 else { return false }
+        for phraseLen in 2...maxScanLen {
+            if tailRepeats(window, phraseLen: phraseLen, minRepeats: minRepeats) {
+                return true
+            }
+        }
+        return false
+    }
 
     /// Returns true when the tail of `window` contains `minRepeats` consecutive
     /// identical phrases of length `phraseLen`.
