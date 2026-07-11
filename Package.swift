@@ -27,7 +27,7 @@ let package = Package(
         .executable(name: "manifold-llama-eval", targets: ["manifold-llama-eval"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.68.0")),
+        .package(url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.69.0")),
         // swift-jinja (test-only): lets the gemma-4 render-fixture tests render the
         // vendored `tokenizer.chat_template` string directly — `PromptRenderer` /
         // `JinjaPromptRenderer` are `internal` to ManifoldInference and unreachable
