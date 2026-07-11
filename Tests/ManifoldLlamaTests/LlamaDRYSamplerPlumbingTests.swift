@@ -88,5 +88,83 @@ final class LlamaDRYSamplerPlumbingTests: XCTestCase {
         let prefix = ["x","y","z","p","q"]
         XCTAssertTrue(LlamaGenerationDriver.tailRepeats(prefix + ["a","b","a","b","a","b"], phraseLen: 2, minRepeats: 3))
     }
+
+    // MARK: - Phrase guard grammar exemption (issue #141)
+    //
+    // ``LlamaGenerationDriver/phraseGuardShouldTrip(hasGrammar:window:maxPhraseLen:minRepeats:)``
+    // is the extracted decision the generation loop calls before `break
+    // generationLoop`-ing on a repeated phrase. These tests drive it directly
+    // with synthetic decoded-token strings — no GGUF model required — proving
+    // both halves of the issue's acceptance criteria:
+    //   1. a grammar-active run whose tokens repeat a phrase >=3x must NOT trip
+    //      the guard (repeated JSON blocks are legitimate under GBNF);
+    //   2. a non-grammar run with the exact same repeated phrase still trips
+    //      it (smollm2-class runaway protection is unchanged).
+    //
+    // Fully deterministic: no async, no model, no randomness.
+
+    func test_phraseGuardShouldTrip_grammarActive_repeatedPhrase_doesNotTrip() {
+        // Same repeated-phrase shape as test_tailRepeats_threeConsecutivePhrases_returnsTrue
+        // (tail = [a, b, a, b, a, b]) — under grammar this must be exempted.
+        let window = ["x", "a", "b", "a", "b", "a", "b"]
+
+        XCTAssertFalse(
+            LlamaGenerationDriver.phraseGuardShouldTrip(
+                hasGrammar: true,
+                window: window,
+                maxPhraseLen: 20,
+                minRepeats: 3
+            ),
+            "Grammar-constrained runs must be exempt from the phrase-repetition guard (#141): "
+            + "a legitimately repeated structured-output phrase must not early-exit the loop."
+        )
+    }
+
+    func test_phraseGuardShouldTrip_noGrammar_repeatedPhrase_stillTrips() {
+        // Identical window to the grammar-active case above — only `hasGrammar`
+        // differs. Non-grammar behavior must be unchanged from pre-#141.
+        let window = ["x", "a", "b", "a", "b", "a", "b"]
+
+        XCTAssertTrue(
+            LlamaGenerationDriver.phraseGuardShouldTrip(
+                hasGrammar: false,
+                window: window,
+                maxPhraseLen: 20,
+                minRepeats: 3
+            ),
+            "Non-grammar runs must retain the original phrase-repetition early exit "
+            + "(smollm2-class runaway protection) — the grammar exemption must not "
+            + "weaken this path."
+        )
+    }
+
+    func test_phraseGuardShouldTrip_grammarActive_noRepeat_doesNotTrip() {
+        // Sabotage-adjacent: without a repeat at all, grammar-active must also
+        // stay false — confirms the exemption isn't vacuously true because the
+        // window itself never trips regardless of the flag.
+        let window = ["a", "b", "c", "d", "e", "f"]
+
+        XCTAssertFalse(
+            LlamaGenerationDriver.phraseGuardShouldTrip(
+                hasGrammar: true,
+                window: window,
+                maxPhraseLen: 20,
+                minRepeats: 3
+            )
+        )
+    }
+
+    func test_phraseGuardShouldTrip_noGrammar_noRepeat_doesNotTrip() {
+        let window = ["a", "b", "c", "d", "e", "f"]
+
+        XCTAssertFalse(
+            LlamaGenerationDriver.phraseGuardShouldTrip(
+                hasGrammar: false,
+                window: window,
+                maxPhraseLen: 20,
+                minRepeats: 3
+            )
+        )
+    }
 }
 
