@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/ManifoldKit/manifold-llama/compare/v0.3.3...v0.3.4) (2026-07-17)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.72.0 ([#150](https://github.com/ManifoldKit/manifold-llama/issues/150)) ([10b6386](https://github.com/ManifoldKit/manifold-llama/commit/10b638641ffd30b97e28cf8602d5246985d30f91))
+
 ## [0.3.3](https://github.com/ManifoldKit/manifold-llama/compare/v0.3.2...v0.3.3) (2026-07-13)
 
 
