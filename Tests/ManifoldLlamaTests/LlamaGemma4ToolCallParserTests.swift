@@ -5,9 +5,9 @@ import ManifoldLlama
 
 /// Fixture tests for the gemma-4 native tool-call output parser path.
 ///
-/// These tests exercise `LlamaToolMarkers.markers()`, `ToolCallTransform`, and
-/// `LlamaBackend.setStructuredHistory()` with no GGUF model loaded — they run
-/// entirely in-process and complete in milliseconds.
+/// These tests exercise `LlamaToolMarkers.markers()` and `ToolCallTransform`
+/// with no GGUF model loaded — they run entirely in-process and complete in
+/// milliseconds.
 ///
 /// Appended to the `LlamaToolCallParserTests.swift` compilation unit pattern:
 /// a companion file of the parser suite that focuses specifically on:
@@ -15,8 +15,11 @@ import ManifoldLlama
 ///   2. End-to-end parse — gemma-4-style text chunk → `.toolCall` event
 ///   3. Truncation surface — incomplete body with `surfaceTruncatedToolBody: true`
 ///      emits `.toolCallTruncated` (coverage added in PR #50)
-///   4. `setStructuredHistory` storage — the backend stores the value under its
-///      state lock and exposes it via `@_spi(Testing) structuredHistoryForTesting`
+///
+/// Multi-turn tool-result threading (previously covered here via
+/// `LlamaBackend.setStructuredHistory()`) moved to per-call
+/// `GenerationRuntimeHints.history` (#2312) — see
+/// `LlamaToolCallE2ETests.test_multiTurn_toolResult_acceptedByBackend`.
 
 // MARK: - Helpers
 
@@ -208,77 +211,9 @@ final class LlamaGemma4TruncationTests: XCTestCase {
     }
 }
 
-// MARK: - setStructuredHistory storage
-
-/// Verifies that `LlamaBackend.setStructuredHistory(_:)` stores the supplied
-/// history under its state lock and that the stored value is retrievable via
-/// the `@_spi(Testing)` accessor added in issue #45.
-///
-/// No model load is performed — the backend is instantiated and the setter is
-/// called directly, exercising only the lock + assignment path.
-final class LlamaBackendStructuredHistoryStorageTests: XCTestCase {
-
-    func test_setStructuredHistory_storesMessages() {
-        // Sabotage: remove the `withStateLock` guard from `structuredHistoryForTesting`
-        // (or from `setStructuredHistory`) and this test still passes functionally —
-        // but the guard is exercised by the concurrent-access sanitiser (TSan). To catch
-        // the lock removal structurally, change `_structuredHistory = []` to not store
-        // the value and `stored.count` drops to 0, failing the XCTAssertEqual below.
-        let backend = LlamaBackend()
-        let messages: [StructuredMessage] = [
-            StructuredMessage(role: "user", content: "What is the weather in Tokyo?"),
-            StructuredMessage(role: "assistant", content: "<|tool_call>\ncall:get_weather{city:<|\"|>Tokyo<|\"|>}\n<tool_call|>"),
-        ]
-
-        backend.setStructuredHistory(messages)
-
-        let stored = backend.structuredHistoryForTesting
-        XCTAssertEqual(stored.count, 2)
-        XCTAssertEqual(stored[0].role, "user")
-        XCTAssertEqual(stored[1].role, "assistant")
-    }
-
-    func test_setStructuredHistory_replacesExistingHistory() {
-        let backend = LlamaBackend()
-
-        backend.setStructuredHistory([
-            StructuredMessage(role: "user", content: "First turn"),
-        ])
-        backend.setStructuredHistory([
-            StructuredMessage(role: "user", content: "Second turn"),
-            StructuredMessage(role: "assistant", content: "Response"),
-        ])
-
-        let stored = backend.structuredHistoryForTesting
-        XCTAssertEqual(stored.count, 2,
-                       "setStructuredHistory must replace, not append to, the prior history")
-        XCTAssertEqual(stored[0].textContent, "Second turn")
-    }
-
-    func test_setStructuredHistory_withToolResultPart_isAccepted() {
-        // Structural check — verifies the backend accepts a history entry
-        // whose parts include a ToolResult without crashing or discarding.
-        let backend = LlamaBackend()
-        let toolResultMessage = StructuredMessage(
-            role: "tool",
-            parts: [.toolResult(ToolResult(callId: "llama-get_weather-abc123",
-                                           content: "Sunny, 22 °C"))])
-
-        backend.setStructuredHistory([toolResultMessage])
-
-        let stored = backend.structuredHistoryForTesting
-        XCTAssertEqual(stored.count, 1)
-        XCTAssertEqual(stored[0].role, "tool")
-    }
-
-    func test_setStructuredHistory_withEmptyArray_clearsHistory() {
-        let backend = LlamaBackend()
-        backend.setStructuredHistory([
-            StructuredMessage(role: "user", content: "Hello"),
-        ])
-        backend.setStructuredHistory([])
-
-        XCTAssertTrue(backend.structuredHistoryForTesting.isEmpty,
-                      "setStructuredHistory([]) must clear any previously stored history")
-    }
-}
+// removed: structured-history storage retired in ManifoldKit #2312 — history
+// threads per-call via `GenerationRuntimeHints.history` rather than being
+// stored on the backend instance, so there is no longer a lock + assignment
+// path to exercise here. The behavioral coverage this file's storage tests
+// stood in for (a tool result actually reaching the next `generate()` call)
+// lives in `LlamaToolCallE2ETests.test_multiTurn_toolResult_acceptedByBackend`.

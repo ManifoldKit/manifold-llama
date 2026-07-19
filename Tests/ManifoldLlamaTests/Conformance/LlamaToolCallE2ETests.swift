@@ -16,7 +16,8 @@ import ManifoldLlama
 /// pre-baked into the rendered prompt string via `InferenceService`'s
 /// `PromptAssembler`. The backend generates text; `LlamaGenerationDriver` parses
 /// tool calls via `ToolCallTransform`. Tool results for multi-turn round-trips flow
-/// via `setStructuredHistory()` / `StructuredHistoryReceiver`.
+/// per-call via `GenerationRuntimeHints.history` (#2312) — the backend no longer
+/// stores conversation history on instance state.
 ///
 /// ## Gating
 /// These tests require a locally available gemma-4 GGUF and are skipped unless:
@@ -122,13 +123,14 @@ final class LlamaToolCallE2ETests: XCTestCase {
 
     // MARK: - Multi-turn: tool result accepted without error
 
-    /// Multi-turn structural check: after a tool result is fed back via
-    /// `setStructuredHistory`, assert the backend accepts it without error.
+    /// Multi-turn structural check: after a tool result is threaded back via
+    /// `GenerationRuntimeHints.history` (#2312), assert the backend accepts it
+    /// without error.
     ///
     /// Content verification is intentionally omitted — the model's follow-up
     /// response to a tool result is model-weight-dependent and not stable enough
     /// for a deterministic assertion. This test validates the structural wiring
-    /// only: the backend must accept the history, store it, and start a second
+    /// only: the backend must accept the history hint and start a second
     /// generation without throwing.
     func test_multiTurn_toolResult_acceptedByBackend() async throws {
         let modelURL = try requireModelURL()
@@ -173,8 +175,9 @@ final class LlamaToolCallE2ETests: XCTestCase {
             if case .toolCall(let tc) = event { return tc.id } else { return nil }
         }.first ?? "llama-get_weather-synthetic"
 
-        // Turn 2: feed back a synthetic tool result via setStructuredHistory,
-        // then issue a follow-up generation. The backend must not throw.
+        // Turn 2: feed back a synthetic tool result via
+        // `GenerationRuntimeHints.history` (#2312), then issue a follow-up
+        // generation. The backend must not throw.
         let history: [StructuredMessage] = [
             StructuredMessage(role: "user", content: "What is the weather in Tokyo?"),
             StructuredMessage(
@@ -186,13 +189,6 @@ final class LlamaToolCallE2ETests: XCTestCase {
                     callId: callId,
                     content: "Sunny, 28 °C in Tokyo"))]),
         ]
-
-        backend.setStructuredHistory(history)
-
-        // Structural assertion: the history was stored under the state lock.
-        let stored = backend.structuredHistoryForTesting
-        XCTAssertEqual(stored.count, 3,
-                       "Backend must store all three structured history entries")
 
         // Turn 2 prompt: follow-up asking the model to use the tool result.
         let turn2Prompt = PromptTemplate.gemma4.format(
@@ -206,9 +202,15 @@ final class LlamaToolCallE2ETests: XCTestCase {
             tools: [weatherTool]
         )
 
-        // Drain the second generation; the key assertion is that it does NOT throw.
+        // Drain the second generation; the key assertion is that it does NOT
+        // throw when the history hint is threaded through.
         var turn2Events: [GenerationEvent] = []
-        let stream2 = try backend.generate(prompt: turn2Prompt, systemPrompt: nil, config: config)
+        let stream2 = try backend.generate(
+            prompt: turn2Prompt,
+            systemPrompt: nil,
+            config: config,
+            hints: GenerationRuntimeHints(history: history)
+        )
         for try await event in stream2 {
             turn2Events.append(event)
         }

@@ -344,13 +344,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { isGenerating = value }
     }
 
-    /// Snapshot of the structured history most recently supplied via
-    /// ``StructuredHistoryReceiver/setStructuredHistory(_:)``. Lets headless tests
-    /// assert that the value was stored without running a real decode.
-    @_spi(Testing) public var structuredHistoryForTesting: [StructuredMessage] {
-        withStateLock { _structuredHistory }
-    }
-
     // MARK: - Multimodal Projector
 
     /// URL of the mmproj companion file, set by ``MultimodalProjectorConfigurable`` before each load.
@@ -361,9 +354,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     /// to advertise `supportsVision = false` until that binding exists.
     private var _mmprojURL: URL?
 
-    /// Structured history set by ``StructuredHistoryReceiver``. Guarded by `stateLock`.
-    /// Used in ``generate(prompt:systemPrompt:config:)`` to detect image parts in the current turn.
-    private var _structuredHistory: [StructuredMessage] = []
 
     /// Owns the serialized model-load path and the C-level parameter/progress-callback bridging.
     private let modelLoader = LlamaModelLoader()
@@ -571,7 +561,11 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         // bundled xcframework (mattt/llama.swift 2.8772.0, llama.cpp build
         // b8772); upgrading to a build that exposes clip.h / mtmd.h will
         // unblock real image embedding.
-        let history = withStateLock { _structuredHistory }
+        // Conversation history arrives per-call on `hints.history` (#2312) — not
+        // from shared instance state. LlamaBackend consumes the pre-rendered
+        // `prompt`; it only inspects the structured history here to reject
+        // image-bearing turns the vendored xcframework can't embed.
+        let history = hints.history
         let hasImageParts = history.contains { msg in
             msg.parts.contains {
                 if case .image = $0 { return true }
@@ -866,7 +860,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         _autoDetectedThinkingMarkers = nil
         _manifest = nil
         _mmprojURL = nil
-        _structuredHistory = []
         _lastUsage = nil
         // An in-flight load is superseded: clear the in-flight flag immediately
         // so callers see the unloaded state. _activeLoadTask is intentionally
@@ -1047,16 +1040,6 @@ extension LlamaBackend: MultimodalProjectorConfigurable {
     /// ``BackendCapabilities/supportsVision`` until this backend can embed images.
     public func setMmprojURL(_ url: URL?) {
         withStateLock { _mmprojURL = url }
-    }
-}
-
-// MARK: - StructuredHistoryReceiver
-
-extension LlamaBackend: StructuredHistoryReceiver {
-    /// Caches the structured conversation history so ``generate(prompt:systemPrompt:config:)``
-    /// can detect image parts and surface a clear error when they are present.
-    public func setStructuredHistory(_ messages: [StructuredMessage]) {
-        withStateLock { _structuredHistory = messages }
     }
 }
 

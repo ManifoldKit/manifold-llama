@@ -1102,14 +1102,19 @@ final class LlamaBackendTests: XCTestCase {
                 .image(data: imageData, mimeType: "image/jpeg")
             ])
         ]
-        backend.setStructuredHistory(history)
 
         // The image guard runs before the model-loaded guard so a caller hits
         // the actionable xcframework-limitation message even when no model is
         // loaded. Asserting on the message text proves we hit the image guard
-        // and not the generic "No model loaded" path.
+        // and not the generic "No model loaded" path. History now arrives
+        // per-call on `hints.history` (#2312), not shared instance state.
         XCTAssertThrowsError(
-            try backend.generate(prompt: "Describe this image:", systemPrompt: nil, config: GenerationConfig())
+            try backend.generate(
+                prompt: "Describe this image:",
+                systemPrompt: nil,
+                config: GenerationConfig(),
+                hints: GenerationRuntimeHints(history: history)
+            )
         ) { error in
             guard let inferenceError = error as? InferenceError,
                   case let .inferenceFailure(message) = inferenceError else {
