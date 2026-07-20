@@ -450,13 +450,24 @@ import ManifoldInference
         // tensors; expected N, got M") because the audio/vision/mmproj tensors are
         // unclaimed. See issue #62.
         //
-        // NOTE: `gemma4` is intentionally NOT denylisted — the pinned build
-        // (b9744) loads TEXT-ONLY gemma4 GGUFs (e.g. unsloth/gemma-4-E4B-it-GGUF)
-        // fine; only the older FUSED single-GGUF packaging trips the tensor-count
-        // abort, and a fused single-GGUF is not a supported text-inference input
-        // (it now surfaces llama.cpp's tensor-count error rather than our typed
-        // error — an acceptable tradeoff). `gemma3n` stays denied: its fused
-        // packaging is the only common form and its text loader is unverified here.
+        // NOTE: `gemma4` is intentionally NOT denylisted — as of the pinned
+        // build at the time this was written (b9744), TEXT-ONLY gemma4 GGUFs
+        // (e.g. unsloth/gemma-4-E4B-it-GGUF) loaded fine; only the older FUSED
+        // single-GGUF packaging tripped the tensor-count abort, and a fused
+        // single-GGUF is not a supported text-inference input (it surfaces
+        // llama.cpp's tensor-count error rather than our typed error — an
+        // acceptable tradeoff). `gemma3n` stays denied: its fused packaging is
+        // the only common form and its text loader is unverified here.
+        //
+        // PIN STALENESS: the binaryTarget pin has since moved b9744 -> b9859
+        // (#127); the claims above were VERIFIED only at b9744 and have not
+        // been re-checked since — treat them as ASSUMED, not current fact.
+        // Upstream ggml-org/llama.cpp #21434 (sliding_window_pattern dtype)
+        // and #21497 (Gemma-4-26B-A4B image processing, fixed by b9093) are
+        // both CLOSED-COMPLETED, and b9859 is well past b9093, so the FUSED
+        // gemma4 case may now load too — that is speculation, not verified.
+        // Re-verify both the text-only and fused claims against a real gemma4
+        // fixture before relying on this comment again. See issue #67.
         "gemma3n",      // Gemma 3n fused-multimodal (the HF/upstream arch name)
     ]
 
