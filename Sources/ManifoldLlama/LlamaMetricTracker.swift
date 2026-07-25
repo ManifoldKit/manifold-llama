@@ -51,7 +51,14 @@ final class LlamaMetricTracker: @unchecked Sendable {
         if firstTokenInstant == nil {
             firstTokenInstant = now
         } else if let last = lastTokenInstant {
-            interTokenGapsNs.append(Self.nanoseconds(of: now - last))
+            // Monotonic clamp, matching `buildMetric`'s `wallStart <= wallEnd`
+            // / `wallStart <= first` defensive clamps below. Unreachable in
+            // practice with `ContinuousClock` (never goes backwards), but
+            // this file already pays for that defense twice — pay it here
+            // too rather than being the one path that would silently feed a
+            // negative nanosecond count into the running sum (and hence the
+            // mean) if it ever were reached.
+            interTokenGapsNs.append(now >= last ? Self.nanoseconds(of: now - last) : 0)
         }
         lastTokenInstant = now
         tokenCount += 1

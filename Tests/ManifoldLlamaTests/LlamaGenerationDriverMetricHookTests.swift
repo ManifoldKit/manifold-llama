@@ -37,18 +37,8 @@ final class LlamaGenerationDriverMetricHookTests: XCTestCase {
 
     // MARK: - onError wiring
 
-    /// A decode failure must fire `onError("decodeFailed")` exactly once,
-    /// BEFORE the continuation finishes with the thrown error. Ordering is
-    /// asserted directly — the same `recorder` captures both the `onError`
-    /// call and the drain task observing the stream's terminal error, so a
-    /// sabotage that moved `onError?(...)` to after `continuation.finish(
-    /// throwing:)` inside `finishDecodeFailure` would flip the recorded
-    /// order and fail this. (A version of this test that read the recorder
-    /// only synchronously, before awaiting the drain task, would NOT catch
-    /// that reordering — `onError` is synchronous and always completes
-    /// before `finishDecodeFailure` returns either way; only checking the
-    /// interleaving against the drain task's own record makes the ordering
-    /// claim real.)
+    /// A decode failure must fire `onError("decodeFailed")` exactly once.
+    /// The label is asserted via `recorder`.
     func test_finishDecodeFailure_firesOnErrorWithDecodeFailedLabel() async throws {
         let (stream, continuation) = makeStream()
         let recorder = ErrorRecorder()
@@ -58,7 +48,6 @@ final class LlamaGenerationDriverMetricHookTests: XCTestCase {
                 for try await _ in stream.events { }
                 return nil
             } catch {
-                recorder.record("stream-finished")
                 return error
             }
         }
@@ -74,8 +63,79 @@ final class LlamaGenerationDriverMetricHookTests: XCTestCase {
         let thrown = await drainTask.value
         XCTAssertFalse(coherent, "a decode failure must report KV state as incoherent")
         XCTAssertNotNil(thrown, "the continuation must finish with a thrown error")
-        XCTAssertEqual(recorder.labels, ["decodeFailed", "stream-finished"],
-            "onError must fire BEFORE the continuation finishes with the thrown error")
+        XCTAssertEqual(recorder.labels, ["decodeFailed"])
+    }
+
+    /// `onError` must fire BEFORE `finishDecodeFailure` finishes the
+    /// continuation with the thrown error — asserted DETERMINISTICALLY, not
+    /// via a concurrent drain task racing to observe an interleaving.
+    ///
+    /// An earlier version of this test used a second `Task` draining
+    /// `stream.events` and had it append `"stream-finished"` to the SAME
+    /// recorder `onError` writes to, asserting the two labels landed in
+    /// `["decodeFailed", "stream-finished"]` order. That version passed
+    /// under the correct code — but it could not have caught the sabotage it
+    /// claimed to: `finishDecodeFailure`'s body from `onError?(...)` through
+    /// `continuation.finish(throwing:)` has no suspension point (`onError` →
+    /// `synchronize()` → `await MainActor.run` → `finish` — the `await` runs
+    /// AFTER both calls, not between them), so the calling task always
+    /// records BOTH labels to completion, back-to-back, before yielding to
+    /// the scheduler at all. Moving `onError?(...)` to after
+    /// `continuation.finish(throwing:)` inside `finishDecodeFailure`
+    /// therefore ALSO produces `["decodeFailed", "stream-finished"]` — a
+    /// standalone repro of that exact call pattern reproduced the "expected"
+    /// order in 500/500 trials. The old test could not distinguish the
+    /// correct code from the sabotage.
+    ///
+    /// This version probes `continuation`'s own live/terminated state
+    /// directly, from inside the `onError` closure itself, with no second
+    /// Task involved: `AsyncThrowingStream.Continuation.yield(_:)` returns
+    /// `.enqueued(remaining:)` while the stream is still open, and
+    /// `.terminated` once `finish`/`finish(throwing:)` has already run. If
+    /// `onError` genuinely fires before `finish`, the probe observes
+    /// `.enqueued`; if a sabotage moves `onError` after `finish`, the SAME
+    /// call observes `.terminated` instead — a real, load-bearing signal
+    /// with no timing dependency.
+    func test_finishDecodeFailure_firesOnErrorBeforeContinuationFinishes() async throws {
+        let (stream, continuation) = makeStream()
+
+        // Drain concurrently so the stream doesn't back up — not used for
+        // ordering evidence (see doc comment above for why that approach
+        // doesn't work).
+        let drainTask = Task<Error?, Never> {
+            do {
+                for try await _ in stream.events { }
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        nonisolated(unsafe) var yieldResultAtOnError: AsyncThrowingStream<GenerationEvent, Error>.Continuation.YieldResult?
+
+        let coherent = await LlamaGenerationDriver.finishDecodeFailure(
+            message: "synthetic decode failure",
+            synchronize: {},
+            generationStream: stream,
+            continuation: continuation,
+            onError: { _ in
+                // Injects one harmless extra `.token` event ahead of the
+                // eventual thrown error; the drain loop above only cares
+                // about the terminal error, so this is a no-op for it.
+                yieldResultAtOnError = continuation.yield(.token(""))
+            }
+        )
+
+        let thrown = await drainTask.value
+        XCTAssertFalse(coherent)
+        XCTAssertNotNil(thrown)
+
+        guard case .enqueued = yieldResultAtOnError else {
+            XCTFail("onError must fire BEFORE continuation.finish(throwing:) — "
+                + "expected .enqueued (stream still live), observed "
+                + "\(String(describing: yieldResultAtOnError)) (stream already finished)")
+            return
+        }
     }
 
     /// `onError` defaults to `nil` — existing callers (including this

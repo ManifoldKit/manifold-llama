@@ -7,10 +7,18 @@ import ManifoldTestSupport
 /// itself (#142) — the class of sabotage `LlamaBackendMetricSinkTests`
 /// (headless, tests `LlamaMetricTracker.emitMetric` directly) cannot reach:
 /// deleting the `emitMetric(...)` call inside `generate()`'s `defer`,
-/// hardcoding `metricsEnabled = false`, deleting the `onToken:`/`onError:`
-/// arguments at the `driver.run(...)` call site, or deleting `onToken?()`
-/// inside the driver's `.token` case. All of those require a real generation
-/// to actually run for their absence to be observable.
+/// hardcoding `metricsEnabled = false`, deleting the `onToken:` argument at
+/// the `driver.run(...)` call site, or deleting `onToken?()` inside the
+/// driver's `.token` case. All of those require a real generation to
+/// actually run for their absence to be observable.
+///
+/// This suite is a HAPPY-PATH turn only, so it does NOT reach the backend's
+/// `onError:` wiring at the `driver.run(...)` call site or the
+/// `recordError("backendUnloaded")` branch in `generate()`'s early bail —
+/// both would need a forced decode failure or a lifecycle race against a
+/// real `llama_context`, which this test does not attempt. See Tier 3 in
+/// the PR body for that gap; nothing in this repo's test tree currently
+/// covers it.
 ///
 /// Gated on Apple Silicon + Metal + a discoverable GGUF, mirroring
 /// `RawPromptEvalRunnerTests`/`LlamaLocalBackendContractTests` — `XCTSkip`s
@@ -26,11 +34,14 @@ final class LlamaBackendMetricSinkE2ETests: XCTestCase {
     /// `provider == "llama"`.
     ///
     /// A sabotage that deleted the `emitMetric(...)` call in `generate()`'s
-    /// `defer`, hardcoded `metricsEnabled = false`, dropped `onToken:`/
-    /// `onError:` at the `driver.run(...)` call site, or dropped `onToken?()`
-    /// inside the driver's `.token` case would each be caught here: the first
-    /// three by an empty/zero-shaped metric or no metric at all, the last by
-    /// `completionTokens == 0` while `tokens.count > 0`.
+    /// `defer`, hardcoded `metricsEnabled = false`, or dropped `onToken:` at
+    /// the `driver.run(...)` call site would each be caught here by an
+    /// empty/zero-shaped metric or no metric at all. Dropping `onToken?()`
+    /// inside the driver's `.token` case is caught by `completionTokens ==
+    /// 0` while `tokenEventCount > 0`. Dropping `onError:` at the
+    /// `driver.run(...)` call site is NOT caught here — this is a clean
+    /// successful turn, so `errorClass == nil` regardless of whether
+    /// `onError:` is wired at all (see the type-level doc comment above).
     func test_generate_realTurn_emitsExactlyOnePlausibleMetric() async throws {
         try XCTSkipUnless(HardwareRequirements.isPhysicalDevice,
                           "LlamaBackend requires Metal (unavailable in simulator)")
