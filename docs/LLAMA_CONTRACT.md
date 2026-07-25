@@ -824,6 +824,73 @@ only the hosting moved (upstream → this repo's releases) and the bytes shrank.
 > rebuild after uploading: upload the exact zip the script produced and pin that
 > same file's printed checksum.
 
+### Trust chain — what the checksum pin does and does not prove
+
+The 2026-07-19 independent evaluation of ManifoldKit (§10) flagged this
+precisely, and it is worth stating without over- or under-claiming:
+
+```
+ggml-org CI build → our download → our repackage (drops-only) → our checksum pin
+```
+
+- **`Package.swift`'s `.binaryTarget(url:, checksum:)`** pins the SwiftPM
+  package checksum of *our* slim zip. SwiftPM verifies this at resolve time.
+  It proves the bytes a consumer downloads are byte-identical to the bytes we
+  uploaded — **integrity after publication.** It does **not** prove those
+  bytes were compiled from a reviewed llama.cpp source revision: the checksum
+  is computed *after* we download + repackage, so it attests "same bytes I
+  saw," not "compiled from source revision X."
+- **`scripts/repackage-xcframework.sh`** downloads the upstream
+  `llama-<BUILD>-xcframework.zip` and now (as of the checksum-verification
+  work below) asserts its SHA256 against a value pinned per-`BUILD` in
+  `expected_upstream_sha256()`, **before** any extraction or
+  `xcodebuild -create-xcframework` repackaging begins. This closes the
+  actual threat identified in the evaluation: a compromised or substituted
+  upstream release asset that we would otherwise faithfully repackage and
+  re-host under our name with an intact-looking zip (the pre-existing
+  `unzip -t` check only catches corruption/truncation, not tampering). A
+  `BUILD` with no recorded expected checksum fails closed — the script
+  refuses to proceed unless `ALLOW_UNVERIFIED_UPSTREAM=1` is set explicitly
+  (see the script's step 1b for how to add a new pinned value).
+- The repackage step itself (drop tvOS/visionOS slices + dSYMs,
+  `xcodebuild -create-xcframework`) is auditable — it's drops-only, no
+  compiled bytes are altered — and is the one thing this project adds over
+  "depend on ggml-org's asset directly."
+- **What is still NOT proven:** that the upstream asset's compiled bytes
+  correspond to a specific, reviewed llama.cpp source commit. Closing that
+  gap requires compiling llama.cpp from pinned source across all Apple
+  slices — the "full source-rebuild / byte-reproducibility" item below,
+  which is explicitly **deferred**, not started.
+- Each `vendor-llama-<BUILD>` release should carry a provenance record in
+  this shape: upstream tag, upstream asset URL, upstream SHA256, our slim
+  SwiftPM checksum, and the `repackage-xcframework.sh` commit that produced
+  it. See `docs/PROVENANCE-b9859.md` for the current pin's record.
+
+#### Deferred: signed build-provenance attestation on the vendor release
+
+Extending ManifoldKit core's `release-provenance.yml` (Sigstore
+`attest-build-provenance`) pattern to the `vendor-llama-*` slim-zip upload is
+**deferred to [#161](https://github.com/ManifoldKit/manifold-llama/issues/161)**,
+not done in this change. Reason: this
+repo currently has no workflow that uploads the vendor binary at all — the
+repackage-and-host step is a manual maintainer action (`gh release create
+vendor-llama-<BUILD> …`, see above), not CI. Wiring an attestation onto that
+upload needs a macOS runner and can't be exercised/proven without cutting a
+real vendor release, so it's tracked separately rather than bundled here.
+
+#### Deferred: full source-rebuild / byte-reproducibility
+
+Compiling llama.cpp from pinned source (rather than repackaging ggml-org's
+prebuilt binary) would close the remaining gap — "these exact bytes came
+from source revision X" — but is the heaviest fix: a Metal build across all
+Apple slices in CI, exactly the weight `scripts/repackage-xcframework.sh`
+exists to avoid. It stays a deferred P3 item, tracked against the same
+evaluation finding as the two items above. **Not started; do not claim
+reproducibility of either the upstream binary or the repackage step until
+this is actually done** — see the "Determinism caveat" above for the
+repackage step specifically (it is empirically *not* byte-reproducible as
+measured for b9859).
+
 To re-cut it for a new build:
 
 1. Run `scripts/repackage-xcframework.sh` (defaults to `b9859`; override with
