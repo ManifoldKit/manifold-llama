@@ -1064,16 +1064,16 @@ final class LlamaBackendTests: XCTestCase {
 
     // MARK: - Multimodal Projector (supportsVision)
 
-    /// `supportsVision` is currently hardwired to the constant
-    /// `BackendVisionCapability.llamaSupportsImageInput` (false) and does NOT read
-    /// `_mmprojURL` — the vendored llama.cpp xcframework lacks the CLIP/mtmd APIs
-    /// needed to embed images. This single test honestly documents that the flag
-    /// is constant-false regardless of mmproj state (set / cleared / after unload);
-    /// it is a known-constant guard, NOT a behavioral test of mmproj wiring.
+    /// `supportsVision` is computed via
+    /// `BackendVisionCapability.llamaSupportsImageInput(projectorStaged:engineSupportsImageEmbedding:)`
+    /// (ManifoldKit #2381). Until image embedding is wired we pass `false` for
+    /// both halves and do NOT derive `projectorStaged` from `_mmprojURL` — the
+    /// MultimodalProjectorConfigurable contract requires a real embedding path,
+    /// not merely a staged projector. This test documents that the flag stays
+    /// false regardless of mmproj state (set / cleared / after unload).
     ///
-    /// When image embedding is wired, `supportsVision` will become a function of
-    /// `_mmprojURL` and this test must be replaced with real per-state assertions
-    /// (and the mmproj-clearing/unload behavior given its own observable contract).
+    /// When image embedding lands (manifold-llama#152), both halves should track
+    /// real state and this test must be replaced with per-state assertions.
     func test_capabilities_supportsVision_isConstantFalseUntilImageEmbeddingWired() {
         let backend = LlamaBackend()
         XCTAssertFalse(backend.capabilities.supportsVision,
@@ -1081,7 +1081,7 @@ final class LlamaBackendTests: XCTestCase {
 
         backend.setMmprojURL(URL(fileURLWithPath: "/nonexistent/mmproj-model.gguf"))
         XCTAssertFalse(backend.capabilities.supportsVision,
-                       "still false after setMmprojURL — the flag is a constant, not derived from the URL")
+                       "still false after setMmprojURL — embedding path not wired yet")
 
         backend.setMmprojURL(nil)
         XCTAssertFalse(backend.capabilities.supportsVision, "still false after clearing")
