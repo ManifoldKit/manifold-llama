@@ -155,6 +155,14 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     /// stream. Guarded by `stateLock`.
     private var _lastUsage: (promptTokens: Int, completionTokens: Int)?
 
+    /// The sink that receives an ``InferenceMetric`` after every generation call
+    /// (success, failure, or cancellation) — see ``generate(prompt:systemPrompt:config:hints:)``.
+    ///
+    /// Defaults to ``InMemoryMetricSink/shared`` so callers can read recent
+    /// metrics without any configuration, matching ``SSECloudBackend`` and
+    /// ``FoundationBackend``. Set to `nil` to disable metric emission.
+    public var metricSink: (any InferenceMetricSink)? = InMemoryMetricSink.shared
+
     public var capabilities: BackendCapabilities {
         let ctxSize = withStateLock { _effectiveContextSize }
         let architecture = withStateLock { _architecture }
@@ -664,6 +672,19 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: GenerationEvent.self)
         let generationStream = GenerationStream(stream)
 
+        // Metrics seam (#142). `metricTracker` is a lock-guarded accumulator
+        // (see LlamaMetricTracker) captured by reference into the Task below;
+        // `capturedMetricSink` / `promptTokenCount` / `modelIdentifier` are
+        // snapshotted here, outside the Task, so the eventual `sink.record(...)`
+        // call doesn't need to re-read backend state after the model may have
+        // been unloaded. `metricSink` itself is a plain (unlocked) property —
+        // mirrors `SSECloudBackend`/`FoundationBackend`, which read it the same
+        // way.
+        let metricTracker = LlamaMetricTracker()
+        let capturedMetricSink = metricSink
+        let promptTokenCount = tokens.count
+        let modelIdentifier = withStateLock { _manifest?.modelIdentifier } ?? "unknown"
+
         // Hold stateLock across Task creation AND generationTask assignment
         // (see install block below). The Task body's first action is a
         // stateLock re-read, which blocks until we release. That guarantees
@@ -678,9 +699,29 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 return
             }
 
+            // Dispatch clock starts here — the earliest point inside the task
+            // that can run before any `.token` event is possible. Must run
+            // before the defer below so even an early bail-out (pointers == nil)
+            // reports a (near-zero) wallClockDuration rather than reusing the
+            // tracker's `init`-time default.
+            metricTracker.start()
+
             defer {
                 self.withStateLock { self.isGenerating = false }
                 Self.logger.debug("Llama generate finished")
+                // Emit exactly once per generation, success or failure — this
+                // `defer` runs on every exit path of this Task body exactly
+                // once (Swift's `defer` semantics), including the early
+                // "pointers == nil" bail below, which is why that branch calls
+                // `metricTracker.recordError(...)` before returning.
+                if let sink = capturedMetricSink {
+                    let metric = metricTracker.buildMetric(
+                        provider: BackendName.llama.rawValue,
+                        model: modelIdentifier,
+                        promptTokens: promptTokenCount
+                    )
+                    Task { await sink.record(metric) }
+                }
             }
 
             // Re-acquire context and vocab under stateLock so we serialize
@@ -699,6 +740,10 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 return (ctx, voc)
             }
             guard let (context, vocab) = pointers else {
+                // Backend was unloaded out from under this generation before
+                // the driver ever ran. Not a decode/sampler failure, but still
+                // a failed generation from the metric's point of view.
+                metricTracker.recordError("backendUnloaded")
                 continuation.finish()
                 return
             }
@@ -728,7 +773,9 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                     self.withStateLock {
                         self._lastUsage = (promptTokens: promptTokens, completionTokens: completionTokens)
                     }
-                }
+                },
+                onToken: { metricTracker.recordToken() },
+                onError: { label in metricTracker.recordError(label) }
             )
             // A decode failure leaves the C KV cache in an undefined state.
             // Clear sessionKVState so the next turn does not attempt prefix reuse
