@@ -51,11 +51,29 @@ final class LlamaMetricTracker: @unchecked Sendable {
         if firstTokenInstant == nil {
             firstTokenInstant = now
         } else if let last = lastTokenInstant {
-            let gapNs = Int64((now - last).components.attoseconds / 1_000_000_000)
-            interTokenGapsNs.append(gapNs)
+            interTokenGapsNs.append(Self.nanoseconds(of: now - last))
         }
         lastTokenInstant = now
         tokenCount += 1
+    }
+
+    /// Converts a `Duration` to whole nanoseconds. Pure and testable without a
+    /// real clock — see the regression coverage for the ≥1s truncation bug
+    /// this exists to prevent.
+    ///
+    /// `Duration.components.attoseconds` is only the SUB-SECOND remainder —
+    /// it does NOT include whole seconds. Reading it alone silently truncates
+    /// any duration ≥ 1s to just its fractional part (e.g. a real 2.0s gap
+    /// reports as 0ns; a 1.5s gap reports as 0.5s). Sub-second gaps are the
+    /// common case for cloud SSE streaming, which is presumably why this
+    /// exact mistake exists upstream in `ManifoldInference`'s package-scoped
+    /// `GenerationMetricTracker` too — but local GGUF decode on a pressured
+    /// device routinely exceeds 1s/token, where this bug would silently
+    /// report FASTER inter-token latency the SLOWER generation actually is.
+    /// Must fold in the whole-seconds component explicitly.
+    static func nanoseconds(of duration: Duration) -> Int64 {
+        let components = duration.components
+        return components.seconds * 1_000_000_000 + components.attoseconds / 1_000_000_000
     }
 
     /// Records a short, stable failure-class label. Safe to call even when no
@@ -111,5 +129,30 @@ final class LlamaMetricTracker: @unchecked Sendable {
             errorClass: errorClass,
             timestamp: dispatchDate
         )
+    }
+
+    /// Assembles the terminal metric from `tracker` and dispatches it to
+    /// `sink` via a fire-and-forget `Task`, mirroring
+    /// `SSEGenerationTaskRunner`'s
+    /// `if let sink = context.metricSink { Task { await sink.record(metric) } }`.
+    /// A `nil` sink is a no-op — no metric is built, matching
+    /// `LlamaBackend.generate()`'s `metricsEnabled` early-out.
+    ///
+    /// Extracted out of `LlamaBackend.generate()`'s emit-on-every-exit-path
+    /// `defer` block (#142) so the seam — assemble exactly one metric of the
+    /// right shape, dispatch it exactly once — is exercisable headlessly via
+    /// `@testable import ManifoldLlama`, without a live `llama_context`.
+    /// Mirrors the same "inject the seam" move `LlamaGenerationDriver
+    /// .finishDecodeFailure(...)` already uses for its own headless coverage.
+    static func emitMetric(
+        from tracker: LlamaMetricTracker,
+        to sink: (any InferenceMetricSink)?,
+        provider: String,
+        model: String,
+        promptTokens: Int
+    ) {
+        guard let sink else { return }
+        let metric = tracker.buildMetric(provider: provider, model: model, promptTokens: promptTokens)
+        Task { await sink.record(metric) }
     }
 }

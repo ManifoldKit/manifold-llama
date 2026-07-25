@@ -69,16 +69,61 @@ final class LlamaMetricTrackerTests: XCTestCase {
         XCTAssertEqual(metric.meanInterTokenLatency, .zero)
     }
 
-    /// Two or more tokens with a real gap between them must produce a
-    /// positive mean inter-token latency.
-    func test_recordToken_multipleTokens_positiveMeanInterTokenLatency() {
+    /// Three tokens with two DISTINCT real gaps (~20ms then ~40ms) must
+    /// produce a mean inter-token latency close to their average (~30ms) —
+    /// not just "greater than zero". A `> .zero` assertion alone would still
+    /// pass a sabotage that replaced the true n-1-gap mean with, say,
+    /// `wallClock / tokenCount` (a different, wrong divisor); asserting an
+    /// approximate value pinned to the two known gaps catches that. Real
+    /// `Thread.sleep` timing is inherently loose, so the tolerance is wide
+    /// (±40ms) — tight enough to catch a wrong-formula bug, loose enough not
+    /// to flake under CI scheduling jitter.
+    func test_recordToken_multipleTokens_meanInterTokenLatencyMatchesKnownGaps() {
         let tracker = LlamaMetricTracker()
         tracker.start()
         tracker.recordToken()
         Thread.sleep(forTimeInterval: 0.02)
         tracker.recordToken()
+        Thread.sleep(forTimeInterval: 0.04)
+        tracker.recordToken()
         let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
-        XCTAssertGreaterThan(metric.meanInterTokenLatency, .zero)
+
+        let expectedMean = Duration.milliseconds(30)
+        let tolerance = Duration.milliseconds(40)
+        let lowerBound = expectedMean - tolerance
+        let upperBound = expectedMean + tolerance
+        XCTAssertGreaterThan(metric.meanInterTokenLatency, lowerBound,
+            "mean ITL \(metric.meanInterTokenLatency) is implausibly low for ~20ms/~40ms gaps")
+        XCTAssertLessThan(metric.meanInterTokenLatency, upperBound,
+            "mean ITL \(metric.meanInterTokenLatency) is implausibly high for ~20ms/~40ms gaps")
+    }
+
+    // MARK: - nanoseconds(of:) — the ≥1s Duration-truncation regression
+
+    /// Direct regression coverage for the bug this helper was extracted to
+    /// fix: reading `Duration.components.attoseconds` alone silently drops
+    /// the whole-seconds part. Pure function, no sleeping required — a
+    /// synthetic `Duration` reproduces the ≥1s case deterministically.
+    func test_nanosecondsOf_wholeSecondGap_isNotTruncatedToZero() {
+        XCTAssertEqual(LlamaMetricTracker.nanoseconds(of: .seconds(2)), 2_000_000_000)
+    }
+
+    /// A gap with both a whole-second part AND a fractional part must fold
+    /// both in — the historical bug reported ONLY the fractional 0.5s here
+    /// (500_000_000 ns) instead of the true 1.5s (1_500_000_000 ns).
+    func test_nanosecondsOf_wholeAndFractionalSecondGap_foldsBothParts() {
+        XCTAssertEqual(LlamaMetricTracker.nanoseconds(of: .milliseconds(1_500)), 1_500_000_000)
+    }
+
+    /// Sub-second gaps (the common case for cloud SSE token streaming) must
+    /// remain exact — this is the case the pre-fix code already got right,
+    /// and the fix must not regress it.
+    func test_nanosecondsOf_subSecondGap_isExact() {
+        XCTAssertEqual(LlamaMetricTracker.nanoseconds(of: .milliseconds(20)), 20_000_000)
+    }
+
+    func test_nanosecondsOf_zeroGap_isZero() {
+        XCTAssertEqual(LlamaMetricTracker.nanoseconds(of: .zero), 0)
     }
 
     // MARK: - Error recording

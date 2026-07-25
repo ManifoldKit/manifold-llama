@@ -718,18 +718,22 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 self.withStateLock { self.isGenerating = false }
                 Self.logger.debug("Llama generate finished")
                 // Emit exactly once per generation, success or failure — this
-                // `defer` runs on every exit path of this Task body exactly
-                // once (Swift's `defer` semantics), including the early
-                // "pointers == nil" bail below, which is why that branch calls
-                // `metricTracker.recordError(...)` before returning.
-                if let sink = capturedMetricSink {
-                    let metric = metricTracker.buildMetric(
-                        provider: BackendName.llama.rawValue,
-                        model: modelIdentifier,
-                        promptTokens: promptTokenCount
-                    )
-                    Task { await sink.record(metric) }
-                }
+                // `defer` runs on every exit path of THIS TASK BODY, once the
+                // body has begun (Swift's `defer` semantics), including the
+                // early "pointers == nil" bail below, which is why that
+                // branch calls `metricTracker.recordError(...)` before
+                // returning. The pre-Task guards above (no model loaded,
+                // already generating, tokenize failure, `.contextExhausted`)
+                // throw before this Task is ever created and so emit nothing
+                // — consistent with core's cloud/Foundation backends, which
+                // likewise only emit once request dispatch has begun.
+                LlamaMetricTracker.emitMetric(
+                    from: metricTracker,
+                    to: capturedMetricSink,
+                    provider: BackendName.llama.rawValue,
+                    model: modelIdentifier,
+                    promptTokens: promptTokenCount
+                )
             }
 
             // Re-acquire context and vocab under stateLock so we serialize

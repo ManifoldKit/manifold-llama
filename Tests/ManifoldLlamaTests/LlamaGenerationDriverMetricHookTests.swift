@@ -38,10 +38,17 @@ final class LlamaGenerationDriverMetricHookTests: XCTestCase {
     // MARK: - onError wiring
 
     /// A decode failure must fire `onError("decodeFailed")` exactly once,
-    /// BEFORE the continuation finishes with the thrown error — a sabotage
-    /// that dropped the `onError?(...)` call (or moved it after
-    /// `continuation.finish`) would fail this either on the missing call or
-    /// on ordering relative to the drain below.
+    /// BEFORE the continuation finishes with the thrown error. Ordering is
+    /// asserted directly — the same `recorder` captures both the `onError`
+    /// call and the drain task observing the stream's terminal error, so a
+    /// sabotage that moved `onError?(...)` to after `continuation.finish(
+    /// throwing:)` inside `finishDecodeFailure` would flip the recorded
+    /// order and fail this. (A version of this test that read the recorder
+    /// only synchronously, before awaiting the drain task, would NOT catch
+    /// that reordering — `onError` is synchronous and always completes
+    /// before `finishDecodeFailure` returns either way; only checking the
+    /// interleaving against the drain task's own record makes the ordering
+    /// claim real.)
     func test_finishDecodeFailure_firesOnErrorWithDecodeFailedLabel() async throws {
         let (stream, continuation) = makeStream()
         let recorder = ErrorRecorder()
@@ -51,6 +58,7 @@ final class LlamaGenerationDriverMetricHookTests: XCTestCase {
                 for try await _ in stream.events { }
                 return nil
             } catch {
+                recorder.record("stream-finished")
                 return error
             }
         }
@@ -66,7 +74,8 @@ final class LlamaGenerationDriverMetricHookTests: XCTestCase {
         let thrown = await drainTask.value
         XCTAssertFalse(coherent, "a decode failure must report KV state as incoherent")
         XCTAssertNotNil(thrown, "the continuation must finish with a thrown error")
-        XCTAssertEqual(recorder.labels, ["decodeFailed"])
+        XCTAssertEqual(recorder.labels, ["decodeFailed", "stream-finished"],
+            "onError must fire BEFORE the continuation finishes with the thrown error")
     }
 
     /// `onError` defaults to `nil` — existing callers (including this
