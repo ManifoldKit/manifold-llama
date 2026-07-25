@@ -682,10 +682,21 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         // `metricSink` itself is a plain (unlocked) property on both backends.
         //
         // `metricsEnabled` mirrors `SSEGenerationTaskRunner`'s
-        // `guard context.metricSink != nil ... else { return }` — when nothing
-        // is listening we skip `metricTracker.start()` and pass `nil` for
-        // `onToken`/`onError` below, so a generation with no sink attached pays
-        // no per-token timing/lock overhead.
+        // `guard context.metricSink != nil || context.traceSink != nil else {
+        // return }` — narrowed to just `metricSink` because THIS backend has
+        // no `traceSink` (out of scope, see #164). When #164 adds one, do NOT
+        // simply reuse this flag as "enable the tracker" gate for a trace-only
+        // config — core's own runner has a live trap here: it gates emission
+        // on `metricSink != nil || traceSink != nil` but only passes the
+        // tracker through (enabling `.recordToken()`) when `metricSink !=
+        // nil`, so a trace-sink-only setup silently builds its span from an
+        // unstarted tracker. Whoever wires `traceSink` here must gate
+        // `metricsEnabled` on EITHER sink, not just this one.
+        //
+        // Until then: when nothing is listening we skip `metricTracker
+        // .start()` and pass `nil` for `onToken`/`onError` below, so a
+        // generation with no sink attached pays no per-token timing/lock
+        // overhead.
         let metricTracker = LlamaMetricTracker()
         let capturedMetricSink = withStateLock { metricSink }
         let metricsEnabled = capturedMetricSink != nil

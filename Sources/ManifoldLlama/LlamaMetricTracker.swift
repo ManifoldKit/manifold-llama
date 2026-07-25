@@ -61,6 +61,12 @@ final class LlamaMetricTracker: @unchecked Sendable {
     /// real clock — see the regression coverage for the ≥1s truncation bug
     /// this exists to prevent.
     ///
+    /// `ManifoldKit#2382` tracks the IDENTICAL bug in core's own
+    /// `GenerationMetricTracker.swift:35` (confirmed live at both v0.73.0 and
+    /// v0.74.0, the pin this backend has been built against). This helper is
+    /// a DELIBERATE divergence from that upstream code, not drift — do not
+    /// resync this file against core's tracker until #2382 lands there.
+    ///
     /// `Duration.components.attoseconds` is only the SUB-SECOND remainder —
     /// it does NOT include whole seconds. Reading it alone silently truncates
     /// any duration ≥ 1s to just its fractional part (e.g. a real 2.0s gap
