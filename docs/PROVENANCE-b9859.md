@@ -39,7 +39,7 @@ the emitted one in here and adjust wording as needed.
   directly independently re-verifiable**: `swift package compute-checksum`
   and `shasum -a 256` are the same algorithm and produce the same hex digest
   for the same file. Anyone can confirm the pin without SwiftPM by running
-  `curl -L https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b9859/llama-b9859-slim.xcframework.zip
+  `curl -fL https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b9859/llama-b9859-slim.xcframework.zip
   | shasum -a 256` and comparing the result against both the value above and
   `Package.swift`'s pinned `checksum:` — this record was prepared by doing
   exactly that (see below). It will never equal the upstream SHA256 above:
@@ -48,7 +48,7 @@ the emitted one in here and adjust wording as needed.
   zip. Mislabeling either field, or implying they *should* match, defeats
   the audit this document exists for.
 - **Independently reproduced.** While preparing this record,
-  `curl -L <the release asset URL above> | shasum -a 256` and a local `swift
+  `curl -fL <the release asset URL above> | shasum -a 256` and a local `swift
   package compute-checksum` on the same downloaded file both returned
   `88e382d47d12e41c786fcf36d5c829c24004d0ee7e3a11483bf4fb63e1d7b190` —
   matching the `Package.swift` pin exactly. So the hosted asset, the pinned

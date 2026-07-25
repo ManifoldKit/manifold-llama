@@ -892,10 +892,13 @@ ggml-org CI build → our download → our repackage (drops-only) → our checks
   saw," not "compiled from source revision X." This checksum is directly
   re-verifiable by anyone: `swift package compute-checksum` is a SHA-256 hex
   digest of the archive bytes — same algorithm, same output as
-  `shasum -a 256` on the same file — so `curl -L <slim asset URL> | shasum -a
-  256` and comparing against `Package.swift`'s pinned value is a complete,
-  tool-independent check. See `docs/PROVENANCE-b9859.md` for a worked example
-  of doing exactly that.
+  `shasum -a 256` on the same file — so `curl -fL <slim asset URL> | shasum
+  -a 256` and comparing against `Package.swift`'s pinned value is a complete,
+  tool-independent check (`-f` matters: without it, a 404 or renamed asset
+  pipes GitHub's HTML error body into `shasum` instead of failing, producing
+  a digest that won't match and could be misread as tampering rather than a
+  bad URL). See `docs/PROVENANCE-b9859.md` for a worked example of doing
+  exactly that.
 - **`scripts/repackage-xcframework.sh`** downloads the upstream
   `llama-<BUILD>-xcframework.zip` and asserts its SHA256 against a value
   pinned per-`BUILD` in `expected_upstream_sha256()` (step 0 of the procedure
@@ -916,11 +919,15 @@ ggml-org CI build → our download → our repackage (drops-only) → our checks
   gap requires compiling llama.cpp from pinned source across all Apple
   slices — the "full source-rebuild / byte-reproducibility" item below,
   which is explicitly **deferred**, not started.
-- Each `vendor-llama-<BUILD>` release carries a provenance record in this
-  shape: upstream tag, upstream asset URL, upstream SHA256, our slim
+- Each `vendor-llama-<BUILD>` release **should** carry a provenance record in
+  this shape: upstream tag, upstream asset URL, upstream SHA256, our slim
   checksum, and the `repackage-xcframework.sh` commit that produced it (see
-  step 3 of the procedure above for how it's published). See
-  `docs/PROVENANCE-b9859.md` for the current pin's record.
+  step 3 of the procedure above for how to publish one). As of this writing
+  the live `vendor-llama-b9859` release itself does not yet carry one — the
+  committed `docs/PROVENANCE-b9859.md` is the current pin's record; publishing
+  it onto the release page is a separate, deliberate action requiring
+  maintainer authorization (uploading to a public release is outward-facing),
+  not something this change does automatically.
 
 #### Deferred: signed build-provenance attestation on the vendor release
 
