@@ -83,6 +83,44 @@ for tool in curl unzip xcodebuild swift; do
     command -v "${tool}" >/dev/null 2>&1 || fail "required tool not found on PATH: ${tool}"
 done
 
+# --- 1b. expected upstream checksums -----------------------------------------
+#
+# `unzip -tqq` below only catches corruption/truncation — it says nothing about
+# authenticity. A tampered or substituted upstream asset with an intact zip
+# structure sails straight through it. This table pins the SHA256 of the
+# upstream `llama-<BUILD>-xcframework.zip` we have actually verified, and
+# step 2b asserts the download matches it BEFORE any repackaging happens.
+#
+# Bash 3.2 (the macOS system /bin/bash this script targets — see the CI
+# comment in .github/workflows/ci.yml) has no associative arrays, so this is a
+# `case` lookup rather than `declare -A`.
+#
+# To add a new BUILD: download the upstream zip, `shasum -a 256` it, verify
+# the value out-of-band if possible (ggml-org does not publish a checksums
+# file per-release as of b9859 — cross-check via a second independent fetch,
+# e.g. a different network path, if you want extra assurance), then add a
+# case arm here. Record how you obtained it in the PR description.
+expected_upstream_sha256() {
+    case "$1" in
+        b9859) printf '%s\n' "1fcf5b1ba2fd0890c5bbbc5932e1d1893f495e3de3a13331d05384f3c6e25620" ;;
+        *) printf '' ;;
+    esac
+}
+
+EXPECTED_UPSTREAM_SHA256="$(expected_upstream_sha256 "${BUILD}")"
+
+if [[ -z "${EXPECTED_UPSTREAM_SHA256}" ]]; then
+    # Fail-closed by default: an unrecorded BUILD has no authenticity check,
+    # which is exactly the hole this script exists to close. Refuse unless the
+    # caller explicitly opts out (e.g. while pinning the checksum for a brand
+    # new BUILD for the first time).
+    if [[ "${ALLOW_UNVERIFIED_UPSTREAM:-0}" == "1" ]]; then
+        log "WARNING: no recorded upstream SHA256 for BUILD=${BUILD}; proceeding UNVERIFIED because ALLOW_UNVERIFIED_UPSTREAM=1. Do not host the resulting slim zip as a release asset without adding a checksum entry and re-running verified."
+    else
+        fail "no recorded upstream SHA256 for BUILD=${BUILD} in expected_upstream_sha256() — refusing to repackage an unverified download. Obtain the real SHA256 (see the comment above expected_upstream_sha256), add a case arm, or set ALLOW_UNVERIFIED_UPSTREAM=1 to explicitly bypass this for a one-off/dry run."
+    fi
+fi
+
 # --- 2. download ------------------------------------------------------------
 
 mkdir -p "${WORK_DIR}"
@@ -109,6 +147,25 @@ else
 fi
 
 ORIGINAL_ZIP_SIZE="$(human_size "${UPSTREAM_ZIP}")"
+
+# --- 2b. verify upstream authenticity ----------------------------------------
+#
+# This is the actual threat closure: a compromised/substituted upstream
+# release would faithfully pass `unzip -t` (intact zip structure) but fail
+# this checksum comparison. Runs on BOTH freshly-downloaded and reused-cache
+# zips (the cache-hit branch above never checks authenticity, only
+# corruption), and fires BEFORE any repackaging (extraction/xcodebuild) work
+# begins.
+if [[ -n "${EXPECTED_UPSTREAM_SHA256}" ]]; then
+    log "Verifying upstream zip SHA256 against pinned value for BUILD=${BUILD}…"
+    ACTUAL_UPSTREAM_SHA256="$(shasum -a 256 "${UPSTREAM_ZIP}" | awk '{print $1}')"
+    if [[ "${ACTUAL_UPSTREAM_SHA256}" != "${EXPECTED_UPSTREAM_SHA256}" ]]; then
+        fail "upstream checksum mismatch for BUILD=${BUILD}: expected ${EXPECTED_UPSTREAM_SHA256}, got ${ACTUAL_UPSTREAM_SHA256}. The downloaded ${UPSTREAM_URL} does NOT match the pinned checksum in expected_upstream_sha256() — refusing to repackage. This could mean upstream re-published the asset (verify out-of-band before updating the pin) or the download was tampered with. The cached zip at ${UPSTREAM_ZIP} was left in place for inspection; delete it before re-running."
+    fi
+    log "Upstream checksum verified: ${ACTUAL_UPSTREAM_SHA256}"
+else
+    log "Skipping upstream checksum verification (ALLOW_UNVERIFIED_UPSTREAM=1, no pinned value for BUILD=${BUILD})"
+fi
 
 # --- 3. unzip ---------------------------------------------------------------
 
@@ -185,6 +242,59 @@ SLICE_LIST="$(printf '%s' "${ACTUAL_SLICES}" | tr '\n' ' ')"
 # from the OUTPUT tree. Check the slim framework, not the input.
 DSYM_COUNT="$(find "${SLIM_XCFRAMEWORK}" \( -name 'dSYMs' -o -name '*.dSYM' -o -name 'BCSymbolMaps' \) -type d | wc -l | tr -d ' ')"
 
+# Assert dSYM-free BEFORE writing the provenance record below: a failed run
+# must not leave behind a complete-looking provenance file describing a slim
+# artifact that in fact still carries dSYMs.
+[[ "${DSYM_COUNT}" == "0" ]] || fail "dSYMs unexpectedly present in slim framework"
+
+# --- 7b. provenance record ---------------------------------------------------
+#
+# Emitted as a file, not hand-written after the fact, so it can't drift from
+# what this run actually did. Ship this alongside the release asset (see
+# docs/LLAMA_CONTRACT.md "Trust chain") as PROVENANCE-<BUILD>.md, or fold its
+# contents into the release notes.
+REPACKAGE_SCRIPT_COMMIT="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || echo "unknown (not a git checkout or no commits yet)")"
+PROVENANCE_FILE="${WORK_DIR}/PROVENANCE-${BUILD}.md"
+
+cat > "${PROVENANCE_FILE}" <<EOF
+# Provenance — vendor-llama-${BUILD}
+
+Generated by scripts/repackage-xcframework.sh on $(date -u '+%Y-%m-%dT%H:%M:%SZ').
+
+| Field | Value |
+|---|---|
+| Upstream tag | \`${BUILD}\` |
+| Upstream asset URL | ${UPSTREAM_URL} |
+| Upstream asset SHA256 (\`shasum -a 256\` of the upstream 7-slice zip) | \`${ACTUAL_UPSTREAM_SHA256:-UNVERIFIED — ALLOW_UNVERIFIED_UPSTREAM=1 was set, see docs/LLAMA_CONTRACT.md}\` |
+| Slim asset filename | \`$(basename "${SLIM_ZIP}")\` |
+| Slim asset checksum (\`swift package compute-checksum\` of the slim 3-slice zip — this is a SHA-256 hex digest, same algorithm/output as \`shasum -a 256\` on the same file; it is the value \`Package.swift\`'s \`.binaryTarget(checksum:)\` verifies at resolve time, and is directly re-verifiable by anyone with \`shasum -a 256 llama-${BUILD}-slim.xcframework.zip\` against the hosted release asset) | \`${CHECKSUM}\` |
+| Slices included | ${SLICE_LIST} |
+| dSYMs present in slim output | ${DSYM_COUNT} |
+| repackage-xcframework.sh commit | \`${REPACKAGE_SCRIPT_COMMIT}\` |
+
+## What this proves / does not prove
+
+- The upstream SHA256 above proves the bytes we downloaded from
+  \`${UPSTREAM_URL}\` matched a value pinned in this script at
+  \`${REPACKAGE_SCRIPT_COMMIT}\` — i.e. integrity-after-publication against
+  ggml-org's CI-built release asset.
+- It does **not** prove that asset corresponds to a reviewed llama.cpp source
+  revision — that would require a full source rebuild, which is explicitly
+  deferred (see docs/LLAMA_CONTRACT.md, "Trust chain").
+- The slim checksum proves the slim zip hosted as the
+  \`vendor-llama-${BUILD}\` release asset is byte-identical to the zip this
+  run produced. \`swift package compute-checksum\` and \`shasum -a 256\` use
+  the same algorithm and produce the same hex digest for the same file — an
+  auditor can (and should) verify the hosted asset directly with
+  \`curl -fL <asset URL> | shasum -a 256\` and compare against both this value
+  and \`Package.swift\`'s pinned \`checksum:\`. It will never equal the
+  upstream SHA256 above — not because the algorithms differ, but because the
+  two hashes cover different files (the upstream 7-slice zip vs. this
+  repackaged 3-slice zip).
+EOF
+
+log "Provenance record written: ${PROVENANCE_FILE}"
+
 echo
 echo "=========================================================================="
 echo " repackage-xcframework summary  (build: ${BUILD})"
@@ -194,8 +304,13 @@ echo "  Original extracted:  ${ORIGINAL_EXTRACTED_SIZE}   (7 slices + dSYMs)"
 echo "  Slim zip:            ${SLIM_ZIP_SIZE}   (${SLIM_ZIP})"
 echo "  Slim extracted:      ${SLIM_EXTRACTED_SIZE}"
 echo "  Slices included:     ${SLICE_LIST}"
-echo "  dSYM directories:    ${DSYM_COUNT}  $([[ "${DSYM_COUNT}" == "0" ]] && echo '(none — good)' || echo '(UNEXPECTED — dSYMs present!)')"
+# The non-zero branch is unreachable here — the dSYM assertion above already
+# killed the run before this point if DSYM_COUNT != 0 — so this always prints
+# the same "none" string. Kept as a single literal rather than a conditional
+# so it doesn't look like a live warning path that could still fire.
+echo "  dSYM directories:    ${DSYM_COUNT}  (none — good)"
 echo "  Slim checksum:       ${CHECKSUM}"
+echo "  Provenance record:   ${PROVENANCE_FILE}"
 echo "--------------------------------------------------------------------------"
 echo "  Paste into Package.swift (.binaryTarget name: \"llama-cpp\"):"
 echo
@@ -205,5 +320,3 @@ echo
 echo "  NOTE: the url above is a PLACEHOLDER. Host ${SLIM_ZIP##*/} as a"
 echo "  manifold-llama GitHub release asset, then substitute the real URL."
 echo "=========================================================================="
-
-[[ "${DSYM_COUNT}" == "0" ]] || fail "dSYMs unexpectedly present in slim framework"

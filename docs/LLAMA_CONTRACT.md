@@ -826,14 +826,27 @@ only the hosting moved (upstream → this repo's releases) and the bytes shrank.
 
 To re-cut it for a new build:
 
+0. **First, obtain and pin the new `BUILD`'s upstream SHA256.** Download the
+   upstream `https://github.com/ggml-org/llama.cpp/releases/download/b<NNNN>/llama-b<NNNN>-xcframework.zip`
+   directly and run `shasum -a 256` on it (cross-check out-of-band — e.g. a
+   second independent fetch — if ggml-org still doesn't publish a checksums
+   manifest for the release). Add a `case` arm for `b<NNNN>` to
+   `expected_upstream_sha256()` in `scripts/repackage-xcframework.sh`, and
+   record how you obtained the value in the PR that bumps the pin. **Skipping
+   this step means step 1 below fails closed** — the script refuses to
+   repackage a `BUILD` with no recorded checksum unless you set
+   `ALLOW_UNVERIFIED_UPSTREAM=1`, which is a deliberate one-off bypass, not a
+   way to skip pinning the value for a build you intend to host.
 1. Run `scripts/repackage-xcframework.sh` (defaults to `b9859`; override with
    `BUILD=b<NNNN>` or a positional arg). It downloads the upstream asset
    (re-downloading only if the cached zip is missing or fails an `unzip -t`
-   integrity check), builds the slim `llama.xcframework`, asserts it contains
+   integrity check), asserts the download's SHA256 against the value pinned
+   in step 0, builds the slim `llama.xcframework`, asserts it contains
    exactly the three intended slices with no dSYMs, zips it to
-   `llama-b<NNNN>-slim.xcframework.zip`, and
-   prints its `swift package compute-checksum` value plus the exact
-   `url`/`checksum` lines to paste into `Package.swift`.
+   `llama-b<NNNN>-slim.xcframework.zip`, prints its
+   `swift package compute-checksum` value plus the exact `url`/`checksum`
+   lines to paste into `Package.swift`, and writes a provenance record to
+   `tmp/repackage-xcframework/PROVENANCE-b<NNNN>.md`.
 2. **Host that exact slim zip as a manifold-llama GitHub release asset** (it is
    *not* on ggml-org's releases — we produce it):
    ```
@@ -844,10 +857,102 @@ To re-cut it for a new build:
    ```
    The resulting asset URL is
    `https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b<NNNN>/llama-b<NNNN>-slim.xcframework.zip`.
-3. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
+3. **Publish the provenance record — don't let it sit only in `tmp/`.** Upload
+   the `PROVENANCE-b<NNNN>.md` the script wrote in step 1 as a second asset on
+   the same release (or fold it into `--notes`/`--notes-file`), e.g.:
+   ```
+   gh release upload vendor-llama-b<NNNN> tmp/repackage-xcframework/PROVENANCE-b<NNNN>.md
+   ```
+   and copy it into `docs/PROVENANCE-b<NNNN>.md` in the same PR as the pin
+   bump (mirroring `docs/PROVENANCE-b9859.md`) so it's reviewable in-diff, not
+   only reachable via the release page.
+4. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
    asset and its `checksum` to the value the script printed (the package
    checksum of the slim zip, *not* the upstream zip), then run
    `swift package resolve` to confirm it fetches the hosted URL and the checksum
    matches.
-4. The slim framework still carries the same `Versions/A/Headers/llama.h`, so
+5. The slim framework still carries the same `Versions/A/Headers/llama.h`, so
    the header-copy / contract-review steps above are unchanged.
+
+### Trust chain — what the checksum pin does and does not prove
+
+The 2026-07-19 independent evaluation of ManifoldKit (§10) flagged this
+precisely, and it is worth stating without over- or under-claiming:
+
+```
+ggml-org CI build → our download → our repackage (drops-only) → our checksum pin
+```
+
+- **`Package.swift`'s `.binaryTarget(url:, checksum:)`** pins the SwiftPM
+  package checksum of *our* slim zip. SwiftPM verifies this at resolve time.
+  It proves the bytes a consumer downloads are byte-identical to the bytes we
+  uploaded — **integrity after publication.** It does **not** prove those
+  bytes were compiled from a reviewed llama.cpp source revision: the checksum
+  is computed *after* we download + repackage, so it attests "same bytes I
+  saw," not "compiled from source revision X." This checksum is directly
+  re-verifiable by anyone: `swift package compute-checksum` is a SHA-256 hex
+  digest of the archive bytes — same algorithm, same output as
+  `shasum -a 256` on the same file — so `curl -fL <slim asset URL> | shasum
+  -a 256` and comparing against `Package.swift`'s pinned value is a complete,
+  tool-independent check (`-f` matters: without it, a 404 or renamed asset
+  pipes GitHub's HTML error body into `shasum` instead of failing, producing
+  a digest that won't match and could be misread as tampering rather than a
+  bad URL). See `docs/PROVENANCE-b9859.md` for a worked example of doing
+  exactly that.
+- **`scripts/repackage-xcframework.sh`** downloads the upstream
+  `llama-<BUILD>-xcframework.zip` and asserts its SHA256 against a value
+  pinned per-`BUILD` in `expected_upstream_sha256()` (step 0 of the procedure
+  above), **before** any extraction or `xcodebuild -create-xcframework`
+  repackaging begins. This closes the actual threat identified in the
+  evaluation: a compromised or substituted upstream release asset that we
+  would otherwise faithfully repackage and re-host under our name with an
+  intact-looking zip (the pre-existing `unzip -t` check only catches
+  corruption/truncation, not tampering). A `BUILD` with no recorded expected
+  checksum fails closed — the script refuses to proceed unless
+  `ALLOW_UNVERIFIED_UPSTREAM=1` is set explicitly.
+- The repackage step itself (drop tvOS/visionOS slices + dSYMs,
+  `xcodebuild -create-xcframework`) is auditable — it's drops-only, no
+  compiled bytes are altered — and is the one thing this project adds over
+  "depend on ggml-org's asset directly."
+- **What is still NOT proven:** that the upstream asset's compiled bytes
+  correspond to a specific, reviewed llama.cpp source commit. Closing that
+  gap requires compiling llama.cpp from pinned source across all Apple
+  slices — the "full source-rebuild / byte-reproducibility" item below,
+  which is explicitly **deferred**, not started.
+- Each `vendor-llama-<BUILD>` release **should** carry a provenance record in
+  this shape: upstream tag, upstream asset URL, upstream SHA256, our slim
+  checksum, and the `repackage-xcframework.sh` commit that produced it (see
+  step 3 of the procedure above for how to publish one). As of this writing
+  the live `vendor-llama-b9859` release itself does not yet carry one — the
+  committed `docs/PROVENANCE-b9859.md` is the current pin's record; publishing
+  it onto the release page is a separate, deliberate action requiring
+  maintainer authorization (uploading to a public release is outward-facing),
+  not something this change does automatically.
+
+#### Deferred: signed build-provenance attestation on the vendor release
+
+Extending ManifoldKit core's `release-provenance.yml` (Sigstore
+`attest-build-provenance`) pattern to the `vendor-llama-*` slim-zip upload is
+**deferred to [#161](https://github.com/ManifoldKit/manifold-llama/issues/161)**,
+not done in this change. Reason: this
+repo currently has no workflow that uploads the vendor binary at all — the
+repackage-and-host step is a manual maintainer action (`gh release create
+vendor-llama-<BUILD> …`, see above), not CI. Wiring an attestation onto that
+upload needs a macOS runner and can't be exercised/proven without cutting a
+real vendor release, so it's tracked separately rather than bundled here.
+
+#### Deferred: full source-rebuild / byte-reproducibility
+
+Compiling llama.cpp from pinned source (rather than repackaging ggml-org's
+prebuilt binary) would close the remaining gap — "these exact bytes came
+from source revision X" — but is the heaviest fix: a Metal build across all
+Apple slices in CI, exactly the weight `scripts/repackage-xcframework.sh`
+exists to avoid. It stays a deferred P3 item, tracked against the same
+evaluation finding as the two items above. **Not started; do not claim
+reproducibility of either the upstream binary or the repackage step until
+this is actually done** — see the "Determinism caveat" above for the
+repackage step specifically (it is empirically *not* byte-reproducible as
+measured for b9859). Note this is a distinct claim from the checksum pin's
+verifiability above: the *hosted asset* is fixed and directly checkable
+today; it is only *re-running the repackage script* that isn't guaranteed to
+reproduce it.
