@@ -158,7 +158,8 @@ jobs:
           LlamaTokenizationTests \
           LlamaTokenUsageTests \
           LlamaGenerationGuardTests \
-          LlamaBackendContractTests"
+          LlamaBackendContractTests \
+          LlamaBackendMetricSinkE2ETests"
 
           FILTER=""
           for s in $SUITES; do

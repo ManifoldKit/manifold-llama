@@ -171,7 +171,20 @@ import ManifoldHardware
         prefillHeadroomSampler: @Sendable () -> UInt64? = { DeviceCapabilityService.queryAvailableMemory() },
         prefillSafetyFactor: Double = 1.5,
         onPrefillEstimate: (@Sendable (UInt64) -> Void)? = nil,
-        onUsage: (@Sendable (Int, Int) -> Void)? = nil
+        onUsage: (@Sendable (Int, Int) -> Void)? = nil,
+        // Metrics seam (#142): fired synchronously, inline in this loop — never
+        // from a detached task — so callers can drive a lock-guarded tracker
+        // without ever holding that lock across an `await`. `onToken` fires once
+        // per VISIBLE `.token` event, deliberately excluding `.thinkingToken`
+        // (mirrors `InferenceMetric.timeToFirstToken`'s documented exclusion —
+        // TTFT/ITL measure output latency as perceived by the caller, not
+        // reasoning time). `onError` fires with a short, stable failure-class
+        // label at each explicit failure branch below; it does NOT fire on
+        // cancellation (`isCancelled()` exits), which is treated as a clean,
+        // non-error completion — consistent with `finishDecodeFailure` never
+        // being reached on that path either.
+        onToken: (@Sendable () -> Void)? = nil,
+        onError: (@Sendable (String) -> Void)? = nil
     ) async -> Bool {
         Self.logger.debug("LlamaGenerationDriver run started")
 
@@ -430,10 +443,12 @@ import ManifoldHardware
         case .success(let s):
             outputSampler = s
         case .chainInitFailed:
+            onError?("samplerInitFailed")
             await MainActor.run { generationStream.setPhase(.failed("Failed to create sampler")) }
             continuation.finish(throwing: InferenceError.inferenceFailure("Failed to create sampler"))
             return false
         case .grammarParseFailed:
+            onError?("grammarParseFailed")
             await MainActor.run { generationStream.setPhase(.failed("Failed to parse GBNF grammar")) }
             continuation.finish(throwing: InferenceError.inferenceFailure("Failed to parse GBNF grammar string"))
             // KV cache state is untouched at this point — no decode has run yet —
@@ -516,6 +531,7 @@ import ManifoldHardware
                     "Llama prefill aborted: predicted \(required) bytes for next chunk exceeds \(remaining) free"
                 )
                 prefillAborted = true
+                onError?("memoryInsufficient")
                 llama_synchronize(context)
                 await MainActor.run {
                     generationStream.setPhase(.failed("Insufficient memory for prefill"))
@@ -595,7 +611,8 @@ import ManifoldHardware
                 message: "Failed to decode prompt",
                 synchronize: { llama_synchronize(context) },
                 generationStream: generationStream,
-                continuation: continuation
+                continuation: continuation,
+                onError: onError
             )
         }
 
@@ -806,6 +823,7 @@ import ManifoldHardware
                         }
                     case .token:
                         visibleTokenCount += 1
+                        onToken?()
                         if visibleTokenCount >= maxTokens {
                             visibleBudgetExceeded = true
                         }
@@ -836,7 +854,8 @@ import ManifoldHardware
                     message: "Decode failed during generation",
                     synchronize: { llama_synchronize(context) },
                     generationStream: generationStream,
-                    continuation: continuation
+                    continuation: continuation,
+                    onError: onError
                 )
             }
         }
@@ -907,8 +926,10 @@ import ManifoldHardware
         message: String,
         synchronize: () -> Void,
         generationStream: GenerationStream,
-        continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
+        onError: (@Sendable (String) -> Void)? = nil
     ) async -> Bool {
+        onError?("decodeFailed")
         synchronize()
         await MainActor.run { generationStream.setPhase(.failed(message)) }
         continuation.finish(throwing: InferenceError.inferenceFailure(message))
