@@ -677,11 +677,18 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         // `capturedMetricSink` / `promptTokenCount` / `modelIdentifier` are
         // snapshotted here, outside the Task, so the eventual `sink.record(...)`
         // call doesn't need to re-read backend state after the model may have
-        // been unloaded. `metricSink` itself is a plain (unlocked) property —
-        // mirrors `SSECloudBackend`/`FoundationBackend`, which read it the same
-        // way.
+        // been unloaded. Snapshotting via `withStateLock { metricSink }` mirrors
+        // `FoundationBackend.generate()`'s capture idiom verbatim, even though
+        // `metricSink` itself is a plain (unlocked) property on both backends.
+        //
+        // `metricsEnabled` mirrors `SSEGenerationTaskRunner`'s
+        // `guard context.metricSink != nil ... else { return }` — when nothing
+        // is listening we skip `metricTracker.start()` and pass `nil` for
+        // `onToken`/`onError` below, so a generation with no sink attached pays
+        // no per-token timing/lock overhead.
         let metricTracker = LlamaMetricTracker()
-        let capturedMetricSink = metricSink
+        let capturedMetricSink = withStateLock { metricSink }
+        let metricsEnabled = capturedMetricSink != nil
         let promptTokenCount = tokens.count
         let modelIdentifier = withStateLock { _manifest?.modelIdentifier } ?? "unknown"
 
@@ -703,8 +710,9 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             // that can run before any `.token` event is possible. Must run
             // before the defer below so even an early bail-out (pointers == nil)
             // reports a (near-zero) wallClockDuration rather than reusing the
-            // tracker's `init`-time default.
-            metricTracker.start()
+            // tracker's `init`-time default. Skipped entirely when no sink is
+            // attached (see `metricsEnabled` above).
+            if metricsEnabled { metricTracker.start() }
 
             defer {
                 self.withStateLock { self.isGenerating = false }
@@ -743,7 +751,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 // Backend was unloaded out from under this generation before
                 // the driver ever ran. Not a decode/sampler failure, but still
                 // a failed generation from the metric's point of view.
-                metricTracker.recordError("backendUnloaded")
+                if metricsEnabled { metricTracker.recordError("backendUnloaded") }
                 continuation.finish()
                 return
             }
@@ -753,6 +761,15 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             // markers stays nil and the driver skips ThinkingTransform entirely.
             let autoDetected = self.withStateLock { self._autoDetectedThinkingMarkers }
             let resolvedMarkers = hints.thinkingMarkers ?? autoDetected
+            // Typed out with explicit if/else (rather than a ternary or an
+            // inline expression in the call below) to sidestep a compiler
+            // diagnostic-generation crash observed with both of those forms.
+            var onTokenHook: (@Sendable () -> Void)?
+            var onErrorHook: (@Sendable (String) -> Void)?
+            if metricsEnabled {
+                onTokenHook = { metricTracker.recordToken() }
+                onErrorHook = { label in metricTracker.recordError(label) }
+            }
             let kvCoherent = await driver.run(
                 context: context,
                 vocab: vocab,
@@ -774,8 +791,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                         self._lastUsage = (promptTokens: promptTokens, completionTokens: completionTokens)
                     }
                 },
-                onToken: { metricTracker.recordToken() },
-                onError: { label in metricTracker.recordError(label) }
+                onToken: onTokenHook,
+                onError: onErrorHook
             )
             // A decode failure leaves the C KV cache in an undefined state.
             // Clear sessionKVState so the next turn does not attempt prefix reuse
