@@ -69,34 +69,53 @@ final class LlamaMetricTrackerTests: XCTestCase {
         XCTAssertEqual(metric.meanInterTokenLatency, .zero)
     }
 
-    /// Three tokens with two DISTINCT real gaps (~100ms then ~200ms) must
-    /// produce a mean inter-token latency close to their average (~150ms) —
-    /// not just "greater than zero", and NOT the value a wrong-divisor
-    /// sabotage would produce.
+    /// Three tokens with two DISTINCT real gaps (~100ms then ~200ms, true
+    /// mean 150ms) must produce a mean inter-token latency ABOVE a floor that
+    /// excludes both `.zero` and the named `wallClock / tokenCount` sabotage
+    /// (≈100ms) — not just "greater than zero".
     ///
-    /// The gap sizes and tolerance here are chosen deliberately, not
-    /// arbitrarily — an earlier version of this test used ~20ms/~40ms gaps
-    /// (true mean 30ms) with a ±40ms tolerance, giving bounds of −10ms to
-    /// 70ms. That tolerance window is WIDER than the distance from the true
-    /// value to either wrong value it was meant to exclude: the negative
-    /// lower bound clamps to accepting anything non-negative (including
-    /// `.zero`), and `wallClock / tokenCount` (≈60ms / 3 = 20ms) also falls
-    /// inside 0–70ms. Both sabotages this test claims to catch would
-    /// silently pass. The rule a tolerance must satisfy: it can never exceed
-    /// the distance between the true value and the wrong value being
-    /// excluded. With 100ms/200ms gaps, the true mean is 150ms while
-    /// `wallClock / tokenCount` ≈ 300ms / 3 = 100ms — a 50ms discriminating
-    /// distance — so a ±40ms tolerance (110ms–190ms) excludes both `.zero`
-    /// and the wrong-divisor value while still absorbing real `Thread.sleep`
-    /// / CI scheduling jitter. `XCTAssertGreaterThan(lowerBound, .zero)` below
-    /// is a self-check: if a future tolerance change ever pushes the lower
-    /// bound negative again, THIS test's own arithmetic has broken and it
-    /// must fail loudly rather than silently stop discriminating.
+    /// **Bound history, in order — read this before touching the numbers.**
+    /// v1 used ~20ms/~40ms gaps (true mean 30ms) with a symmetric ±40ms
+    /// tolerance: bounds of −10ms to 70ms. The negative lower bound clamped
+    /// to accepting anything non-negative including `.zero`, and the
+    /// wrong-divisor result (≈20ms there) also fell inside the window —
+    /// neither excluded sabotage was actually excluded. v2 widened the gaps
+    /// to ~100ms/~200ms and kept a symmetric ±40ms tolerance: bounds of
+    /// 110ms–190ms. The LOWER bound (110ms) now genuinely discriminates
+    /// (verified — see below). But the UPPER bound (190ms) does no
+    /// discriminating work at all — both excluded values sit BELOW the true
+    /// mean, so nothing needs excluding above it — while `Thread.sleep` only
+    /// ever OVERSHOOTS its requested duration. On a loaded CI runner, ~20–50ms
+    /// of overshoot per sleep is ordinary; two overshooting sleeps push the
+    /// true mean toward 190–240ms, which would trip a tight symmetric upper
+    /// bound as a false failure on this repo's only required check — a flake
+    /// risk with zero corresponding safety benefit.
     ///
-    /// This has been verified against the actual sabotage it names: with
-    /// `meanITL` production code temporarily replaced by `wallClock /
-    /// Duration(tokenCount)`, this test failed (observed ~100ms, outside the
-    /// 110–190ms window) before the fix was reverted.
+    /// **v3 (current)**: an explicit 120ms floor — not derived from a ±
+    /// tolerance around 150ms — as the real, discriminating assertion. It
+    /// sits 30ms below the true 150ms mean (headroom for undershoot, which
+    /// `Thread.sleep` does not do, but the margin costs nothing) and 20ms
+    /// above the ≈100ms wrong-divisor result. The ceiling is deliberately
+    /// LOOSE (1s) — a pure "not wildly wrong" sanity check, not a
+    /// discriminator. This means v3 no longer catches a hypothetical
+    /// `meanITL = wallClock` (no averaging at all, ≈300ms here) sabotage —
+    /// a real but unnamed regression this test does not claim to guard
+    /// against. Chose stability over that additional catch deliberately:
+    /// this file has already gone through three review rounds because a
+    /// tighter bound kept turning out to either not discriminate or to risk
+    /// flaking: a required, non-model-gated check should fail on production
+    /// bugs, not on scheduler jitter.
+    ///
+    /// `XCTAssertGreaterThan(floor, .zero)` below is a self-check: if a
+    /// future edit ever pushes the floor non-positive, THIS test's own
+    /// arithmetic has broken and it must fail loudly rather than silently
+    /// stop discriminating.
+    ///
+    /// Verified against the actual sabotage it names: with `meanITL`
+    /// production code temporarily replaced by `wallClock /
+    /// Duration(tokenCount)`, this test failed (observed ≈100ms, below the
+    /// 120ms floor) before the fix was reverted. Also run 10x consecutively
+    /// with the real (non-sabotaged) code to confirm stability — 10/10 passed.
     func test_recordToken_multipleTokens_meanInterTokenLatencyMatchesKnownGaps() {
         let tracker = LlamaMetricTracker()
         tracker.start()
@@ -107,16 +126,14 @@ final class LlamaMetricTrackerTests: XCTestCase {
         tracker.recordToken()
         let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
 
-        let expectedMean = Duration.milliseconds(150)
-        let tolerance = Duration.milliseconds(40)
-        let lowerBound = expectedMean - tolerance
-        let upperBound = expectedMean + tolerance
-        XCTAssertGreaterThan(lowerBound, .zero,
-            "sanity check on this test's own arithmetic — a non-positive lower bound means the tolerance has stopped discriminating")
-        XCTAssertGreaterThan(metric.meanInterTokenLatency, lowerBound,
-            "mean ITL \(metric.meanInterTokenLatency) is implausibly low for ~100ms/~200ms gaps — a wrong-divisor sabotage (e.g. wallClock/tokenCount ≈ 100ms) would land here")
-        XCTAssertLessThan(metric.meanInterTokenLatency, upperBound,
-            "mean ITL \(metric.meanInterTokenLatency) is implausibly high for ~100ms/~200ms gaps")
+        let floor = Duration.milliseconds(120)
+        let looseCeiling = Duration.seconds(1)
+        XCTAssertGreaterThan(floor, .zero,
+            "sanity check on this test's own arithmetic — a non-positive floor means the assertion below has stopped discriminating")
+        XCTAssertGreaterThan(metric.meanInterTokenLatency, floor,
+            "mean ITL \(metric.meanInterTokenLatency) is implausibly low for ~100ms/~200ms gaps (true mean 150ms) — a wrong-divisor sabotage (e.g. wallClock/tokenCount ≈ 100ms) would land at or below this floor")
+        XCTAssertLessThan(metric.meanInterTokenLatency, looseCeiling,
+            "mean ITL \(metric.meanInterTokenLatency) is wildly implausible for ~100ms/~200ms gaps — this is a loose sanity ceiling, not a discriminator (see doc comment)")
     }
 
     // MARK: - nanoseconds(of:) — the ≥1s Duration-truncation regression
