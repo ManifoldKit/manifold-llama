@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.1](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.0...v0.4.1) (2026-07-25)
+
+
+### Features
+
+* **metrics:** emit InferenceMetric from LlamaBackend ([#162](https://github.com/ManifoldKit/manifold-llama/issues/162)) ([a85a50d](https://github.com/ManifoldKit/manifold-llama/commit/a85a50d31e7834e2d3a7dfafdf6f70dda098f480))
+* **vendor:** verify upstream checksum and publish provenance for vendored xcframework ([#163](https://github.com/ManifoldKit/manifold-llama/issues/163)) ([811055f](https://github.com/ManifoldKit/manifold-llama/commit/811055f094988055abd6b7b59decd25bc121e763))
+
+
+### Dependencies
+
+* bump ManifoldKit pin to v0.74.0 ([427b0ae](https://github.com/ManifoldKit/manifold-llama/commit/427b0aec7e9a23d9afd5fd2672891d5779835123))
+
 ## [0.4.0](https://github.com/ManifoldKit/manifold-llama/compare/v0.3.4...v0.4.0) (2026-07-20)
 
 
