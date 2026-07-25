@@ -2,14 +2,15 @@ import XCTest
 import ManifoldInference
 @testable import ManifoldLlama
 
-/// Headless coverage for the `LlamaBackend` → `traceSink` seam (#164).
+/// Headless coverage for the assemble-and-dispatch half of the `traceSink`
+/// seam (#164) — `LlamaMetricTracker.emitMetric(...)` with a stub
+/// `RecordingTraceSink`. Mirrors `LlamaBackendMetricSinkTests`.
 ///
-/// Mirrors `LlamaBackendMetricSinkTests`: the assemble-and-dispatch logic in
-/// `LlamaMetricTracker.emitMetric(...)` is exercised with stub sinks so CI
-/// runs these without a live `llama_context`. A sabotage that deleted the
-/// `traceSink:` argument at the `generate()` call site, gated
-/// `metricsEnabled` on the metric sink alone, or skipped `asGenSpan()` would
-/// fail one of these.
+/// These tests run unconditionally in CI (no `llama_context`). They prove
+/// span shape, dual-sink dispatch, and both-nil no-op. They do **not**
+/// exercise `LlamaBackend.generate()`'s call site — deleting `traceSink:`
+/// there, or gating `metricsEnabled` on the metric sink alone, is covered by
+/// the model-gated `LlamaBackendTraceSinkE2ETests` suite instead.
 final class LlamaBackendTraceSinkTests: XCTestCase {
 
     // MARK: - traceSink property
