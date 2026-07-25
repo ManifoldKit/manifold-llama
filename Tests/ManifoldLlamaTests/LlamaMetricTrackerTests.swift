@@ -69,33 +69,54 @@ final class LlamaMetricTrackerTests: XCTestCase {
         XCTAssertEqual(metric.meanInterTokenLatency, .zero)
     }
 
-    /// Three tokens with two DISTINCT real gaps (~20ms then ~40ms) must
-    /// produce a mean inter-token latency close to their average (~30ms) —
-    /// not just "greater than zero". A `> .zero` assertion alone would still
-    /// pass a sabotage that replaced the true n-1-gap mean with, say,
-    /// `wallClock / tokenCount` (a different, wrong divisor); asserting an
-    /// approximate value pinned to the two known gaps catches that. Real
-    /// `Thread.sleep` timing is inherently loose, so the tolerance is wide
-    /// (±40ms) — tight enough to catch a wrong-formula bug, loose enough not
-    /// to flake under CI scheduling jitter.
+    /// Three tokens with two DISTINCT real gaps (~100ms then ~200ms) must
+    /// produce a mean inter-token latency close to their average (~150ms) —
+    /// not just "greater than zero", and NOT the value a wrong-divisor
+    /// sabotage would produce.
+    ///
+    /// The gap sizes and tolerance here are chosen deliberately, not
+    /// arbitrarily — an earlier version of this test used ~20ms/~40ms gaps
+    /// (true mean 30ms) with a ±40ms tolerance, giving bounds of −10ms to
+    /// 70ms. That tolerance window is WIDER than the distance from the true
+    /// value to either wrong value it was meant to exclude: the negative
+    /// lower bound clamps to accepting anything non-negative (including
+    /// `.zero`), and `wallClock / tokenCount` (≈60ms / 3 = 20ms) also falls
+    /// inside 0–70ms. Both sabotages this test claims to catch would
+    /// silently pass. The rule a tolerance must satisfy: it can never exceed
+    /// the distance between the true value and the wrong value being
+    /// excluded. With 100ms/200ms gaps, the true mean is 150ms while
+    /// `wallClock / tokenCount` ≈ 300ms / 3 = 100ms — a 50ms discriminating
+    /// distance — so a ±40ms tolerance (110ms–190ms) excludes both `.zero`
+    /// and the wrong-divisor value while still absorbing real `Thread.sleep`
+    /// / CI scheduling jitter. `XCTAssertGreaterThan(lowerBound, .zero)` below
+    /// is a self-check: if a future tolerance change ever pushes the lower
+    /// bound negative again, THIS test's own arithmetic has broken and it
+    /// must fail loudly rather than silently stop discriminating.
+    ///
+    /// This has been verified against the actual sabotage it names: with
+    /// `meanITL` production code temporarily replaced by `wallClock /
+    /// Duration(tokenCount)`, this test failed (observed ~100ms, outside the
+    /// 110–190ms window) before the fix was reverted.
     func test_recordToken_multipleTokens_meanInterTokenLatencyMatchesKnownGaps() {
         let tracker = LlamaMetricTracker()
         tracker.start()
         tracker.recordToken()
-        Thread.sleep(forTimeInterval: 0.02)
+        Thread.sleep(forTimeInterval: 0.1)
         tracker.recordToken()
-        Thread.sleep(forTimeInterval: 0.04)
+        Thread.sleep(forTimeInterval: 0.2)
         tracker.recordToken()
         let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
 
-        let expectedMean = Duration.milliseconds(30)
+        let expectedMean = Duration.milliseconds(150)
         let tolerance = Duration.milliseconds(40)
         let lowerBound = expectedMean - tolerance
         let upperBound = expectedMean + tolerance
+        XCTAssertGreaterThan(lowerBound, .zero,
+            "sanity check on this test's own arithmetic — a non-positive lower bound means the tolerance has stopped discriminating")
         XCTAssertGreaterThan(metric.meanInterTokenLatency, lowerBound,
-            "mean ITL \(metric.meanInterTokenLatency) is implausibly low for ~20ms/~40ms gaps")
+            "mean ITL \(metric.meanInterTokenLatency) is implausibly low for ~100ms/~200ms gaps — a wrong-divisor sabotage (e.g. wallClock/tokenCount ≈ 100ms) would land here")
         XCTAssertLessThan(metric.meanInterTokenLatency, upperBound,
-            "mean ITL \(metric.meanInterTokenLatency) is implausibly high for ~20ms/~40ms gaps")
+            "mean ITL \(metric.meanInterTokenLatency) is implausibly high for ~100ms/~200ms gaps")
     }
 
     // MARK: - nanoseconds(of:) — the ≥1s Duration-truncation regression
