@@ -163,6 +163,17 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     /// ``FoundationBackend``. Set to `nil` to disable metric emission.
     public var metricSink: (any InferenceMetricSink)? = InMemoryMetricSink.shared
 
+    /// The sink that receives an OTel-shaped ``GenSpan`` after every generation
+    /// call (success, failure, or cancellation), derived from the same
+    /// ``InferenceMetric`` via ``InferenceMetric/asGenSpan(context:name:)``.
+    ///
+    /// Defaults to `nil` (opt-in), matching ``SSECloudBackend`` and
+    /// ``FoundationBackend``. When attached, spans are emitted alongside the
+    /// metric sink so an OTLP exporter wired only to cloud/Foundation lanes
+    /// does not leave the GGUF path invisible. Tracker bookkeeping is enabled
+    /// when **either** sink is attached (#164).
+    public var traceSink: (any TraceSink)?
+
     public var capabilities: BackendCapabilities {
         let ctxSize = withStateLock { _effectiveContextSize }
         let architecture = withStateLock { _architecture }
@@ -672,34 +683,31 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: GenerationEvent.self)
         let generationStream = GenerationStream(stream)
 
-        // Metrics seam (#142). `metricTracker` is a lock-guarded accumulator
-        // (see LlamaMetricTracker) captured by reference into the Task below;
-        // `capturedMetricSink` / `promptTokenCount` / `modelIdentifier` are
+        // Metrics + trace seam (#142 / #164). `metricTracker` is a lock-guarded
+        // accumulator (see LlamaMetricTracker) captured by reference into the
+        // Task below; sinks / `promptTokenCount` / `modelIdentifier` are
         // snapshotted here, outside the Task, so the eventual `sink.record(...)`
         // call doesn't need to re-read backend state after the model may have
-        // been unloaded. Snapshotting via `withStateLock { metricSink }` mirrors
+        // been unloaded. Snapshotting via `withStateLock { … }` mirrors
         // `FoundationBackend.generate()`'s capture idiom verbatim, even though
-        // `metricSink` itself is a plain (unlocked) property on both backends.
+        // the sink properties themselves are plain (unlocked) vars on both
+        // backends.
         //
         // `metricsEnabled` mirrors `SSEGenerationTaskRunner`'s
         // `guard context.metricSink != nil || context.traceSink != nil else {
-        // return }` — narrowed to just `metricSink` because THIS backend has
-        // no `traceSink` (out of scope, see #164). When #164 adds one, do NOT
-        // simply reuse this flag as "enable the tracker" gate for a trace-only
-        // config — core's own runner has a live trap here: it gates emission
-        // on `metricSink != nil || traceSink != nil` but only passes the
-        // tracker through (enabling `.recordToken()`) when `metricSink !=
-        // nil`, so a trace-sink-only setup silently builds its span from an
-        // unstarted tracker. Whoever wires `traceSink` here must gate
-        // `metricsEnabled` on EITHER sink, not just this one.
-        //
-        // Until then: when nothing is listening we skip `metricTracker
-        // .start()` and pass `nil` for `onToken`/`onError` below, so a
-        // generation with no sink attached pays no per-token timing/lock
-        // overhead.
+        // return }` — gated on **either** sink so a trace-sink-only config
+        // still starts the tracker and fires per-token hooks. Core's own
+        // runner has a live trap: it gates emission on either sink but only
+        // passes the tracker (enabling `.recordToken()`) when `metricSink !=
+        // nil`, so a trace-only setup silently builds an all-zeros span from
+        // an unstarted tracker. We deliberately do **not** reproduce that
+        // trap: when either sink is attached, `start()` and `onToken`/`onError`
+        // run. When neither is listening we skip them entirely so a generation
+        // with no sink attached pays no per-token timing/lock overhead.
         let metricTracker = LlamaMetricTracker()
         let capturedMetricSink = withStateLock { metricSink }
-        let metricsEnabled = capturedMetricSink != nil
+        let capturedTraceSink = withStateLock { traceSink }
+        let metricsEnabled = capturedMetricSink != nil || capturedTraceSink != nil
         let promptTokenCount = tokens.count
         let modelIdentifier = withStateLock { _manifest?.modelIdentifier } ?? "unknown"
 
@@ -741,6 +749,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 LlamaMetricTracker.emitMetric(
                     from: metricTracker,
                     to: capturedMetricSink,
+                    traceSink: capturedTraceSink,
                     provider: BackendName.llama.rawValue,
                     model: modelIdentifier,
                     promptTokens: promptTokenCount

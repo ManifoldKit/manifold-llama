@@ -144,28 +144,41 @@ final class LlamaMetricTracker: @unchecked Sendable {
         )
     }
 
-    /// Assembles the terminal metric from `tracker` and dispatches it to
-    /// `sink` via a fire-and-forget `Task`, mirroring
-    /// `SSEGenerationTaskRunner`'s
-    /// `if let sink = context.metricSink { Task { await sink.record(metric) } }`.
-    /// A `nil` sink is a no-op — no metric is built, matching
-    /// `LlamaBackend.generate()`'s `metricsEnabled` early-out.
+    /// Assembles the terminal metric from `tracker` and dispatches it to the
+    /// metric and/or trace sinks via fire-and-forget `Task`s, mirroring
+    /// `SSEGenerationTaskRunner`'s dual-sink emit:
+    /// ```
+    /// if let sink = context.metricSink { Task { await sink.record(metric) } }
+    /// if let sink = context.traceSink  { Task { await sink.record(metric.asGenSpan()) } }
+    /// ```
+    /// When both sinks are `nil`, this is a no-op — no metric is built, matching
+    /// `LlamaBackend.generate()`'s `metricsEnabled` early-out. When only the
+    /// trace sink is attached, the metric is still built (from a tracker that
+    /// must have been started — see `metricsEnabled` gating on either sink)
+    /// and adapted via ``InferenceMetric/asGenSpan(context:name:)``.
     ///
     /// Extracted out of `LlamaBackend.generate()`'s emit-on-every-exit-path
-    /// `defer` block (#142) so the seam — assemble exactly one metric of the
-    /// right shape, dispatch it exactly once — is exercisable headlessly via
-    /// `@testable import ManifoldLlama`, without a live `llama_context`.
-    /// Mirrors the same "inject the seam" move `LlamaGenerationDriver
-    /// .finishDecodeFailure(...)` already uses for its own headless coverage.
+    /// `defer` block (#142 / #164) so the seam — assemble exactly one metric
+    /// of the right shape, dispatch metric + span at most once each — is
+    /// exercisable headlessly via `@testable import ManifoldLlama`, without a
+    /// live `llama_context`. Mirrors the same "inject the seam" move
+    /// `LlamaGenerationDriver.finishDecodeFailure(...)` already uses for its
+    /// own headless coverage.
     static func emitMetric(
         from tracker: LlamaMetricTracker,
-        to sink: (any InferenceMetricSink)?,
+        to metricSink: (any InferenceMetricSink)?,
+        traceSink: (any TraceSink)? = nil,
         provider: String,
         model: String,
         promptTokens: Int
     ) {
-        guard let sink else { return }
+        guard metricSink != nil || traceSink != nil else { return }
         let metric = tracker.buildMetric(provider: provider, model: model, promptTokens: promptTokens)
-        Task { await sink.record(metric) }
+        if let metricSink {
+            Task { await metricSink.record(metric) }
+        }
+        if let traceSink {
+            Task { await traceSink.record(metric.asGenSpan()) }
+        }
     }
 }
