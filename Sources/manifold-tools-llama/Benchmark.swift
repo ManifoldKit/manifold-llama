@@ -26,7 +26,7 @@ struct BenchResult {
     /// Context size requested via `.systemManaged(requestedContextSize:)`.
     let requestedContext: Int
     /// Plan-effective context after the load planner's clamp, read back from
-    /// `backend.manifest?.contextWindow`. May be < requested if the planner
+    /// `backend.manifest.flatMap(\.contextWindow)`. May be < requested if the planner
     /// trimmed it to fit memory / the model's trained context. This is what was
     /// wired into `ctxParams.n_ctx`; llama.cpp may still adjust internally
     /// (`docs/LLAMA_CONTRACT.md:137`), but no public API re-queries `llama_n_ctx`.
@@ -90,7 +90,7 @@ enum Benchmark {
                 from: modelURL,
                 plan: .systemManaged(requestedContextSize: contextSize))
         }
-        let effectiveContext = backend.manifest?.contextWindow
+        let effectiveContext = backend.manifest.flatMap(\.contextWindow)
 
         var config = GenerationConfig(temperature: 0.8, maxOutputTokens: maxTokens)
         config.seed = 42
