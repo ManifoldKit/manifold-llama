@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.1...v0.4.2) (2026-07-27)
+
+
+### Features
+
+* **metrics:** emit GenSpan to traceSink from LlamaBackend ([#167](https://github.com/ManifoldKit/manifold-llama/issues/167)) ([c5ce460](https://github.com/ManifoldKit/manifold-llama/commit/c5ce460f9d5881253761a7aff5b06013e1793479))
+
 ## [0.4.1](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.0...v0.4.1) (2026-07-25)
 
 
