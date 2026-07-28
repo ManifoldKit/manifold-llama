@@ -121,8 +121,13 @@ import ManifoldHardware
     /// phase is set to `.failed`.
     ///
     /// - Parameters:
-    ///   - context: Live `llama_context *` snapshot captured under `stateLock`.
-    ///   - vocab: Live `llama_vocab *` snapshot captured under `stateLock`.
+    ///   - engine: The llama.cpp C-API witness (see ``LlamaEngine``). Production
+    ///     passes ``LlamaCAPIEngine``, built over the `llama_context *` /
+    ///     `llama_vocab *` snapshot captured under `stateLock`; tests pass a
+    ///     scripted engine so this whole loop runs with no model and no Metal
+    ///     (#165). The driver owns nothing the engine allocates beyond calling
+    ///     ``LlamaEngine/freeSampler(_:)`` and
+    ///     ``LlamaEngine/releaseDecodeResources()`` on the way out.
     ///   - tokens: Tokenized prompt (including BOS) — computed before the Task.
     ///   - reuseLen: Number of leading prompt tokens that *matched* the previous
     ///     turn's KV state (the detected shared-prefix length). When > 0 the driver
@@ -150,8 +155,7 @@ import ManifoldHardware
     /// `sessionKVState` when this returns `false`.
     @discardableResult
     func run(
-        context: OpaquePointer,
-        vocab: OpaquePointer,
+        engine: any LlamaEngine,
         tokens: [llama_token],
         reuseLen: Int,
         maxTokens: Int,
@@ -196,7 +200,12 @@ import ManifoldHardware
         // `llama-context.cpp`, so prompts longer than this must be decoded
         // in chunks. We never set `n_batch` on `ctxParams`, so it inherits
         // llama.cpp's default (2048 at the time of writing).
-        let batchSize = max(1, Int(llama_n_batch(context)))
+        let batchSize = max(1, engine.batchSize)
+
+        // Frees the reusable generation batch on every exit path. Declared here
+        // rather than next to first use so it holds even for the early failure
+        // returns below; the engine no-ops when nothing was allocated.
+        defer { engine.releaseDecodeResources() }
 
         // MARK: KV cache clear / reuse
 
@@ -241,19 +250,7 @@ import ManifoldHardware
         let alignedReuseLen = Self.alignedKVReuseLength(
             tokenCount: tokens.count, reuseLen: reuseLen, batchSize: batchSize)
 
-        if let memory = llama_get_memory(context) {
-            if alignedReuseLen > 0 {
-                // Keep the batch-aligned reused prefix's KV cells; trim only the
-                // tail beyond it. Running this here (inside the generation Task) is
-                // lifecycle-safe: all context-touching work in this driver is
-                // serialized with unloadModel() via the task install (see the
-                // pointer re-read in LlamaBackend.generate), exactly as the full
-                // `llama_memory_clear` path is.
-                llama_memory_seq_rm(memory, 0, Int32(alignedReuseLen), -1)
-            } else {
-                llama_memory_clear(memory, false)
-            }
-        }
+        engine.applyKVReuse(alignedPrefixLength: alignedReuseLen)
 
         if reuseLen > 0 {
             continuation.yield(.kvCacheReuse(promptTokensReused: reuseLen))
@@ -261,39 +258,10 @@ import ManifoldHardware
 
         // MARK: Sampler chain setup
 
-        // Sampler chain order matters. Grammar (when present) must run BEFORE the
-        // probability filters (top_k / top_p / min_p) so it can prune invalid
-        // tokens to -inf while every candidate is still in play. If grammar runs
-        // after min_p, the filters can shrink the candidate pool to a set that
-        // contains no grammar-valid tokens; the grammar then masks all remaining
-        // logits to -inf, dist samples a numerical fallback (e.g. token 365 `(`),
-        // and the chain's automatic accept step inside `llama_sampler_sample`
-        // calls `llama_grammar_accept_token`, which throws
-        // `std::runtime_error: Unexpected empty grammar stack` across the C ABI
-        // and aborts the process with libc++abi (see prior crash logs from
-        // test_grammar_cancelCleansTeardown). Final order:
-        //   penalties → grammar → dry → top_k → top_p → min_p → temp → xtc → dist
-        // When mirostat v2 is active it replaces the (temp, xtc, dist) tail with
-        // a single `mirostat_v2` step that handles both temperature and final
-        // selection.
-
-        // Shared sampler parameters, computed once so the permissive (no-grammar)
-        // and strict (grammar) chains used by the thinking-phase gate (issue #1595)
-        // are byte-identical apart from the grammar stage.
-
-        // Prefer the explicit `repetitionPenalty` knob when callers supplied it; fall
-        // back to the legacy `repeatPenalty` field otherwise. The chain is added when
-        // ANY of the three penalties is non-no-op; presence and frequency are additive
-        // so 0.0 is the no-op value, while repetition is multiplicative so 1.0 is no-op.
-        let effectiveRepetitionPenalty = config.repetitionPenalty ?? config.repeatPenalty
-        let effectivePresencePenalty = config.presencePenalty ?? 0.0
-        let effectiveFrequencyPenalty = config.frequencyPenalty ?? 0.0
-        // llama.cpp uses one shared window for all three penalties; default 64 matches
-        // pre-existing behaviour. MLX exposes per-penalty windows; llama does not.
-        let effectivePenaltyWindow = Int32(config.repetitionContextSize ?? 64)
-        let penaltiesActive = effectiveRepetitionPenalty > 1.0
-            || effectivePresencePenalty != 0.0
-            || effectiveFrequencyPenalty != 0.0
+        // Chain composition (order, penalties, grammar, DRY/XTC/mirostat tails)
+        // lives in the engine — see `LlamaCAPIEngine.makeSampler(config:seed:includeGrammar:)`.
+        // The driver keeps only the decisions that are model-free: the shared
+        // seed, and which chains to build.
 
         // Use the caller-supplied seed when available so consecutive runs with the same
         // prompt + config produce identical token streams. `llama_sampler_init_dist`
@@ -323,123 +291,11 @@ import ManifoldHardware
         let hasGrammar = config.grammar != nil
         let gateGrammarOnThinking = hasGrammar && useParser
 
-        // Outcome of building one sampler chain. `chainInitFailed` and
-        // `grammarParseFailed` map to the two distinct error paths the original
-        // single-chain code surfaced (different message + different KV-coherence
-        // return value), so collapsing them would lose that fidelity.
-        enum SamplerBuildOutcome {
-            case success(UnsafeMutablePointer<llama_sampler>)
-            case chainInitFailed
-            case grammarParseFailed
-        }
-
-        func makeSampler(includeGrammar: Bool) -> SamplerBuildOutcome {
-            let sparams = llama_sampler_chain_default_params()
-            guard let sampler = llama_sampler_chain_init(sparams) else {
-                return .chainInitFailed
-            }
-            if penaltiesActive {
-                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-                    effectivePenaltyWindow,        // last_n tokens to penalize (shared window)
-                    effectiveRepetitionPenalty,    // repeat penalty (multiplicative; 1.0 = no-op)
-                    effectiveFrequencyPenalty,     // frequency penalty (additive; 0.0 = no-op)
-                    effectivePresencePenalty       // presence penalty (additive; 0.0 = no-op)
-                ))
-            }
-
-            // Grammar-constrained sampling: GBNF grammar from config, inserted at the
-            // front of the chain (right after penalties) so it prunes the logit
-            // distribution before any probability-based filter narrows the candidate
-            // set. Parse failure (invalid GBNF) is surfaced as an error — silent
-            // fallback to unconstrained sampling would produce output that violates
-            // the caller's grammar contract.
-            if includeGrammar, let grammarString = config.grammar {
-                var grammarSamplerCreated = false
-                grammarString.withCString { grammarCStr in
-                    "root".withCString { rootCStr in
-                        if let gs = llama_sampler_init_grammar(vocab, grammarCStr, rootCStr) {
-                            llama_sampler_chain_add(sampler, gs)
-                            grammarSamplerCreated = true
-                        }
-                    }
-                }
-                if !grammarSamplerCreated {
-                    llama_sampler_free(sampler)
-                    return .grammarParseFailed
-                }
-            }
-
-            if let model = llama_get_model(context),
-               let dry = DRYSamplerDescriptor(config: config, nCtxTrain: llama_model_n_ctx_train(model)) {
-                let drySampler = Self.withCStringArray(dry.options.sequenceBreakers) { breakers in
-                    var mutableBreakers = breakers
-                    return mutableBreakers.withUnsafeMutableBufferPointer { breakerBuffer in
-                        llama_sampler_init_dry(
-                            vocab,
-                            dry.nCtxTrain,
-                            dry.options.multiplier,
-                            dry.options.base,
-                            dry.options.allowedLength,
-                            dry.options.penaltyLastN,
-                            breakerBuffer.baseAddress,
-                            breakerBuffer.count
-                        )
-                    }
-                }
-                llama_sampler_chain_add(sampler, drySampler)
-            }
-
-            // temperature == 0.0 means true greedy decoding: always pick the argmax token.
-            // The stochastic `dist` sampler introduces seed-dependent tie-breaking that can
-            // produce non-deterministic output when two logits are numerically equal (a
-            // realistic occurrence when the KV cache re-decode path uses a different Metal
-            // accumulation order than the original full-batch decode). Using the dedicated
-            // greedy sampler eliminates that randomness entirely.
-            if config.temperature <= 0.0 {
-                llama_sampler_chain_add(sampler, llama_sampler_init_greedy())
-            } else {
-                // Surface `config.topK` to the sampler chain. Historical default of 40 is
-                // preserved when the caller leaves it nil, so existing behaviour is unchanged
-                // for callers that never set the field (which previously had no effect).
-                let effectiveTopK = config.topK.map { Int32($0) } ?? 40
-                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(effectiveTopK))
-                if config.topP < 1.0 {
-                    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(config.topP, 1))
-                }
-                // Honour `config.minP` when supplied; default to 0.05 for parity with prior behaviour.
-                let effectiveMinP = config.minP ?? 0.05
-                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(effectiveMinP, 1))
-
-                // Mirostat v2 owns both the temperature step and the final token selection
-                // (it samples internally), so when it is active we skip temp/xtc/dist
-                // entirely. When inactive we keep the historical chain tail.
-                if let mirostat = MirostatV2SamplerDescriptor(config: config, fallbackSeed: samplerSeed) {
-                    llama_sampler_chain_add(sampler, llama_sampler_init_mirostat_v2(
-                        mirostat.resolvedSeed,
-                        mirostat.options.tau,
-                        mirostat.options.eta
-                    ))
-                } else {
-                    llama_sampler_chain_add(sampler, llama_sampler_init_temp(config.temperature))
-                    if let xtc = XTCSamplerDescriptor(config: config, fallbackSeed: samplerSeed) {
-                        llama_sampler_chain_add(sampler, llama_sampler_init_xtc(
-                            xtc.options.probability,
-                            xtc.options.threshold,
-                            xtc.options.minKeep,
-                            xtc.resolvedSeed
-                        ))
-                    }
-                    llama_sampler_chain_add(sampler, llama_sampler_init_dist(samplerSeed))
-                }
-            }
-            return .success(sampler)
-        }
-
         // Strict chain: carries the grammar when the caller supplied one. This is the
         // only chain used for non-thinking models and for thinking-disabled requests,
         // so its construction path is identical to pre-#1595.
-        let outputSampler: UnsafeMutablePointer<llama_sampler>
-        switch makeSampler(includeGrammar: hasGrammar) {
+        let outputSampler: LlamaSamplerHandle
+        switch engine.makeSampler(config: config, seed: samplerSeed, includeGrammar: hasGrammar) {
         case .success(let s):
             outputSampler = s
         case .chainInitFailed:
@@ -455,7 +311,7 @@ import ManifoldHardware
             // so the cache is still coherent and the caller can keep `sessionKVState`.
             return true
         }
-        defer { llama_sampler_free(outputSampler) }
+        defer { engine.freeSampler(outputSampler) }
 
         // Permissive chain: identical to the strict chain minus the grammar stage.
         // Built only when gating is required (grammar + thinking both active) and
@@ -464,9 +320,9 @@ import ManifoldHardware
         // (includeGrammar == false). If the chain fails to initialise we fall back
         // to the strict chain — grammar would then (incorrectly) constrain reasoning,
         // but that is strictly better than aborting the generation outright.
-        let thinkingSampler: UnsafeMutablePointer<llama_sampler>? = {
+        let thinkingSampler: LlamaSamplerHandle? = {
             guard gateGrammarOnThinking else { return nil }
-            switch makeSampler(includeGrammar: false) {
+            switch engine.makeSampler(config: config, seed: samplerSeed, includeGrammar: false) {
             case .success(let s):
                 return s
             case .chainInitFailed, .grammarParseFailed:
@@ -474,7 +330,7 @@ import ManifoldHardware
                 return nil
             }
         }()
-        defer { if let thinkingSampler { llama_sampler_free(thinkingSampler) } }
+        defer { if let thinkingSampler { engine.freeSampler(thinkingSampler) } }
 
         // Phase gate: starts permissive when gating, flips to strict on the first
         // `.thinkingCompleted`. A no-op (always strict) when not gating.
@@ -532,7 +388,7 @@ import ManifoldHardware
                 )
                 prefillAborted = true
                 onError?("memoryInsufficient")
-                llama_synchronize(context)
+                engine.synchronize()
                 await MainActor.run {
                     generationStream.setPhase(.failed("Insufficient memory for prefill"))
                 }
@@ -544,18 +400,11 @@ import ManifoldHardware
 
             let footprintBefore = prefillFootprintSampler()
 
-            var promptBatch = llama_batch_init(Int32(chunkSize), 0, 1)
-            for i in 0..<chunkSize {
-                promptBatch.token[i] = tokens[promptPos + i]
-                promptBatch.pos[i] = Int32(promptPos + i)
-                promptBatch.n_seq_id[i] = 1
-                promptBatch.seq_id[i]?[0] = 0
-                promptBatch.logits[i] = (isLastChunk && i == chunkSize - 1) ? 1 : 0
-            }
-            promptBatch.n_tokens = Int32(chunkSize)
-
-            let decodeResult = llama_decode(context, promptBatch)
-            llama_batch_free(promptBatch)
+            let decodeResult = engine.decodePromptChunk(
+                tokens: tokens[promptPos..<(promptPos + chunkSize)],
+                startPosition: promptPos,
+                logitsOnLastToken: isLastChunk
+            )
 
             if decodeResult != 0 {
                 promptDecodeFailed = true
@@ -609,7 +458,7 @@ import ManifoldHardware
             // without this fence that clear can race with in-flight GPU work.
             return await Self.finishDecodeFailure(
                 message: "Failed to decode prompt",
-                synchronize: { llama_synchronize(context) },
+                synchronize: { engine.synchronize() },
                 generationStream: generationStream,
                 continuation: continuation,
                 onError: onError
@@ -620,7 +469,7 @@ import ManifoldHardware
         // generation loop.
         if isCancelled() {
             // Flush any Metal ops from prompt chunks already decoded.
-            llama_synchronize(context)
+            engine.synchronize()
             await MainActor.run { generationStream.setPhase(.done) }
             continuation.finish()
             return true
@@ -628,12 +477,10 @@ import ManifoldHardware
 
         // MARK: Token generation loop
 
-        // Generation loop uses a fresh 1-capacity batch — the prompt loop
-        // allocated and freed a batch per chunk, so there's nothing to
-        // reuse here.
-        var genBatch = llama_batch_init(1, 0, 1)
-        defer { llama_batch_free(genBatch) }
-
+        // The generation loop's reusable 1-capacity batch is owned by the
+        // engine (allocated on first `decodeGeneratedToken`, released by the
+        // `engine.releaseDecodeResources()` defer registered at the top).
+        //
         // The chunked prompt loop placed tokens at positions
         // [0, tokens.count - 1]; the next decoded token goes at
         // `tokens.count`.
@@ -685,7 +532,7 @@ import ManifoldHardware
         // never runs llama_decode past the context window even when maxThinkingTokens
         // is nil (defaulting to maxTokens). With a small context (e.g. 512 tokens in
         // tests) and a large prompt, the effective budget shrinks accordingly.
-        let contextCapacity = Int(llama_n_ctx(context))
+        let contextCapacity = engine.contextCapacity
         let usedSlots = tokens.count  // prompt occupies this many KV slots already
         let totalLoopBudget = Self.thinkingLoopBudget(
             contextCapacity: contextCapacity,
@@ -742,12 +589,12 @@ import ManifoldHardware
             // only when gating is active and grammar is inactive, so the fallback to
             // `outputSampler` covers every other case (no gating, or already strict).
             let sampler = grammarGate.isGrammarActive ? outputSampler : (thinkingSampler ?? outputSampler)
-            let token = llama_sampler_sample(sampler, context, logitIndex)
+            let token = engine.sample(sampler, logitIndex: logitIndex)
 
-            if llama_vocab_is_eog(vocab, token) { break }
+            if engine.isEndOfGeneration(token) { break }
 
             // Decode token to text and route through ThinkingTransform when active.
-            if let text = LlamaTokenization.tokenToString(token, vocab: vocab, invalidUTF8Buffer: &invalidUTF8) {
+            if let text = engine.tokenToString(token, invalidUTF8Buffer: &invalidUTF8) {
                 // Single-token repetition guard: identical-token run of ≥maxRepeatWindow
                 // terminates the loop. Catches small-model repetition loops (e.g.
                 // smollm2-135m emitting " " hundreds of times) before the post-hoc
@@ -834,25 +681,21 @@ import ManifoldHardware
                 if thinkingLimitReached || visibleBudgetExceeded { break generationLoop }
             }
 
-            // Prepare next batch
-            genBatch.n_tokens = 0
-            genBatch.token[0] = token
-            genBatch.pos[0] = Int32(nCur)
-            genBatch.n_seq_id[0] = 1
-            genBatch.seq_id[0]?[0] = 0
-            genBatch.logits[0] = 1
-            genBatch.n_tokens = 1
+            // Prepare next batch: the sampled token is decoded at the next
+            // free KV position, always carrying logits so the following
+            // iteration can sample from it.
+            let generatedPosition = nCur
             nCur += 1
 
             if isCancelled() { exitedDueToCancellation = true; break }
 
-            if llama_decode(context, genBatch) != 0 {
+            if engine.decodeGeneratedToken(token, position: generatedPosition) != 0 {
                 // Synchronize before surfacing the error so the GPU drains any
                 // work that *did* commit before the failure.  Without this, a
                 // subsequent KV-cache clear from a retry can race Metal ops.
                 return await Self.finishDecodeFailure(
                     message: "Decode failed during generation",
-                    synchronize: { llama_synchronize(context) },
+                    synchronize: { engine.synchronize() },
                     generationStream: generationStream,
                     continuation: continuation,
                     onError: onError
@@ -888,7 +731,7 @@ import ManifoldHardware
         // the GPU is already done (typically sub-millisecond) and is the
         // authoritative fix recommended by the llama.cpp contract (see
         // `docs/LLAMA_CONTRACT.md` and `llama.h` line 972).
-        llama_synchronize(context)
+        engine.synchronize()
 
         await MainActor.run { generationStream.setPhase(.done) }
         Self.logger.debug("LlamaGenerationDriver run finished")
@@ -920,8 +763,9 @@ import ManifoldHardware
     ///      undefined after a failed decode and the prefix must not be reused.
     ///
     /// `synchronize` is injected so the contract can be exercised headlessly: the
-    /// real call sites pass `{ llama_synchronize(context) }`, tests pass a recorder
-    /// that captures call order without a live `llama_context`.
+    /// real call sites pass `{ engine.synchronize() }` (which reaches
+    /// `llama_synchronize` inside ``LlamaCAPIEngine``), tests pass a recorder that
+    /// captures call order without a live `llama_context`.
     @_spi(Testing) public static func finishDecodeFailure(
         message: String,
         synchronize: () -> Void,
