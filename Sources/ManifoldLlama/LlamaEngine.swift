@@ -10,8 +10,13 @@ import ManifoldContract
 /// Keeping the driver's sampler references behind this box is what lets the
 /// generation loop run with no llama.cpp state at all.
 // @_spi(Testing): published only for backend test targets (companion-package split, #1749).
-@_spi(Testing) public struct LlamaSamplerHandle: Hashable, @unchecked Sendable {
+@_spi(Testing) public struct LlamaSamplerHandle: @unchecked Sendable {
     public let rawPointer: UnsafeMutableRawPointer?
+
+    /// Scripted-engine identity only. `LlamaCAPIEngine` never sets this (it
+    /// identifies chains by `rawPointer`), so it is always `0` in production —
+    /// it exists so a test double can tell its chains apart and assert that
+    /// every chain it handed out was freed.
     public let id: Int
 
     public init(rawPointer: UnsafeMutableRawPointer?, id: Int = 0) {
@@ -155,6 +160,23 @@ import ManifoldContract
     public init(context: OpaquePointer, vocab: OpaquePointer) {
         self.context = context
         self.vocab = vocab
+    }
+
+    /// Safety net for ``generationBatch``. The contract is that
+    /// ``LlamaGenerationDriver/run(engine:...)`` calls
+    /// ``releaseDecodeResources()`` on every exit path via a `defer` — but that
+    /// is a convention the type cannot enforce, and an engine constructed
+    /// outside `run(...)` would otherwise leak the `llama_batch`. Freeing here
+    /// too is safe: ``releaseDecodeResources()`` nils the field, so the normal
+    /// path leaves nothing for this to double-free.
+    ///
+    /// Only the batch is owned. `context` and `vocab` are borrowed — they are
+    /// freed by `LlamaBackend.unloadModel()`, which awaits the generation task
+    /// first.
+    deinit {
+        if let batch = generationBatch {
+            llama_batch_free(batch)
+        }
     }
 
     public var batchSize: Int { max(1, Int(llama_n_batch(context))) }

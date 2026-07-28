@@ -3,7 +3,7 @@
 This document describes every `llama_*` C symbol called by the `ManifoldLlama`
 target (`Sources/ManifoldLlama/`), covering threading constraints, ordering
 invariants, capacity limits, ownership semantics, and known failure modes. It
-is generated from a careful read of `LlamaBackend.swift`,
+is generated from a careful read of `LlamaEngine.swift`, `LlamaBackend.swift`,
 `LlamaGenerationDriver.swift`, `LlamaModelLoader.swift`,
 `LlamaEmbeddingBackend.swift`, and the vendored `docs/vendor/llama.h` (llama.cpp
 build **b9859**; versus b9744 the header adds one new unused symbol,
@@ -14,6 +14,16 @@ contract tables below are unchanged). The xcframework is consumed as a
 `.binaryTarget(url:checksum:)` in `Package.swift` — there is no
 `mattt/llama.swift` wrapper in the dependency graph anymore (see *Binary vs.
 Vendored Source* and *Slimming the xcframework* below).
+
+**Where the generation-path calls live (#165):** every `llama_*` call made on
+behalf of a `generate()` turn is now inside `LlamaEngine.swift` — specifically
+`LlamaCAPIEngine`, the sole production implementation of the `LlamaEngine`
+protocol. `LlamaGenerationDriver.swift` contains **no** `llama_*` symbols at
+all; it decides *when* each C operation happens and calls the engine method
+that performs it, so the ordering invariants below are still authored there
+and enforced there. When grepping for a symbol during an upgrade, search
+`Sources/ManifoldLlama/` as a whole rather than any single file — the
+driver/engine split means the caller and the callsite are in different files.
 
 Use this document when upgrading the xcframework pin: diff `docs/vendor/llama.h`
 against the new version's header, then review every section below for contract
@@ -172,7 +182,7 @@ options.
 | Symbol | Returns | Threading | Notes |
 |--------|---------|-----------|-------|
 | `llama_n_ctx(ctx)` | `uint32_t` | safe read | Authoritative context size — may differ from `ctxParams.n_ctx`; query rather than assume. |
-| `llama_get_model(ctx)` | `const llama_model *` | safe read | Borrowed pointer back to the owning model; do not free. Used by `LlamaGenerationDriver` to read `n_ctx_train` when configuring DRY. |
+| `llama_get_model(ctx)` | `const llama_model *` | safe read | Borrowed pointer back to the owning model; do not free. Used by `LlamaCAPIEngine.makeSampler` to read `n_ctx_train` when configuring DRY. |
 | `llama_model_n_ctx_train(model)` | `int32_t` | safe read | Training-time context size; feeds `DRYSamplerDescriptor`. |
 | `llama_model_n_embd(model)` | `int32_t` | safe read | Embedding dimensionality; used by `LlamaEmbeddingBackend` to size output buffers. |
 | `llama_model_meta_val_str(model, key, buf, len)` | `int32_t` | safe read | Reads GGUF metadata strings (e.g. chat template); negative return signals "key not present" or buffer too small. Caller must retry-on-negative. |
@@ -209,7 +219,7 @@ options.
 |-----------|--------|
 | Signature | `void llama_memory_seq_rm(llama_memory_t mem, llama_seq_id seq_id, llama_pos p0, llama_pos p1)` |
 | Threading | Must not be called concurrently with `llama_decode` on the same context. |
-| Ordering | Used at the start of a generation run when the new prompt shares a prefix of length `reuseLen` with the previous decode (`LlamaBackend.swift:384`). Trims the KV tail past `p0 = reuseLen` so the suffix can be re-decoded starting at the correct position. `p1 = -1` means "to end". |
+| Ordering | Used at the start of a generation run when the new prompt shares a prefix of length `reuseLen` with the previous decode. `LlamaGenerationDriver.swift:253` makes the decision (`engine.applyKVReuse(alignedPrefixLength:)`); `LlamaEngine.swift:194` (`LlamaCAPIEngine.applyKVReuse`) issues the call. Trims the KV tail past `p0 = alignedReuseLen` so the suffix can be re-decoded starting at the correct position. `p1 = -1` means "to end". |
 | Limits | The reused prefix must be byte-identical to the previously-decoded prompt; otherwise the surviving KV entries are stale and produce garbage logits. The backend recomputes the longest shared prefix per call. |
 | Ownership | Void. |
 | Failure modes | Silent correctness bug if `reuseLen` overstates the shared prefix. See Invariant #3 for the seed-determinism caveat introduced by the partial re-decode path. |
@@ -400,7 +410,7 @@ fields request them. Every entry is transferred to the chain by
 |-----------|--------|
 | Signature | `void llama_synchronize(struct llama_context * ctx)` |
 | Threading | Safe to call from any thread that is not concurrently invoking `llama_decode`/`llama_encode` on the same context. |
-| Ordering | Must be called at **every** exit path of a generation run before returning control: normal completion, mid-prompt cancellation, prompt-decode failure, and in-loop decode failure. `LlamaGenerationDriver.swift:377/387/596/637` and `LlamaEmbeddingBackend.swift:169` are the authoritative callsites. |
+| Ordering | Must be called at **every** exit path of a generation run before returning control: normal completion, mid-prompt cancellation, prompt-decode failure, in-loop decode failure, and prefill memory abort. The five generation-path decision sites are `LlamaGenerationDriver.swift:391/461/472/698/734` (all `engine.synchronize()`); they funnel through the single C callsite `LlamaEngine.swift:394` (`LlamaCAPIEngine.synchronize`). `LlamaEmbeddingBackend.swift:101/105/182` and `LlamaReranker.swift:97/101/173` call the C function directly. |
 | Limits | Blocks the calling thread until the GPU is idle — sub-millisecond when the GPU has already drained, longer when a long command buffer is in flight. |
 | Ownership | Void. |
 | Failure modes | Skipping the call lets Metal command buffers from the previous run overlap with the KV-clear at the start of the next run, tripping `GGML_ASSERT([rsets->data count] == 0)` in `ggml-metal-device.m`. See Violation #5. |
@@ -597,7 +607,7 @@ and aborted the process via libc++abi.
 
 **Fix:** Grammar is now inserted into the chain immediately after
 `penalties` and **before** any probability filter
-(`LlamaGenerationDriver.swift:195`):
+(`LlamaEngine.swift:256`, in `LlamaCAPIEngine.makeSampler`):
 
 ```
 penalties → grammar → dry → top_k → top_p → min_p → temp → xtc → dist
@@ -618,7 +628,7 @@ type std::runtime_error: Unexpected empty grammar stack`; regression test
 
 ### 1. Greedy sampler replaces `dist` when `temperature <= 0.0`
 
-`LlamaGenerationDriver.swift:281` swaps in `llama_sampler_init_greedy()` for
+`LlamaEngine.swift:296` swaps in `llama_sampler_init_greedy()` for
 `temp/xtc/dist` whenever `config.temperature <= 0.0`. Reason: `dist` introduces
 seed-dependent tie-breaking that can produce non-deterministic argmax when
 two logits are numerically equal — which is a realistic case on the KV-reuse
@@ -635,10 +645,11 @@ double-sampling and undefined chain behaviour.
 
 ### 3. Prefix KV reuse and seed determinism
 
-`LlamaBackend.swift:384` calls `llama_memory_seq_rm(mem, 0, reuseLen, -1)`
-to trim the KV tail past the longest shared prefix between the new prompt
-and the previous decode. `LlamaGenerationDriver.run` skips
-`llama_memory_clear` when `reuseLen > 0` and emits `.kvCacheReuse`. This is
+`LlamaEngine.swift:194` (`LlamaCAPIEngine.applyKVReuse`) calls
+`llama_memory_seq_rm(mem, 0, alignedReuseLen, -1)` to trim the KV tail past the
+longest shared prefix between the new prompt and the previous decode, and skips
+`llama_memory_clear` when that prefix is non-empty. `LlamaGenerationDriver.run`
+computes the prefix, drives that call, and emits `.kvCacheReuse`. This is
 prompt caching; it is a correctness-preserving optimisation but **not
 bit-exact** with a clean decode of the same prompt — the Metal accumulation
 order differs, so seeded `dist` sampling can produce different tokens

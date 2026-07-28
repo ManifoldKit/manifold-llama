@@ -166,6 +166,11 @@ final class LlamaGenerationDriverScriptedEngineTests: XCTestCase {
 
         let counts = await collector.value
         XCTAssertGreaterThan(counts.thinking, 0, "the scripted script must produce reasoning tokens")
+        // Without this bound the equality below is satisfiable by 0 == 0 — a
+        // future change that made the thinking parser swallow all visible
+        // output would leave `onToken` provably broken and this test green.
+        XCTAssertGreaterThan(counts.visible, 0,
+            "the scripted script must produce visible output after the reasoning block")
         XCTAssertEqual(tokenHits.count, counts.visible,
             "onToken must fire exactly once per visible .token event and never for .thinkingToken")
     }
