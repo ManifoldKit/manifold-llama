@@ -361,6 +361,54 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         }
     }
 
+    /// Installs a fabricated ``ModelManifest`` carrying `identifier` so headless
+    /// tests can assert the `model` field of the emitted ``InferenceMetric`` is
+    /// read from the manifest rather than hardcoded. Without this the metric
+    /// always reports `"unknown"` on an unloaded backend, which cannot
+    /// distinguish "read the manifest" from "wrote a literal".
+    ///
+    /// ONLY call this from test targets. Never call in production code — it
+    /// bypasses the normal `loadModel` lifecycle.
+    @_spi(Testing) public func injectModelIdentifierForTesting(_ identifier: String) {
+        withStateLock {
+            _manifest = ModelManifest(
+                contextWindow: Int(_effectiveContextSize),
+                supportsTools: true,
+                supportsThinking: false,
+                thinkingMarkers: nil,
+                supportsSeed: true,
+                supportedSamplingParameters: [.temperature],
+                modelIdentifier: identifier,
+                producerKind: .local
+            )
+        }
+    }
+
+    /// Replaces the two llama.cpp-touching steps of
+    /// ``generate(prompt:systemPrompt:config:hints:)`` — prompt tokenization and
+    /// the construction of the ``LlamaEngine`` handed to
+    /// ``LlamaGenerationDriver`` — so the whole generation Task body runs with
+    /// no `.gguf` and no Metal (#165).
+    ///
+    /// Everything BETWEEN those two steps is production code and stays on the
+    /// real path: the context-window preflight, the KV shared-prefix scan, the
+    /// `isGenerating` flip, the `metricsEnabled` gate, the tracker start, the
+    /// `onToken`/`onError` hook construction, the `driver.run(...)` call, the
+    /// `defer`-based metric emit, and the post-decode KV-coherence guard. That
+    /// is the point: a test drives the orchestration, not a reimplementation of
+    /// it.
+    ///
+    /// Pass `nil` to restore the production path.
+    ///
+    /// ONLY call this from test targets. Never call in production code.
+    @_spi(Testing) public func installGenerationSeamForTesting(_ seam: LlamaGenerationSeam?) {
+        withStateLock { _generationSeam = seam }
+    }
+
+    /// Guarded by `stateLock`. Nil in production — see
+    /// ``installGenerationSeamForTesting(_:)``.
+    private var _generationSeam: LlamaGenerationSeam?
+
     /// Directly sets `isGenerating` under `stateLock`. Lets headless tests put the
     /// backend into a simulated mid-generation state so the `alreadyGenerating` guard
     /// can be exercised without a real decode loop.
@@ -628,7 +676,18 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         guard let preflightVocab = withStateLock({ vocab }) else {
             throw InferenceError.inferenceFailure("No model loaded")
         }
-        let tokens = LlamaTokenization.tokenize(prompt, vocab: preflightVocab, addBos: true)
+        // Test seam (#165): the tokenize call is one of exactly two places
+        // `generate()` touches llama.cpp, so it has to be swappable for the
+        // Task body below to be reachable without a real vocab. Explicit
+        // `if`/`else` into a `let`, not a ternary over closures — see the
+        // hook construction inside the Task for the compiler-crash rationale.
+        let generationSeam = withStateLock { _generationSeam }
+        let tokens: [llama_token]
+        if let generationSeam {
+            tokens = generationSeam.tokenize(prompt, preflightVocab)
+        } else {
+            tokens = LlamaTokenization.tokenize(prompt, vocab: preflightVocab, addBos: true)
+        }
         guard !tokens.isEmpty else {
             throw InferenceError.inferenceFailure("Failed to tokenize prompt")
         }
@@ -787,6 +846,17 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 return
             }
 
+            // The second (and last) llama.cpp touch point in this method —
+            // everything the driver does to the C API goes through this
+            // witness. Production builds `LlamaCAPIEngine`, a verbatim
+            // transcription of the calls that used to be inline in the driver.
+            let engine: any LlamaEngine
+            if let generationSeam {
+                engine = generationSeam.makeEngine(context, vocab)
+            } else {
+                engine = LlamaCAPIEngine(context: context, vocab: vocab)
+            }
+
             let driver = LlamaGenerationDriver()
             // Manual override beats auto-detection. When neither is present,
             // markers stays nil and the driver skips ThinkingTransform entirely.
@@ -802,8 +872,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
                 onErrorHook = { label in metricTracker.recordError(label) }
             }
             let kvCoherent = await driver.run(
-                context: context,
-                vocab: vocab,
+                engine: engine,
                 tokens: tokens,
                 reuseLen: reuseLen,
                 maxTokens: maxTokens,
