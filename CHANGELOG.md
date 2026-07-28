@@ -5,6 +5,8 @@
 
 ### Bug Fixes
 
+* **vision:** adapt to probed `llamaSupportsImageInput` API ([#166](https://github.com/ManifoldKit/manifold-llama/issues/166)) ([c9b9f06](https://github.com/ManifoldKit/manifold-llama/commit/c9b9f06b8d036d070f27d61eb955d20701b42d4c))
+* **deps:** bump ManifoldKit pin to 0.75.0 for the vision probe API ([#166](https://github.com/ManifoldKit/manifold-llama/issues/166)) ([c9b9f06](https://github.com/ManifoldKit/manifold-llama/commit/c9b9f06b8d036d070f27d61eb955d20701b42d4c))
 * **tool-calling:** parse Qwen3.5 XML tool-call dialect ([#171](https://github.com/ManifoldKit/manifold-llama/issues/171)) ([3597c07](https://github.com/ManifoldKit/manifold-llama/commit/3597c07d5646f1bec4c4bd8ccdac0bbbaa8ec3be))
 
 ## [0.4.2](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.1...v0.4.2) (2026-07-27)
