@@ -224,6 +224,178 @@ final class LlamaQwen35XMLToolCallParserTests: XCTestCase {
         XCTAssertEqual(try decodeArgs(call)["city"] as? String, "Paris")
     }
 
+    // MARK: - Non-finite numbers (crash regression)
+
+    /// `Double(String)` accepts `nan` / `inf` / `1e400`, and
+    /// `JSONSerialization.data(withJSONObject:)` raises an ObjC
+    /// `NSInvalidArgumentException` — NOT a Swift error — on a non-finite
+    /// number. `try?` cannot catch an ObjC exception, so coercing one of these
+    /// to a `Double` aborted the whole process (exit 134, uncaught NSException):
+    /// a model emitting `nan` from a divide-by-zero, or extraction over a CSV
+    /// containing `inf`, would take the host down with no error and no degraded
+    /// path.
+    ///
+    /// These MUST stay strings. If this regresses the test does not fail — it
+    /// crashes the test runner, which is the loudest possible signal.
+    func test_qwen35XMLCall_nonFiniteValues_doNotCrashAndStayStrings() throws {
+        for spelling in ["nan", "NaN", "inf", "Inf", "infinity", "-inf", "1e400", "-1e400"] {
+            var parser = Parser()
+            let input = """
+            <tool_call>
+            <function=calc>
+            <parameter=a>
+            \(spelling)
+            </parameter>
+            </function>
+            </tool_call>
+            """
+            let calls = toolCalls(parser.process(input))
+            XCTAssertEqual(calls.count, 1, "\(spelling) should still dispatch")
+            let value = try decodeArgs(try XCTUnwrap(calls.first))["a"]
+            XCTAssertEqual(value as? String, spelling,
+                           "\(spelling) must be preserved as text, never coerced to a non-finite Double")
+        }
+    }
+
+    func test_qwen35XMLCall_overflowingNumberInsideJSONArray_doesNotCrash() throws {
+        // Checks the other candidate route to a non-finite: an overflowing
+        // literal inside a JSON-shaped value. `JSONSerialization.jsonObject`
+        // REJECTS `1e400` outright (it does not decode to `inf`), so the array
+        // decode fails and the value falls through to text. Asserted here so
+        // the behaviour is pinned rather than assumed — the guarantee that
+        // matters is that the process survives and nothing non-finite is
+        // constructed.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=calc>
+        <parameter=xs>
+        [1e400]
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["xs"] as? String, "[1e400]")
+    }
+
+    func test_qwen35XMLCall_finiteScientificNotation_stillTypesAsDouble() throws {
+        // The non-finite guard must not reject legitimate exponent notation.
+        var parser = Parser()
+        let input = "<tool_call>\n<function=calc>\n<parameter=a>\n1e3\n</parameter>\n</function>\n</tool_call>"
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["a"] as? Double, 1000.0)
+    }
+
+    // MARK: - Structured (array / object) parameter values
+
+    func test_qwen35XMLCall_arrayValue_decodesAsArrayNotString() throws {
+        // The template renders structured args as `args_value | tojson`, so the
+        // model is TAUGHT to emit JSON text here. Handing the tool the string
+        // `"[\"a\",\"b\"]"` instead of a list fails schema validation downstream.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=list_dir>
+        <parameter=names>
+        ["a","b"]
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["names"] as? [String], ["a", "b"])
+    }
+
+    func test_qwen35XMLCall_objectValue_decodesAsObjectNotString() throws {
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=configure>
+        <parameter=opts>
+        {"depth":2,"recursive":true}
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        let opts = try XCTUnwrap(args["opts"] as? [String: Any])
+        XCTAssertEqual(opts["depth"] as? Int, 2)
+        XCTAssertEqual(opts["recursive"] as? Bool, true)
+    }
+
+    func test_qwen35XMLCall_bracketLeadingProse_isNotMangled() throws {
+        // A value that merely STARTS with `[` but is not JSON must survive as
+        // text rather than being dropped or half-parsed.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=echo>
+        <parameter=text>
+        [draft] not json at all
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["text"] as? String, "[draft] not json at all")
+    }
+
+    // MARK: - Whitespace-padded scalars
+
+    func test_qwen35XMLCall_whitespacePaddedScalar_stillTypesAsNumber() throws {
+        var parser = Parser()
+        let input = "<tool_call>\n<function=calc>\n<parameter=a>\n 41 \n</parameter>\n</function>\n</tool_call>"
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["a"] as? Int, 41)
+    }
+
+    func test_qwen35XMLCall_freeTextValue_keepsItsInternalSpacing() throws {
+        // Trimming is a probe for scalar detection only — it must not silently
+        // rewrite the content of a genuine free-text parameter.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=write_note>
+        <parameter=body>
+        line one
+          indented two
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["body"] as? String, "line one\n  indented two")
+    }
+
+    // MARK: - Multiple function blocks in one delimiter pair
+
+    func test_qwen35XMLCall_twoFunctionBlocks_doNotMergeParameters() throws {
+        // Off-spec emission, but the failure mode is a silent WRONG dispatch:
+        // without bounding the parameter scan at `</function>`, both parameter
+        // sets merge into one call under the FIRST function's name.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=first>
+        <parameter=a>
+        1
+        </parameter>
+        </function>
+        <function=second>
+        <parameter=b>
+        2
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let call = try XCTUnwrap(toolCalls(parser.process(input)).first)
+        XCTAssertEqual(call.toolName, "first")
+        let args = try decodeArgs(call)
+        XCTAssertEqual(args["a"] as? Int, 1)
+        XCTAssertNil(args["b"], "second function's parameters must not leak into the first call")
+    }
+
     // MARK: - Malformed bodies
 
     func test_qwen35XMLCall_missingFunctionName_isDropped() throws {

@@ -138,7 +138,9 @@ import ManifoldInference
     // MARK: - Qwen3.5 XML body parsing
 
     /// Opening prefix of the Qwen3.5 inner function tag: `<function=`.
-    static let qwen35FunctionOpenPrefix = "<function="
+    private static let qwen35FunctionOpenPrefix = "<function="
+    /// Closing tag of a Qwen3.5 function block.
+    private static let qwen35FunctionCloseTag = "</function>"
     /// Opening prefix of a Qwen3.5 parameter tag: `<parameter=`.
     private static let qwen35ParameterOpenPrefix = "<parameter="
     /// Closing tag of a Qwen3.5 parameter block.
@@ -171,10 +173,29 @@ import ManifoldInference
         let name = String(raw[nameRange.upperBound..<nameEnd])
         guard isValidQwen35FunctionName(name) else { return nil }
 
-        let body = String(raw[raw.index(after: nameEnd)...])
+        // Bound the parameter scan at this function's OWN close tag. Without it
+        // a stream carrying two `<function=…>` blocks inside one `<tool_call>`
+        // pair would merge both parameter sets into a single call under the
+        // first function's name (same-named keys last-wins) — a silent WRONG
+        // dispatch rather than a drop. Off-spec emission, but cheap to exclude.
+        var body = String(raw[raw.index(after: nameEnd)...])
+        if let functionClose = body.range(of: qwen35FunctionCloseTag) {
+            body = String(body[..<functionClose.lowerBound])
+        }
         let arguments = parseQwen35Parameters(body)
 
-        guard let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+        // `JSONSerialization.data` raises an ObjC `NSInvalidArgumentException`
+        // (NOT a Swift error) on a non-finite Double, and `try?` cannot catch
+        // an ObjC exception — the process would abort (exit 134). The live
+        // defence is `coerceQwen35Value`, which refuses to construct a
+        // non-finite scalar; the nested-JSON route is already closed upstream
+        // because `JSONSerialization.jsonObject` rejects `1e400` rather than
+        // decoding it to `inf`. This check is therefore defence-in-depth with
+        // no currently-reachable trigger — kept because the failure it guards
+        // is an uncatchable process abort, and one cheap validity call is a
+        // trivial price for making that unreachable by construction.
+        guard JSONSerialization.isValidJSONObject(arguments),
+              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
               let argsString = String(data: data, encoding: .utf8)
         else { return nil }
 
@@ -223,7 +244,7 @@ import ManifoldInference
     }
 
     /// Strips the structural newlines around a parameter value and coerces bare
-    /// scalars to their JSON types.
+    /// scalars, arrays, and objects to their JSON types.
     ///
     /// The XML wire format has no quoting, so the value arrives as raw text and
     /// the type must be recovered from its shape — the same trade-off (and the
@@ -231,19 +252,42 @@ import ManifoldInference
     /// typed, so leaving `41` as the string `"41"` fails argument validation
     /// downstream; the cost is that a genuinely string-typed value that looks
     /// numeric is typed as a number.
+    ///
+    /// Scalar detection runs against a whitespace-trimmed probe so a padded
+    /// `\n 41 \n` still types as `41`, but a value that is NOT a scalar is
+    /// returned with only its structural newlines removed — interior and
+    /// surrounding spaces are content in a free-text parameter and must survive.
     private static func coerceQwen35Value(_ raw: String) -> Any {
         var value = raw
         if value.hasPrefix("\n") { value.removeFirst() }
         if value.hasSuffix("\n") { value.removeLast() }
 
-        switch value {
+        let probe = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch probe {
         case "true":  return true
         case "false": return false
         case "null":  return NSNull()
         default: break
         }
-        if let intValue = Int(value) { return intValue }
-        if let doubleValue = Double(value) { return doubleValue }
+        if let intValue = Int(probe) { return intValue }
+        if let doubleValue = Double(probe) {
+            // `Double("nan"/"inf"/"1e400")` succeeds and yields a non-finite
+            // value. Serialising one raises an UNCATCHABLE ObjC exception (see
+            // `parseQwen35XMLCall`), so refuse to produce it — fall through and
+            // keep the literal text, which is lossless and safe.
+            if doubleValue.isFinite { return doubleValue }
+        }
+        // The template renders structured arguments as `args_value | tojson`
+        // inside `<parameter=…>`, so an array/object parameter arrives as JSON
+        // TEXT. Decode it rather than handing the tool a string that merely
+        // looks like a list — matching the Gemma-4 path, which re-parses `[`/`{`
+        // literals for the same reason.
+        if probe.hasPrefix("[") || probe.hasPrefix("{"),
+           let data = probe.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            return parsed
+        }
         return value
     }
 

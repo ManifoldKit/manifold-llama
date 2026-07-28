@@ -40,11 +40,16 @@ enum LlamaToolCallDialect {
             // changed the body to nested XML (#158):
             //   <function=name><parameter=key>\nvalue\n</parameter></function>
             // Checked BEFORE the generic `qwen` prefix — otherwise these models
-            // are misreported as the Qwen2.5 JSON dialect, which is exactly the
-            // misclassification that made every Qwen3.5 tool call parse to `nil`
-            // and score 0 dispatches. Reported as `.custom`/`.custom` because
-            // `ToolCallDialectFamily` has no XML family and `.json` would be an
-            // outright false statement about the argument encoding.
+            // are misreported as the Qwen2.5 JSON dialect. This branch is
+            // REPORTAGE ONLY and fixes no dispatch: nothing reads `toolDialect`
+            // today (it is stored, merged and Codable-round-tripped in
+            // `BackendCapabilities`, never branched on), so the misclassification
+            // did NOT cause the #158 zero-dispatch — the body parser in
+            // `LlamaToolMarkers` did. Kept because a capability surface that
+            // lies is a trap for the first consumer that does branch on it.
+            // Reported as `.custom`/`.custom` because `ToolCallDialectFamily`
+            // has no XML family and `.json` would be an outright false
+            // statement about the argument encoding.
             return ToolCallDialect(
                 family: .custom,
                 openDelimiter: "<tool_call>",
