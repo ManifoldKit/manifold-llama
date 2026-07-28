@@ -690,13 +690,14 @@ GBNF can still produce `llama_grammar_accept_token` aborts at sample time
 1. Pick the target upstream build `b<NNNN>` from the
    [`ggml-org/llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases).
    The upstream release asset is `llama-b<NNNN>-xcframework.zip`.
-2. Run `scripts/repackage-xcframework.sh` for the new build to produce the slim
-   `llama-b<NNNN>-slim.xcframework.zip`, host it as a new `vendor-llama-b<NNNN>`
-   manifold-llama release asset, then in `Package.swift` update the
-   `.binaryTarget(name: "llama-cpp", …)` `url` to that self-hosted slim asset
-   and refresh its `checksum` to the value the script printed (SwiftPM's package
-   checksum of the *slim* zip — the value SwiftPM verifies at resolve time). Then
-   run `swift package resolve`. See *Slimming the xcframework* below for the full
+2. Dispatch `.github/workflows/vendor-release.yml` for the new build (or push a
+   `vendor-llama-b<NNNN>` tag) to produce the slim `llama-b<NNNN>-slim.xcframework.zip`
+   and host it as a new, signed `vendor-llama-b<NNNN>` manifold-llama release
+   asset, then in `Package.swift` update the `.binaryTarget(name: "llama-cpp", …)`
+   `url` to that self-hosted slim asset and refresh its `checksum` to the value
+   the workflow's run summary printed (SwiftPM's package checksum of the *slim*
+   zip — the value SwiftPM verifies at resolve time). Then run
+   `swift package resolve`. See *Slimming the xcframework* below for the full
    procedure.
 3. Refresh `docs/vendor/llama.h` from the resolved xcframework
    (`.build/artifacts/manifold-llama/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/Headers/llama.h`).
@@ -847,28 +848,27 @@ To re-cut it for a new build:
    `swift package compute-checksum` value plus the exact `url`/`checksum`
    lines to paste into `Package.swift`, and writes a provenance record to
    `tmp/repackage-xcframework/PROVENANCE-b<NNNN>.md`.
-2. **Host that exact slim zip as a manifold-llama GitHub release asset** (it is
-   *not* on ggml-org's releases — we produce it):
-   ```
-   gh release create vendor-llama-b<NNNN> \
-     tmp/repackage-xcframework/llama-b<NNNN>-slim.xcframework.zip \
-     --title "Vendored slim llama.cpp xcframework (b<NNNN>)" \
-     --latest=false --notes "…"
-   ```
-   The resulting asset URL is
+2. **Publish it via `.github/workflows/vendor-release.yml`, not a manual
+   upload.** Dispatch it from the Actions tab (`build: b<NNNN>`) or push a
+   `vendor-llama-b<NNNN>` tag. It runs the same repackage script on a macOS
+   runner, uploads the slim zip **and** the `PROVENANCE-b<NNNN>.md` it emits
+   as release assets on a new (or refreshed) `vendor-llama-b<NNNN>` release,
+   and generates a signed `attest-build-provenance` statement over the slim
+   zip — see *Signed build-provenance attestation* below for what that
+   proves and how a consumer verifies it. The resulting asset URL is
    `https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b<NNNN>/llama-b<NNNN>-slim.xcframework.zip`.
-3. **Publish the provenance record — don't let it sit only in `tmp/`.** Upload
-   the `PROVENANCE-b<NNNN>.md` the script wrote in step 1 as a second asset on
-   the same release (or fold it into `--notes`/`--notes-file`), e.g.:
-   ```
-   gh release upload vendor-llama-b<NNNN> tmp/repackage-xcframework/PROVENANCE-b<NNNN>.md
-   ```
-   and copy it into `docs/PROVENANCE-b<NNNN>.md` in the same PR as the pin
-   bump (mirroring `docs/PROVENANCE-b9859.md`) so it's reviewable in-diff, not
-   only reachable via the release page.
+   The manual `gh release create`/`gh release upload` sequence this step
+   used to describe is retired: doing it by hand again would publish a slim
+   zip with no attestation binding it to a specific CI run, defeating the
+   point.
+3. **Copy the provenance record into the repo for in-diff review.** Download
+   `PROVENANCE-b<NNNN>.md` from the release (or from the workflow run's
+   uploaded artifact) and commit it as `docs/PROVENANCE-b<NNNN>.md` in the
+   same PR as the pin bump (mirroring `docs/PROVENANCE-b9859.md`), so it's
+   reviewable in-diff, not only reachable via the release page.
 4. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
-   asset and its `checksum` to the value the script printed (the package
-   checksum of the slim zip, *not* the upstream zip), then run
+   asset and its `checksum` to the value the workflow's run summary printed
+   (the package checksum of the slim zip, *not* the upstream zip), then run
    `swift package resolve` to confirm it fetches the hosted URL and the checksum
    matches.
 5. The slim framework still carries the same `Versions/A/Headers/llama.h`, so
@@ -929,17 +929,67 @@ ggml-org CI build → our download → our repackage (drops-only) → our checks
   maintainer authorization (uploading to a public release is outward-facing),
   not something this change does automatically.
 
-#### Deferred: signed build-provenance attestation on the vendor release
+#### Signed build-provenance attestation on the vendor release
 
-Extending ManifoldKit core's `release-provenance.yml` (Sigstore
-`attest-build-provenance`) pattern to the `vendor-llama-*` slim-zip upload is
-**deferred to [#161](https://github.com/ManifoldKit/manifold-llama/issues/161)**,
-not done in this change. Reason: this
-repo currently has no workflow that uploads the vendor binary at all — the
-repackage-and-host step is a manual maintainer action (`gh release create
-vendor-llama-<BUILD> …`, see above), not CI. Wiring an attestation onto that
-upload needs a macOS runner and can't be exercised/proven without cutting a
-real vendor release, so it's tracked separately rather than bundled here.
+`.github/workflows/vendor-release.yml` closes the gap the previous section
+described (ManifoldKit/manifold-llama#161). It replaces the manual
+repackage-and-upload step with a macOS-runner workflow, triggered
+deliberately (`workflow_dispatch` with a `build` input, or a
+`vendor-llama-*` tag push — never on PR or push to `main`, since
+`xcodebuild -create-xcframework` needs macOS and those runners bill at 10×):
+
+1. Runs `scripts/repackage-xcframework.sh` for the requested `BUILD` — same
+   script, same upstream-checksum-then-repackage sequence described above.
+   An unpinned `BUILD` (no case arm in `expected_upstream_sha256()`) fails
+   the workflow closed, same as it does locally.
+2. Uploads the slim zip **and** the `PROVENANCE-<BUILD>.md` the script
+   emits as assets on a `vendor-llama-<BUILD>` release (created if it
+   doesn't exist yet, refreshed with `--clobber` if it does) — so the
+   provenance record can never drift from the bytes actually published,
+   because the same job that publishes the zip is the job that wrote the
+   record.
+3. Generates a Sigstore-signed statement over the slim zip via
+   `actions/attest-build-provenance`, recorded in the repo's transparency
+   log, extending the same pattern ManifoldKit core's `release-provenance.yml`
+   uses for its own release artifacts.
+
+**What the attestation adds on top of the checksum pin above:** the
+checksum proves a downloaded file is byte-identical to what SwiftPM
+resolved; it says nothing about *how* that file was produced. The
+attestation proves the slim zip was built by this specific workflow, on
+this specific commit of `scripts/repackage-xcframework.sh`, as a GitHub
+Actions run this repo's transparency log can point to — closing the
+"hand-uploaded from someone's laptop" gap, not the "compiled from reviewed
+source" gap (that remains the deferred full-rebuild item below).
+
+**Verifying a release's attestation:**
+
+```
+gh attestation verify llama-<BUILD>-slim.xcframework.zip \
+  --repo ManifoldKit/manifold-llama
+```
+
+Download the asset first (`gh release download vendor-llama-<BUILD> --pattern '*.zip'`),
+then run the command against the local file — `gh attestation verify` checks
+the file's digest against the signed statement in the transparency log, so
+it must be the exact bytes, not a re-derived checksum.
+
+**Rehearsal.** `.github/workflows/vendor-release-rehearsal.yml` (read-only:
+`contents: read` only, no `id-token`/`attestations` permissions) runs the
+repackage step of the workflow above — real download, real upstream
+checksum verification, real `xcodebuild -create-xcframework`, real
+slice/dSYM assertions, real provenance emission — on a schedule (weekly) and
+on demand, without publishing or attesting anything. This is what proves
+`vendor-release.yml`'s repackage logic actually works on a fresh macOS
+runner, ahead of cutting a real release. It deliberately does **not**
+rehearse the publish (`gh release create`/`upload`) or
+`actions/attest-build-provenance` steps themselves — those need
+write permissions this read-only workflow doesn't request, and both are
+thin, well-tested primitives (a single `gh` call, a single upstream
+Action) rather than this repo's own bespoke logic. The first real
+`vendor-release.yml` dispatch is therefore still the first end-to-end proof
+that the publish + attest steps succeed in this repo's CI environment —
+an explicit, accepted gap, not an oversight.
 
 #### Deferred: full source-rebuild / byte-reproducibility
 
