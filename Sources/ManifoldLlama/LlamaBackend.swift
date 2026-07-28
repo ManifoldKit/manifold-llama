@@ -213,7 +213,14 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
             supportsKVCachePersistence: true,
             supportsGrammarConstrainedSampling: supportsGrammar,
             supportsThinking: true,
-            supportsVision: BackendVisionCapability.llamaSupportsImageInput,
+            // Probed form (ManifoldKit #2381 / MIGRATION-llama-vision-probe.md).
+            // Keep both halves false until mtmd/clip image embedding is wired
+            // (manifold-llama#152) — a staged mmproj URL alone must not advertise
+            // vision. See MultimodalProjectorConfigurable's contract.
+            supportsVision: BackendVisionCapability.llamaSupportsImageInput(
+                projectorStaged: false,
+                engineSupportsImageEmbedding: false
+            ),
             supportsParallelToolCalls: false,
             toolDialect: LlamaToolCallDialect.infer(from: architecture)
         )
