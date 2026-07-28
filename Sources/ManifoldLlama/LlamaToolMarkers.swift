@@ -173,27 +173,32 @@ import ManifoldInference
         let name = String(raw[nameRange.upperBound..<nameEnd])
         guard isValidQwen35FunctionName(name) else { return nil }
 
-        // Bound the parameter scan at this function's OWN close tag. Without it
-        // a stream carrying two `<function=…>` blocks inside one `<tool_call>`
-        // pair would merge both parameter sets into a single call under the
-        // first function's name (same-named keys last-wins) — a silent WRONG
-        // dispatch rather than a drop. Off-spec emission, but cheap to exclude.
-        var body = String(raw[raw.index(after: nameEnd)...])
-        if let functionClose = body.range(of: qwen35FunctionCloseTag) {
-            body = String(body[..<functionClose.lowerBound])
-        }
+        // The bound at this function's close tag is applied INSIDE
+        // `parseQwen35Parameters`, between parameter iterations — deliberately
+        // NOT by truncating the body here. Truncating up front cuts at the
+        // first `</function>` *anywhere*, including inside a parameter value:
+        // `write_note(body: "see </function> here", tag: …)` lost the rest of
+        // `body` AND every later parameter. That is the same silent wrong
+        // dispatch the bound exists to prevent, with a commoner trigger (any
+        // tool writing XML/HTML content), and it is the exact symmetry of
+        // `test_qwen35XMLCall_valueContainingAngleBrackets_isNotTruncated` —
+        // `</function>` is only a longer `<`. Parameters are self-delimiting,
+        // so the bound is safe to apply only in the gaps between them.
+        let body = String(raw[raw.index(after: nameEnd)...])
         let arguments = parseQwen35Parameters(body)
 
         // `JSONSerialization.data` raises an ObjC `NSInvalidArgumentException`
         // (NOT a Swift error) on a non-finite Double, and `try?` cannot catch
-        // an ObjC exception — the process would abort (exit 134). The live
-        // defence is `coerceQwen35Value`, which refuses to construct a
-        // non-finite scalar; the nested-JSON route is already closed upstream
-        // because `JSONSerialization.jsonObject` rejects `1e400` rather than
-        // decoding it to `inf`. This check is therefore defence-in-depth with
-        // no currently-reachable trigger — kept because the failure it guards
-        // is an uncatchable process abort, and one cheap validity call is a
-        // trivial price for making that unreachable by construction.
+        // an ObjC exception — the process would abort (exit 134).
+        //
+        // This check is LOAD-BEARING, not belt-and-braces: Apple's JSON parser
+        // is asymmetric about numeric overflow. `[1e400]` is rejected, but
+        // `[-1e400]` DECODES to `[-inf]` (likewise `-1e999`, `{"a":-1e400}`,
+        // and nested `[[-1e400]]`). `coerceQwen35Value`'s `isFinite` test only
+        // covers bare scalars, so for a STRUCTURED parameter value this guard
+        // is the only thing between a negative-overflow literal and an
+        // uncatchable abort. Do not remove it — see
+        // `test_qwen35XMLCall_negativeOverflowInsideJSONArray_isRejectedNotCrashed`.
         guard JSONSerialization.isValidJSONObject(arguments),
               let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
               let argsString = String(data: data, encoding: .utf8)
@@ -226,6 +231,15 @@ import ManifoldInference
         var cursor = body.startIndex
 
         while let open = body.range(of: qwen35ParameterOpenPrefix, range: cursor..<body.endIndex) {
+            // Stop at this function's close tag, but only when it appears in the
+            // GAP between parameters — a `</function>` inside a parameter value
+            // is content, not structure (see `parseQwen35XMLCall`). This is what
+            // keeps a second `<function=…>` block's parameters from merging into
+            // the first call without truncating values that quote the tag.
+            if body.range(of: qwen35FunctionCloseTag,
+                          range: cursor..<open.lowerBound) != nil {
+                break
+            }
             guard let keyEnd = body[open.upperBound...].firstIndex(of: ">") else { break }
             let key = String(body[open.upperBound..<keyEnd]).trimmingCharacters(in: .whitespaces)
             let valueStart = body.index(after: keyEnd)

@@ -257,14 +257,11 @@ final class LlamaQwen35XMLToolCallParserTests: XCTestCase {
         }
     }
 
-    func test_qwen35XMLCall_overflowingNumberInsideJSONArray_doesNotCrash() throws {
-        // Checks the other candidate route to a non-finite: an overflowing
-        // literal inside a JSON-shaped value. `JSONSerialization.jsonObject`
-        // REJECTS `1e400` outright (it does not decode to `inf`), so the array
-        // decode fails and the value falls through to text. Asserted here so
-        // the behaviour is pinned rather than assumed — the guarantee that
-        // matters is that the process survives and nothing non-finite is
-        // constructed.
+    func test_qwen35XMLCall_positiveOverflowInsideJSONArray_fallsThroughToText() throws {
+        // Apple's JSON parser REJECTS `1e400` outright, so the array decode
+        // fails and the value falls through to text. Deliberately paired with
+        // the negative case below: the parser is ASYMMETRIC, and testing only
+        // this spelling enshrines half the truth as the invariant.
         var parser = Parser()
         let input = """
         <tool_call>
@@ -277,6 +274,42 @@ final class LlamaQwen35XMLToolCallParserTests: XCTestCase {
         """
         let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
         XCTAssertEqual(args["xs"] as? String, "[1e400]")
+    }
+
+    /// The asymmetric twin of the case above, and the ONLY coverage of the
+    /// `isValidJSONObject` guard in `parseQwen35XMLCall`.
+    ///
+    /// `[1e400]` is rejected by Apple's parser, but `[-1e400]` **decodes** to
+    /// `[-inf]`. `coerceQwen35Value`'s `isFinite` check only covers bare
+    /// scalars, so for a structured value that guard is the sole defence
+    /// between a negative-overflow literal and an uncatchable process abort —
+    /// remove it and these inputs crash the runner rather than failing.
+    func test_qwen35XMLCall_negativeOverflowInsideJSONArray_isRejectedNotCrashed() throws {
+        for literal in ["[-1e400]", "[-1e999]", "{\"a\":-1e400}", "[[-1e400]]"] {
+            var parser = Parser()
+            let input = """
+            <tool_call>
+            <function=calc>
+            <parameter=xs>
+            \(literal)
+            </parameter>
+            </function>
+            </tool_call>
+            """
+            XCTAssertTrue(toolCalls(parser.process(input)).isEmpty,
+                          "\(literal) decodes to a non-finite and must be dropped, not serialised")
+        }
+    }
+
+    func test_qwen35XMLCall_hexFloatOverflow_staysText() throws {
+        // Swift's `Double(String)` also accepts hex-float notation, which
+        // overflows to infinity exactly as `1e400` does.
+        for spelling in ["0x1p99999", "-0x1p99999"] {
+            var parser = Parser()
+            let input = "<tool_call>\n<function=calc>\n<parameter=a>\n\(spelling)\n</parameter>\n</function>\n</tool_call>"
+            let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+            XCTAssertEqual(args["a"] as? String, spelling)
+        }
     }
 
     func test_qwen35XMLCall_finiteScientificNotation_stillTypesAsDouble() throws {
@@ -394,6 +427,60 @@ final class LlamaQwen35XMLToolCallParserTests: XCTestCase {
         let args = try decodeArgs(call)
         XCTAssertEqual(args["a"] as? Int, 1)
         XCTAssertNil(args["b"], "second function's parameters must not leak into the first call")
+    }
+
+    func test_qwen35XMLCall_closeTagInsideParameterValue_isContentNotABound() throws {
+        // The function bound must be applied only in the GAPS between
+        // parameters. Applying it to the whole body up front cut at the first
+        // `</function>` anywhere — including inside a value — truncating that
+        // value AND silently dropping every later parameter. This is the exact
+        // symmetry of `..._valueContainingAngleBrackets_isNotTruncated`:
+        // `</function>` is just a longer `<`. Realistic trigger: any note /
+        // code / file-write tool whose content contains XML or HTML, or a
+        // prompt asking the model to quote the tool-call format back.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=write_note>
+        <parameter=body>
+        see </function> here
+        </parameter>
+        <parameter=tag>
+        keepme
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let args = try decodeArgs(try XCTUnwrap(toolCalls(parser.process(input)).first))
+        XCTAssertEqual(args["body"] as? String, "see </function> here",
+                       "a close tag inside a value is content and must survive intact")
+        XCTAssertEqual(args["tag"] as? String, "keepme",
+                       "parameters after a value containing </function> must not be dropped")
+    }
+
+    func test_qwen35XMLCall_closeTagInValue_stillBoundsASecondFunctionBlock() throws {
+        // Both properties at once: a value quoting `</function>` survives, AND
+        // a genuine second function block is still excluded.
+        var parser = Parser()
+        let input = """
+        <tool_call>
+        <function=first>
+        <parameter=a>
+        quoting </function> inline
+        </parameter>
+        </function>
+        <function=second>
+        <parameter=b>
+        2
+        </parameter>
+        </function>
+        </tool_call>
+        """
+        let call = try XCTUnwrap(toolCalls(parser.process(input)).first)
+        XCTAssertEqual(call.toolName, "first")
+        let args = try decodeArgs(call)
+        XCTAssertEqual(args["a"] as? String, "quoting </function> inline")
+        XCTAssertNil(args["b"], "the second function block must still be excluded")
     }
 
     // MARK: - Malformed bodies
