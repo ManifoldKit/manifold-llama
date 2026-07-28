@@ -763,24 +763,26 @@ The opacity of binary diffs is mitigated by two practices:
 
 ### Upgrade procedure
 
-1. Pick the target upstream build `b<NNNN>` from the
-   [`ggml-org/llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases);
-   the upstream asset is `llama-b<NNNN>-xcframework.zip`. **Do not pin it
-   directly** — the production pin points at a self-hosted *slim* repackage of
-   that asset (see *Slimming the xcframework* below).
-2. Run `scripts/repackage-xcframework.sh` for the new build, host the resulting
-   `llama-b<NNNN>-slim.xcframework.zip` as a new `vendor-llama-b<NNNN>`
-   manifold-llama release asset, then update the `.binaryTarget(name:
-   "llama-cpp", …)` `url` to that slim asset and its `checksum` to the package
-   checksum the script printed (SwiftPM's checksum of the *slim* zip, the value
-   SwiftPM verifies at resolve). Then run `swift package resolve`.
+**Steps 1-2 (obtaining and publishing the new pin) live in exactly one place
+in this document — *Slimming the xcframework* below — not here.** This
+section used to carry its own copy of those two steps; that duplication is
+exactly how a previous revision drifted out of sync with the actual
+publish path (a hand-`gh release create`/local-checksum copy survived here
+after the workflow-based procedure replaced it elsewhere). Follow *Slimming
+the xcframework*'s numbered steps 0-5 to pick the build, dispatch
+`.github/workflows/vendor-release.yml`, and update `Package.swift`'s
+`.binaryTarget(name: "llama-cpp", …)` `url`/`checksum`, then come back here
+and continue from step 3 below (renumbered so it still reads as one
+procedure):
+
 3. Copy the new `llama.h` from the resolved xcframework:
    ```
    cp .build/artifacts/manifold-llama/llama-cpp/llama.xcframework/macos-arm64_x86_64/llama.framework/Versions/A/Headers/llama.h \
       docs/vendor/llama.h
    ```
    Then prepend the four-line `Read-only reference copy.` banner referencing
-   the new build tag and the xcframework checksum from step 2.
+   the new build tag and the `.binaryTarget(checksum:)` value from *Slimming
+   the xcframework* step 4.
 4. Diff `docs/vendor/llama.h` against the previous version and review every
    changed symbol against the tables in this document.
 5. Update `GBNFSchemaPreValidator.cveStatus.vendoredBuild` in

@@ -339,7 +339,7 @@ if [[ "${VENDOR_RELEASE_PUBLISH:-}" == "1" ]]; then
     echo "    url: \"https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-${BUILD}/llama-${BUILD}-slim.xcframework.zip\","
     echo "    checksum: \"${CHECKSUM}\""
 else
-    echo "  LOCAL RUN — diagnostic only. This checksum is NOT reproducible: do"
+    echo "  DIAGNOSTIC RUN — not the publishable one. This checksum is NOT reproducible: do"
     echo "  NOT paste it into Package.swift and do NOT upload ${SLIM_ZIP##*/}"
     echo "  anywhere. To publish and pin a real vendor-llama-${BUILD} release,"
     echo "  dispatch .github/workflows/vendor-release.yml (build: ${BUILD}) and"
