@@ -19,6 +19,23 @@ import ManifoldLlama
 /// per-call via `GenerationRuntimeHints.history` (#2312) — the backend no longer
 /// stores conversation history on instance state.
 ///
+/// ## Scope warning: gemma-4 ONLY (#158)
+/// Every call site below hardcodes `PromptTemplate.gemma4.format(...)`, so this
+/// suite has never covered a non-gemma model — a green run here says NOTHING
+/// about Qwen, Llama, or Mistral tool-call conformance. That blind spot is how
+/// the Qwen3.5 XML dialect (#158) shipped completely broken (zero dispatches on
+/// all 9 soak scenarios) with CI green.
+///
+/// Cross-model regression coverage therefore lives elsewhere and must stay
+/// model-agnostic — do not add more gemma4-hardcoded cases here:
+///   - `LlamaQwen35XMLToolCallParserTests` / `LlamaToolCallParserTests` — fast,
+///     model-free dialect fixtures that always run.
+///   - `manifold-tools-llama` — the soak harness, which auto-detects each
+///     model's own embedded chat template.
+///
+/// De-hardcoding this suite is tracked separately; it is deliberately NOT part
+/// of the #158 parser fix.
+///
 /// ## Gating
 /// These tests require a locally available gemma-4 GGUF and are skipped unless:
 ///   - `RUN_SLOW_TESTS=1` is set in the environment, **and**
