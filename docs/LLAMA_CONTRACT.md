@@ -838,39 +838,46 @@ To re-cut it for a new build:
    repackage a `BUILD` with no recorded checksum unless you set
    `ALLOW_UNVERIFIED_UPSTREAM=1`, which is a deliberate one-off bypass, not a
    way to skip pinning the value for a build you intend to host.
-1. Run `scripts/repackage-xcframework.sh` (defaults to `b9859`; override with
-   `BUILD=b<NNNN>` or a positional arg). It downloads the upstream asset
-   (re-downloading only if the cached zip is missing or fails an `unzip -t`
-   integrity check), asserts the download's SHA256 against the value pinned
-   in step 0, builds the slim `llama.xcframework`, asserts it contains
-   exactly the three intended slices with no dSYMs, zips it to
-   `llama-b<NNNN>-slim.xcframework.zip`, prints its
-   `swift package compute-checksum` value plus the exact `url`/`checksum`
-   lines to paste into `Package.swift`, and writes a provenance record to
-   `tmp/repackage-xcframework/PROVENANCE-b<NNNN>.md`.
+1. **Optional/diagnostic only — running `scripts/repackage-xcframework.sh`
+   locally does NOT produce the checksum you pin.** Because the repackage is
+   not byte-reproducible (see the caveat above), a local run and the
+   workflow's run of the identical script against the identical input
+   produce *different* slim zips with *different* checksums — this is
+   measured fact, not theoretical: three independent local runs against the
+   same checksum-verified upstream input produced three different output
+   checksums. A local run is still useful before dispatching, to sanity
+   check that a new `BUILD` extracts cleanly, has the expected three slices,
+   and passes the upstream-checksum assertion from step 0 — treat its
+   printed zip/checksum as disposable scratch output, never as something to
+   paste into `Package.swift` or upload anywhere.
 2. **Publish it via `.github/workflows/vendor-release.yml`, not a manual
    upload.** Dispatch it from the Actions tab (`build: b<NNNN>`) or push a
    `vendor-llama-b<NNNN>` tag. It runs the same repackage script on a macOS
-   runner, uploads the slim zip **and** the `PROVENANCE-b<NNNN>.md` it emits
-   as release assets on a new (or refreshed) `vendor-llama-b<NNNN>` release,
-   and generates a signed `attest-build-provenance` statement over the slim
-   zip — see *Signed build-provenance attestation* below for what that
-   proves and how a consumer verifies it. The resulting asset URL is
+   runner — **this run, and only this run, produces the artifact and
+   checksum that get published and pinned** — uploads the slim zip **and**
+   the `PROVENANCE-b<NNNN>.md` it emits as release assets on a new (or
+   refreshed) `vendor-llama-b<NNNN>` release, and generates a signed
+   `attest-build-provenance` statement over the slim zip — see *Signed
+   build-provenance attestation* below for what that proves and how a
+   consumer verifies it. The resulting asset URL is
    `https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-b<NNNN>/llama-b<NNNN>-slim.xcframework.zip`.
    The manual `gh release create`/`gh release upload` sequence this step
    used to describe is retired: doing it by hand again would publish a slim
    zip with no attestation binding it to a specific CI run, defeating the
-   point.
+   point. The workflow itself refuses to overwrite an already-published
+   asset for a `BUILD` unless the dispatch's `force` input is explicitly set
+   — see the workflow's own comments for why (re-publishing changes the
+   bytes, which would invalidate the existing pin).
 3. **Copy the provenance record into the repo for in-diff review.** Download
    `PROVENANCE-b<NNNN>.md` from the release (or from the workflow run's
    uploaded artifact) and commit it as `docs/PROVENANCE-b<NNNN>.md` in the
    same PR as the pin bump (mirroring `docs/PROVENANCE-b9859.md`), so it's
    reviewable in-diff, not only reachable via the release page.
 4. Update the `.binaryTarget(name: "llama-cpp", …)` `url` to the slim release
-   asset and its `checksum` to the value the workflow's run summary printed
-   (the package checksum of the slim zip, *not* the upstream zip), then run
-   `swift package resolve` to confirm it fetches the hosted URL and the checksum
-   matches.
+   asset and its `checksum` to the value **step 2's workflow run** printed in
+   its job summary — the sole authoritative checksum; discard any value a
+   local run in step 1 printed — then run `swift package resolve` to confirm
+   it fetches the hosted URL and the checksum matches.
 5. The slim framework still carries the same `Versions/A/Headers/llama.h`, so
    the header-copy / contract-review steps above are unchanged.
 
@@ -1002,7 +1009,17 @@ evaluation finding as the two items above. **Not started; do not claim
 reproducibility of either the upstream binary or the repackage step until
 this is actually done** — see the "Determinism caveat" above for the
 repackage step specifically (it is empirically *not* byte-reproducible as
-measured for b9859). Note this is a distinct claim from the checksum pin's
-verifiability above: the *hosted asset* is fixed and directly checkable
+measured for b9859: three independent local runs of
+`scripts/repackage-xcframework.sh b9859`, each against the identical,
+upstream-checksum-verified input zip, produced three different slim-zip
+checksums — `6e4d46b3…`, `8969d3d2…`, `6cfe6fa0…` — none matching each
+other or `Package.swift`'s pinned `88e382d4…`. Because the upstream input
+was re-verified byte-identical each time, the variance can only come from
+`ditto`/`xcodebuild -create-xcframework` embedding build-time metadata, not
+from a wrong or substituted upstream asset — this is what makes
+"produce once, host that exact file, and sign it" the actual model rather
+than "anyone can rebuild and re-verify"). Note this is a distinct claim from
+the checksum pin's verifiability above: the *hosted asset* is fixed and
+directly checkable
 today; it is only *re-running the repackage script* that isn't guaranteed to
 reproduce it.

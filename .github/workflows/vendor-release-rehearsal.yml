@@ -24,17 +24,21 @@ name: Vendor Release Rehearsal (read-only)
 # publish+attest path; see the PR that added this workflow for the explicit
 # call on why that split is acceptable rather than deferred.
 #
-# Scheduled + on-demand rather than per-PR: every run costs a macos-15
-# minute at 10x billing for a check that only changes when the script or the
-# pinned BUILD does.
+# workflow_dispatch only — deliberately NOT on a schedule, unlike core's
+# release-provenance-rehearsal.yml. Core's rehearsal has real weekly signal
+# value because core's dependency graph / SBOM can change on nearly every
+# PR. This repo's vendored xcframework changes only on a deliberate,
+# human-gated BUILD bump (a few times a year at most), so a recurring rerun
+# of an unchanging script against an unchanging, checksum-pinned upstream
+# asset has near-zero marginal signal — not worth a real ~257MB download +
+# full xcodebuild on a 10x-billed macOS runner every week. Dispatch by hand
+# before cutting a real vendor bump, or after touching the repackage script.
 
 on:
-  schedule:
-    - cron: "0 13 * * 1" # Mondays 13:00 UTC (clear of model-tests.yml's 14:00 slot)
   workflow_dispatch:
     inputs:
       build:
-        description: "Upstream build tag to rehearse (default: this repo's currently pinned build, scripts/repackage-xcframework.sh's BUILD default)"
+        description: "Upstream build tag to rehearse (default: this repo's currently pinned build, scripts/repackage-xcframework.sh's BUILD default). A BUILD with no case arm yet in expected_upstream_sha256() fails closed here too, same as the real workflow — this can't pre-flight a brand-new BUILD until procedure step 0 (pinning its upstream SHA256) has landed."
         required: false
         type: string
 
@@ -83,6 +87,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Persist rehearsal artifacts
+        # if: always() — a FAILING rehearsal is the interesting case (it's
+        # what this workflow exists to catch); without this the one run that
+        # most needs a post-mortem artifact uploads nothing.
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vendor-release-rehearsal-${{ github.sha }}
@@ -90,3 +98,4 @@ jobs:
             ${{ steps.repackage.outputs.zip }}
             ${{ steps.repackage.outputs.provenance }}
           retention-days: 14
+          if-no-files-found: ignore

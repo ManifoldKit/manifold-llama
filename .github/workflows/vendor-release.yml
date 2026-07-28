@@ -24,6 +24,16 @@ name: Vendor Release (llama.cpp xcframework)
 # arm in `expected_upstream_sha256()` (scripts/repackage-xcframework.sh) —
 # this workflow does not set ALLOW_UNVERIFIED_UPSTREAM, so an unpinned BUILD
 # fails closed rather than repackaging an unverified download.
+#
+# Re-publish safety: the repackage step is NOT byte-reproducible (see
+# docs/LLAMA_CONTRACT.md "Determinism caveat") — two runs for the SAME BUILD
+# produce two DIFFERENT slim zips with two different checksums (measured:
+# three independent local runs against the identical, checksum-verified
+# upstream input yielded three different outputs). A re-dispatch that
+# silently overwrites an already-published `vendor-llama-<BUILD>` asset
+# would therefore break `Package.swift`'s pinned checksum for anyone who
+# already resolved against it. The publish step below refuses to overwrite
+# an existing asset unless `force: true` is explicitly passed.
 
 on:
   workflow_dispatch:
@@ -32,14 +42,23 @@ on:
         description: "Upstream llama.cpp build tag to publish (e.g. b9861). Must already have a case arm in expected_upstream_sha256()."
         required: true
         type: string
+      force:
+        description: "Overwrite an already-published vendor-llama-<BUILD> asset. DANGEROUS: the repackage is not byte-reproducible, so this WILL change the published checksum out from under Package.swift's existing pin and any consumer who already resolved against it. Only use to fix a genuinely botched publish, immediately followed by re-pinning Package.swift in the same breath."
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - "vendor-llama-*"
 
 concurrency:
-  # Different BUILDs run concurrently; two dispatches for the same BUILD
-  # queue rather than race the same release/tag.
-  group: vendor-release-${{ github.event.inputs.build || github.ref_name }}
+  # Normalize both trigger paths to the SAME group key so a workflow_dispatch
+  # for build: b9861 and a push of tag vendor-llama-b9861 serialise against
+  # each other, not just against same-trigger reruns: github.ref_name for the
+  # tag push is already "vendor-llama-b9861"; for dispatch we synthesize the
+  # same "vendor-llama-<BUILD>" string from the input. (`&&`/`||` here use
+  # GitHub Actions' value-returning semantics, not boolean coercion.)
+  group: vendor-release-${{ github.event.inputs.build && format('vendor-llama-{0}', github.event.inputs.build) || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -115,10 +134,30 @@ jobs:
           BUILD: ${{ steps.build.outputs.value }}
           ZIP: ${{ steps.repackage.outputs.zip }}
           PROVENANCE: ${{ steps.repackage.outputs.provenance }}
+          FORCE: ${{ github.event.inputs.force }}
         run: |
           set -euo pipefail
           TAG="vendor-llama-${BUILD}"
-          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          ZIP_NAME="$(basename "${ZIP}")"
+          if ASSET_NAMES="$(gh release view "${TAG}" --repo "${{ github.repository }}" \
+              --json assets --jq '.assets[].name' 2>/dev/null)"; then
+            # The repackage is NOT byte-reproducible (docs/LLAMA_CONTRACT.md
+            # "Determinism caveat" — measured: three independent local runs
+            # against the identical, checksum-verified upstream input
+            # produced three different slim-zip checksums). Overwriting an
+            # already-published asset for this BUILD would therefore silently
+            # change the bytes behind Package.swift's existing pin for
+            # anyone who already resolved against it, and every subsequent
+            # `swift package resolve` against the OLD checksum would then
+            # hard-fail. Refuse unless the caller explicitly opted in via the
+            # `force` dispatch input, acknowledging that risk.
+            if printf '%s\n' "${ASSET_NAMES}" | grep -qxF "${ZIP_NAME}"; then
+              if [[ "${FORCE}" != "true" ]]; then
+                echo "::error::${TAG} already has an asset named ${ZIP_NAME}. The repackage is not byte-reproducible (see docs/LLAMA_CONTRACT.md), so re-publishing would change the bytes behind Package.swift's existing pinned checksum for this BUILD out from under every consumer that already resolved against it. Re-dispatch with force: true ONLY if you are deliberately replacing a botched publish, and re-pin Package.swift's checksum to this run's new value immediately afterward." >&2
+                exit 1
+              fi
+              echo "::warning::force=true set — overwriting the existing ${ZIP_NAME} on ${TAG}. Package.swift's pinned checksum for this BUILD is now stale and MUST be updated to this run's checksum."
+            fi
             gh release upload "${TAG}" "${ZIP}" "${PROVENANCE}" \
               --repo "${{ github.repository }}" --clobber
           else
@@ -126,7 +165,7 @@ jobs:
               --repo "${{ github.repository }}" \
               --title "Vendored slim llama.cpp xcframework (${BUILD})" \
               --latest=false \
-              --notes "Slim repackage of ggml-org/llama.cpp ${BUILD} (tvOS/visionOS slices + dSYMs dropped). See the attached PROVENANCE-${BUILD}.md and docs/LLAMA_CONTRACT.md for the trust chain, and verify this release's build provenance with: gh attestation verify llama-${BUILD}-slim.xcframework.zip --repo ${{ github.repository }}"
+              --notes "Slim repackage of ggml-org/llama.cpp ${BUILD} (tvOS/visionOS slices + dSYMs dropped). See the attached PROVENANCE-${BUILD}.md and docs/LLAMA_CONTRACT.md for the trust chain, and verify this release's build provenance: download the asset (gh release download ${TAG} --pattern '*.zip'), then run gh attestation verify llama-${BUILD}-slim.xcframework.zip --repo ${{ github.repository }} against the downloaded file."
           fi
 
       - name: Persist artifacts on the workflow run
@@ -150,5 +189,6 @@ jobs:
             echo "### vendor-llama-${BUILD} published"
             echo
             echo "- Slim checksum (paste into \`Package.swift\`'s \`.binaryTarget(checksum:)\`): \`${CHECKSUM}\`"
-            echo "- Verify provenance: \`gh attestation verify llama-${BUILD}-slim.xcframework.zip --repo ${{ github.repository }}\`"
+            echo "- Verify provenance (download the asset first — \`gh attestation verify\` needs the actual bytes, not just a filename):"
+            echo "  \`gh release download vendor-llama-${BUILD} --pattern '*.zip' --repo ${{ github.repository }} && gh attestation verify llama-${BUILD}-slim.xcframework.zip --repo ${{ github.repository }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
