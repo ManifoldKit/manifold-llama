@@ -34,6 +34,29 @@ enum LlamaToolCallDialect {
                 argEncoding: .json,
                 extractability: .buried
             )
+        } else if arch.hasPrefix("qwen35") {
+            // Qwen3.5 / Qwen3.6 (BOTH report `general.architecture == "qwen35"`)
+            // keep Qwen2.5's `<tool_call>` … `</tool_call>` delimiters but
+            // changed the body to nested XML (#158):
+            //   <function=name><parameter=key>\nvalue\n</parameter></function>
+            // Checked BEFORE the generic `qwen` prefix — otherwise these models
+            // are misreported as the Qwen2.5 JSON dialect. This branch is
+            // REPORTAGE ONLY and fixes no dispatch: nothing reads `toolDialect`
+            // today (it is stored, merged and Codable-round-tripped in
+            // `BackendCapabilities`, never branched on), so the misclassification
+            // did NOT cause the #158 zero-dispatch — the body parser in
+            // `LlamaToolMarkers` did. Kept because a capability surface that
+            // lies is a trap for the first consumer that does branch on it.
+            // Reported as `.custom`/`.custom` because `ToolCallDialectFamily`
+            // has no XML family and `.json` would be an outright false
+            // statement about the argument encoding.
+            return ToolCallDialect(
+                family: .custom,
+                openDelimiter: "<tool_call>",
+                closeDelimiter: "</tool_call>",
+                argEncoding: .custom,
+                extractability: .clean
+            )
         } else if arch.hasPrefix("qwen") {
             // Qwen2.5-Instruct emits `<tool_call>\n{json}\n</tool_call>`.
             return ToolCallDialect(

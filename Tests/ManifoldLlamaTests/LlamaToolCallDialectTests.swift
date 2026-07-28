@@ -65,6 +65,32 @@ final class LlamaToolCallDialectTests: XCTestCase {
         XCTAssertEqual(backend.capabilities.toolDialect?.family, .qwen)
     }
 
+    func test_qwen35_toolDialect_isXMLNotQwen25JSON() {
+        // Qwen3.5 keeps Qwen2.5's delimiters but switched the body to nested
+        // XML (#158). Reporting it as the `.qwen` JSON dialect is the
+        // misclassification that accompanied every call parsing to `nil`.
+        // Qwen3.6 GGUFs also report `general.architecture == "qwen35"` and ship
+        // the same XML block — verified against Qwen3.6-27B-Q4_K_M.gguf.
+        let backend = LlamaBackend()
+        backend.injectArchitectureForTesting("qwen35")
+        let dialect = backend.capabilities.toolDialect
+        XCTAssertEqual(dialect?.family, .custom)
+        XCTAssertEqual(dialect?.openDelimiter, "<tool_call>")
+        XCTAssertEqual(dialect?.closeDelimiter, "</tool_call>")
+        XCTAssertEqual(dialect?.argEncoding, .custom,
+                       "XML parameter tags are not a JSON argument encoding")
+        XCTAssertEqual(dialect?.extractability, .clean)
+    }
+
+    func test_qwen35_isMatchedBeforeGenericQwenPrefix() {
+        // `qwen35` also carries the `qwen` prefix, so the ORDER of the branches
+        // in `infer` is what makes this correct — a regression here would be
+        // silent and total.
+        let backend = LlamaBackend()
+        backend.injectArchitectureForTesting("qwen35")
+        XCTAssertNotEqual(backend.capabilities.toolDialect?.family, .qwen)
+    }
+
     // MARK: - Llama family
 
     func test_llama_toolDialect_family() {
