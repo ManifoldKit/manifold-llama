@@ -322,13 +322,18 @@ echo "  dSYM directories:    ${DSYM_COUNT}  (none — good)"
 echo "  Slim checksum:       ${CHECKSUM}"
 echo "  Provenance record:   ${PROVENANCE_FILE}"
 echo "--------------------------------------------------------------------------"
-# GITHUB_ACTIONS=true is set automatically on every Actions runner. This run
-# is only authoritative — safe to pin in Package.swift — when it's the one
-# vendor-release.yml itself performs; a local run is diagnostic-only because
-# the repackage is not byte-reproducible (see the header comment). Vary the
-# footer accordingly so a maintainer can't mistake a local sanity-check run's
+# VENDOR_RELEASE_PUBLISH=1 is set ONLY by vendor-release.yml's repackage
+# step — NOT by vendor-release-rehearsal.yml, and NOT by GITHUB_ACTIONS
+# alone (that's true on every Actions runner, including the rehearsal,
+# which would otherwise print this same "authoritative, paste this"
+# footer for a run that is never published). This run is only
+# authoritative — safe to pin in Package.swift — when it's the one
+# vendor-release.yml itself performs; every other run (local, or the
+# read-only rehearsal) is diagnostic-only because the repackage is not
+# byte-reproducible (see the header comment). Vary the footer accordingly
+# so a maintainer can't mistake a rehearsal or local sanity-check run's
 # checksum for the one to publish.
-if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+if [[ "${VENDOR_RELEASE_PUBLISH:-}" == "1" ]]; then
     echo "  Paste into Package.swift (.binaryTarget name: \"llama-cpp\"):"
     echo
     echo "    url: \"https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-${BUILD}/llama-${BUILD}-slim.xcframework.zip\","

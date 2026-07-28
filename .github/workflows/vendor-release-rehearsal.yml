@@ -66,7 +66,6 @@ jobs:
           swift --version
 
       - name: Repackage (rehearsal — no publish, no attestation)
-        id: repackage
         env:
           BUILD: ${{ github.event.inputs.build }}
           WORK_DIR: ${{ runner.temp }}/repackage-xcframework
@@ -77,25 +76,23 @@ jobs:
           else
             scripts/repackage-xcframework.sh
           fi
-          # Glob rather than hardcode the BUILD in the filename, so this
-          # keeps working if the script's default BUILD changes later.
-          ZIP="$(ls "${WORK_DIR}"/llama-*-slim.xcframework.zip)"
-          PROVENANCE="$(ls "${WORK_DIR}"/PROVENANCE-*.md)"
-          {
-            echo "zip=${ZIP}"
-            echo "provenance=${PROVENANCE}"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Persist rehearsal artifacts
         # if: always() — a FAILING rehearsal is the interesting case (it's
-        # what this workflow exists to catch); without this the one run that
-        # most needs a post-mortem artifact uploads nothing.
+        # what this workflow exists to catch). Deliberately uses a glob over
+        # WORK_DIR rather than steps.repackage.outputs.*: those outputs are
+        # only written after the script SUCCEEDS (set -euo pipefail), so on
+        # a failure they're empty and if: always() would be inert — this
+        # picks up whatever partial output (e.g. a written provenance file,
+        # or no slim zip at all if it died earlier) actually exists.
+        # Deliberately NOT globbing the ~257MB upstream
+        # llama-<BUILD>-xcframework.zip (no "-slim" in its name).
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vendor-release-rehearsal-${{ github.sha }}
           path: |
-            ${{ steps.repackage.outputs.zip }}
-            ${{ steps.repackage.outputs.provenance }}
+            ${{ runner.temp }}/repackage-xcframework/llama-*-slim.xcframework.zip
+            ${{ runner.temp }}/repackage-xcframework/PROVENANCE-*.md
           retention-days: 14
           if-no-files-found: ignore
