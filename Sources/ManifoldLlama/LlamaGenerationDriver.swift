@@ -763,8 +763,9 @@ import ManifoldHardware
     ///      undefined after a failed decode and the prefix must not be reused.
     ///
     /// `synchronize` is injected so the contract can be exercised headlessly: the
-    /// real call sites pass `{ llama_synchronize(context) }`, tests pass a recorder
-    /// that captures call order without a live `llama_context`.
+    /// real call sites pass `{ engine.synchronize() }` (which reaches
+    /// `llama_synchronize` inside ``LlamaCAPIEngine``), tests pass a recorder that
+    /// captures call order without a live `llama_context`.
     @_spi(Testing) public static func finishDecodeFailure(
         message: String,
         synchronize: () -> Void,

@@ -18,9 +18,10 @@ Vendored Source* and *Slimming the xcframework* below).
 **Where the generation-path calls live (#165):** every `llama_*` call made on
 behalf of a `generate()` turn is now inside `LlamaEngine.swift` — specifically
 `LlamaCAPIEngine`, the sole production implementation of the `LlamaEngine`
-protocol. `LlamaGenerationDriver.swift` contains **no** `llama_*` symbols at
-all; it decides *when* each C operation happens and calls the engine method
-that performs it, so the ordering invariants below are still authored there
+protocol. `LlamaGenerationDriver.swift` makes **no** `llama_*` function calls
+at all (it still names `llama_token` as a type and cites C symbols in prose);
+it decides *when* each C operation happens and calls the engine method that
+performs it, so the ordering invariants below are still authored there
 and enforced there. When grepping for a symbol during an upgrade, search
 `Sources/ManifoldLlama/` as a whole rather than any single file — the
 driver/engine split means the caller and the callsite are in different files.
@@ -410,7 +411,7 @@ fields request them. Every entry is transferred to the chain by
 |-----------|--------|
 | Signature | `void llama_synchronize(struct llama_context * ctx)` |
 | Threading | Safe to call from any thread that is not concurrently invoking `llama_decode`/`llama_encode` on the same context. |
-| Ordering | Must be called at **every** exit path of a generation run before returning control: normal completion, mid-prompt cancellation, prompt-decode failure, in-loop decode failure, and prefill memory abort. The five generation-path decision sites are `LlamaGenerationDriver.swift:391/461/472/698/734` (all `engine.synchronize()`); they funnel through the single C callsite `LlamaEngine.swift:394` (`LlamaCAPIEngine.synchronize`). `LlamaEmbeddingBackend.swift:101/105/182` and `LlamaReranker.swift:97/101/173` call the C function directly. |
+| Ordering | Must be called at **every** exit path of a generation run before returning control: normal completion, mid-prompt cancellation, prompt-decode failure, in-loop decode failure, and prefill memory abort. The five generation-path decision sites are `LlamaGenerationDriver.swift:391/461/472/698/734` (all `engine.synchronize()`); they funnel through the single C callsite `LlamaEngine.swift:394` (`LlamaCAPIEngine.synchronize`). Teardown additionally requires it: `LlamaBackend.swift:1063/1068` bracket `llama_memory_clear` in `unloadModel()`'s detached cleanup (synchronize → clear → synchronize → `llama_free`) — the issue-#1394 `GGML_ASSERT([rsets->data count] == 0)` SIGABRT fix; removing either one reintroduces it. `LlamaEmbeddingBackend.swift:101/105/182` and `LlamaReranker.swift:97/101/173` call the C function directly. That is the complete set of nine callsites. |
 | Limits | Blocks the calling thread until the GPU is idle — sub-millisecond when the GPU has already drained, longer when a long command buffer is in flight. |
 | Ownership | Void. |
 | Failure modes | Skipping the call lets Metal command buffers from the previous run overlap with the KV-clear at the start of the next run, tripping `GGML_ASSERT([rsets->data count] == 0)` in `ggml-metal-device.m`. See Violation #5. |
