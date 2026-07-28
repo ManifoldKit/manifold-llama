@@ -22,7 +22,11 @@ import ManifoldInference
 ///    at finalize (0 dispatches). Verified byte-for-byte against the text-only
 ///    gemma-4-E4B GGUF.
 /// 2. **JSON fallback** — `<tool_call>` … `</tool_call>` with a
-///    `{"name":…,"arguments":…}` body (Qwen-style fine-tunes).
+///    `{"name":…,"arguments":…}` body (Qwen-style fine-tunes). The SAME
+///    delimiter pair also carries Qwen3.5's nested-**XML** body
+///    (`<function=name><parameter=key>value</parameter></function>`, #158);
+///    `parseCallBuffer` dispatches on the body shape, so both Qwen generations
+///    share one marker.
 /// 3. **Mistral `[TOOL_CALLS]`** — a literal `[TOOL_CALLS]` open token followed
 ///    by a bare JSON *array* of `{"name":…,"arguments":…}` objects with NO
 ///    closing tag; the block ends at EOS/end-of-generation. Uses the #1982
@@ -109,18 +113,138 @@ import ManifoldInference
 
     // MARK: - Body dispatch
 
-    /// Dispatches a buffered call body to the Gemma-4 native or JSON parser by
-    /// inspecting its prefix — preserving the original
+    /// Dispatches a buffered call body to the Gemma-4 native, Qwen3.5 XML, or
+    /// JSON parser by inspecting its prefix — preserving the original
     /// `LlamaToolCallParser.parseCallBuffer` behaviour, which dispatched on the
     /// body shape rather than on which open tag matched. A `call:`-prefixed body
-    /// is Gemma-4 native; anything else is treated as JSON.
+    /// is Gemma-4 native; a `<function=`-prefixed body is Qwen3.5 XML (#158);
+    /// anything else is treated as JSON.
+    ///
+    /// Dispatching on shape rather than on the matched open tag is what lets
+    /// Qwen2.5 (JSON) and Qwen3.5 (XML) share the one `<tool_call>` marker —
+    /// their delimiters are byte-identical and only the body differs.
     private static func parseCallBuffer(_ raw: String) -> ToolCall? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if trimmed.hasPrefix("call:") {
             return parseGemma4NativeCall(trimmed)
         }
+        if trimmed.hasPrefix(qwen35FunctionOpenPrefix) {
+            return parseQwen35XMLCall(trimmed)
+        }
         return parseJSONCall(trimmed)
+    }
+
+    // MARK: - Qwen3.5 XML body parsing
+
+    /// Opening prefix of the Qwen3.5 inner function tag: `<function=`.
+    static let qwen35FunctionOpenPrefix = "<function="
+    /// Opening prefix of a Qwen3.5 parameter tag: `<parameter=`.
+    private static let qwen35ParameterOpenPrefix = "<parameter="
+    /// Closing tag of a Qwen3.5 parameter block.
+    private static let qwen35ParameterCloseTag = "</parameter>"
+
+    /// Parses the Qwen3.5 native tool-call body: a nested-XML block inside the
+    /// shared `<tool_call>` … `</tool_call>` delimiters (#158).
+    ///
+    /// ```
+    /// <function=get_weather>
+    /// <parameter=city>
+    /// London
+    /// </parameter>
+    /// </function>
+    /// ```
+    ///
+    /// Transcribed from `tokenizer.chat_template` in the Qwen3.5 GGUFs, whose
+    /// instruction block spells this shape out verbatim and requires the
+    /// `<function=…>` block to be nested inside the `<tool_call>` tags. The
+    /// `qwen35` architecture covers the Qwen3.5 *and* Qwen3.6 releases — both
+    /// report `general.architecture == "qwen35"` and ship the same XML block.
+    ///
+    /// Returns `nil` on a missing/malformed function name so the transform
+    /// surfaces `.toolCallParseFailed` rather than dispatching a nameless tool.
+    private static func parseQwen35XMLCall(_ raw: String) -> ToolCall? {
+        guard let nameRange = raw.range(of: qwen35FunctionOpenPrefix),
+              let nameEnd = raw[nameRange.upperBound...].firstIndex(of: ">")
+        else { return nil }
+
+        let name = String(raw[nameRange.upperBound..<nameEnd])
+        guard isValidQwen35FunctionName(name) else { return nil }
+
+        let body = String(raw[raw.index(after: nameEnd)...])
+        let arguments = parseQwen35Parameters(body)
+
+        guard let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+              let argsString = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        let id = "llama-\(name)-\(UUID().uuidString.prefix(8))"
+        return ToolCall(id: id, toolName: name, arguments: argsString)
+    }
+
+    /// A function name is a bare identifier. Rejecting whitespace and angle
+    /// brackets is what stops an UNTERMINATED `<function=now` tag from
+    /// swallowing the following `</function>` — the naive "scan to the next
+    /// `>`" would otherwise yield the name `"now\n</function"` and dispatch a
+    /// bogus tool.
+    private static func isValidQwen35FunctionName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        return !name.contains(where: { $0.isWhitespace || $0 == "<" || $0 == ">" || $0 == "/" })
+    }
+
+    /// Extracts every `<parameter=key>value</parameter>` pair from a Qwen3.5
+    /// function body, in emission order.
+    ///
+    /// Values are delimited by the literal `</parameter>` tag, NOT by the next
+    /// angle bracket — the template documents values that "span multiple lines",
+    /// and a value may legitimately contain a `<`. The single newline the
+    /// template emits either side of the value is structural and stripped;
+    /// interior newlines are content and preserved.
+    private static func parseQwen35Parameters(_ body: String) -> [String: Any] {
+        var parameters: [String: Any] = [:]
+        var cursor = body.startIndex
+
+        while let open = body.range(of: qwen35ParameterOpenPrefix, range: cursor..<body.endIndex) {
+            guard let keyEnd = body[open.upperBound...].firstIndex(of: ">") else { break }
+            let key = String(body[open.upperBound..<keyEnd]).trimmingCharacters(in: .whitespaces)
+            let valueStart = body.index(after: keyEnd)
+
+            // An unterminated final parameter runs to the end of the body; take
+            // what is there rather than dropping the whole call.
+            let close = body.range(of: qwen35ParameterCloseTag, range: valueStart..<body.endIndex)
+            let valueEnd = close?.lowerBound ?? body.endIndex
+            cursor = close?.upperBound ?? body.endIndex
+
+            guard !key.isEmpty else { continue }
+            parameters[key] = coerceQwen35Value(String(body[valueStart..<valueEnd]))
+        }
+
+        return parameters
+    }
+
+    /// Strips the structural newlines around a parameter value and coerces bare
+    /// scalars to their JSON types.
+    ///
+    /// The XML wire format has no quoting, so the value arrives as raw text and
+    /// the type must be recovered from its shape — the same trade-off (and the
+    /// same rules) the Gemma-4 bare-literal path already makes. Tool schemas are
+    /// typed, so leaving `41` as the string `"41"` fails argument validation
+    /// downstream; the cost is that a genuinely string-typed value that looks
+    /// numeric is typed as a number.
+    private static func coerceQwen35Value(_ raw: String) -> Any {
+        var value = raw
+        if value.hasPrefix("\n") { value.removeFirst() }
+        if value.hasSuffix("\n") { value.removeLast() }
+
+        switch value {
+        case "true":  return true
+        case "false": return false
+        case "null":  return NSNull()
+        default: break
+        }
+        if let intValue = Int(value) { return intValue }
+        if let doubleValue = Double(value) { return doubleValue }
+        return value
     }
 
     // MARK: - Gemma 4 native body parsing
