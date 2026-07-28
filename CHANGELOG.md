@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.2...v0.4.3) (2026-07-28)
+
+
+### Bug Fixes
+
+* **tool-calling:** parse Qwen3.5 XML tool-call dialect ([#171](https://github.com/ManifoldKit/manifold-llama/issues/171)) ([3597c07](https://github.com/ManifoldKit/manifold-llama/commit/3597c07d5646f1bec4c4bd8ccdac0bbbaa8ec3be))
+
 ## [0.4.2](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.1...v0.4.2) (2026-07-27)
 
 
