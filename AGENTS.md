@@ -30,6 +30,7 @@ Most suites in `Tests/ManifoldLlamaTests` are model-gated: they `XCTSkip` unless
 - This repo pins ManifoldKit with `.upToNextMinor(from: "…")` in `Package.swift`. `.github/workflows/core-bump.yml` listens for ManifoldKit's `core-release` repository_dispatch, rewrites the pin, builds/tests, and admin-merges the PR — which trips this repo's own release-please into cutting a patch release. Never hand-edit the pin or hand-tag a release. A pure pin republish is committed as `deps:` (+ a `Release-As:` trailer forcing the patch), so it lands under the CHANGELOG's **Dependencies** heading rather than **Bug Fixes** — it isn't a bug fix and shouldn't be counted as one. The shared workflow falls back to `fix(deps):` when any `feat`/`fix`/breaking change is already queued since the last tag (letting release-please compute the version rather than forcing a patch that could under-version it). The `deps` section is made visible by the explicit `changelog-sections` in `release-please-config.json`; release-please's empty-config default would discard it. Convention owned centrally — see ManifoldKit `AGENTS.md` → "Companion pin-bump releases".
 - Conventional Commits are required for release-please to version correctly — unlike core, this repo has no CI job that lints PR titles (the only required check is `test`); self-police the format.
 - CI (`ci.yml`) explicitly selects the newest installed Xcode 26 toolchain before building: the runner image default mis-resolves the dependency graph (fails to prune an `AnyLanguageModel`/`mlx-swift-lm` trait-disabled edge), producing a bogus "could not be resolved" conflict. Match that toolchain locally if `swift build`/`swift test` hits a resolution error CI doesn't.
+- Publishing (or re-cutting) the vendored xcframework is a `.github/workflows/vendor-release.yml` dispatch (or a `vendor-llama-*` tag push), **not** a manual `gh release create`/`upload`. It's macOS-only and deliberately never runs on PR/push-to-main (10x-billed runner). It refuses to overwrite an already-published `vendor-llama-<BUILD>` asset unless the dispatch's `force` input is set — the repackage is not byte-reproducible, so a silent re-publish would change the bytes behind `Package.swift`'s existing pin. `.github/workflows/vendor-release-rehearsal.yml` (workflow_dispatch only, read-only permissions) rehearses the repackage step for real without publishing or attesting anything. See `docs/LLAMA_CONTRACT.md` → "Signed build-provenance attestation".
 
 ## Vendored data — orphan risk
 
@@ -45,7 +46,8 @@ scripts/check-vendored-sync.sh --warn   # advisory only, always exits 0
 ## Other references
 
 - `docs/LLAMA_CONTRACT.md` — the llama.cpp C-API contract (every `llama_*` symbol called, threading/ordering/ownership rules) and the xcframework upgrade procedure.
-- `scripts/repackage-xcframework.sh` — rebuilds the slim (macOS + iOS-only, dSYM-stripped) xcframework from an upstream `ggml-org/llama.cpp` release asset and prints the `url`/`checksum` pair for `Package.swift`.
+- `scripts/repackage-xcframework.sh` — rebuilds the slim (macOS + iOS-only, dSYM-stripped) xcframework from an upstream `ggml-org/llama.cpp` release asset. A local run is diagnostic-only (see the script's header); the artifact + checksum that actually get pinned come only from a `.github/workflows/vendor-release.yml` run.
+- `.github/workflows/vendor-release.yml` / `vendor-release-rehearsal.yml` — publish (with a signed build-provenance attestation) and rehearse, respectively, the vendored xcframework release. See `docs/LLAMA_CONTRACT.md`.
 
 ## Conventions
 

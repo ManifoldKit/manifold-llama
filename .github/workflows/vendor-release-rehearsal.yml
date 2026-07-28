@@ -1,0 +1,98 @@
+name: Vendor Release Rehearsal (read-only)
+
+# Dry-run of vendor-release.yml's repackage step — proves
+# scripts/repackage-xcframework.sh runs clean end-to-end on a fresh macOS
+# runner (real download of the upstream asset, real upstream SHA256
+# verification, real `xcodebuild -create-xcframework`, real slice/dSYM
+# assertions, real provenance-record emission) without publishing anything.
+#
+# Deliberately does NOT run the publish or attest-build-provenance steps:
+# those need contents:write / id-token:write / attestations:write, which
+# this read-only workflow never requests. Mirrors ManifoldKit core's
+# release-provenance-rehearsal.yml, which rehearses its SBOM/dependency-tree
+# generation but likewise stops short of calling attest-build-provenance —
+# the attestation action itself is a thin, well-tested primitive; the
+# bespoke risk worth rehearsing for real is this repo's own script logic.
+#
+# What this DOES prove: the repackage script (download, upstream checksum
+# assertion, slim rebuild, slice/dSYM assertions, provenance emission) works
+# on a fresh macOS runner today.
+# What this does NOT prove: that the publish step (gh release create/upload)
+# or the attest-build-provenance action itself succeed in this repo's CI
+# environment — those are only exercised by a real vendor-release.yml run.
+# The next real vendor bump is the first end-to-end proof of the full
+# publish+attest path; see the PR that added this workflow for the explicit
+# call on why that split is acceptable rather than deferred.
+#
+# workflow_dispatch only — deliberately NOT on a schedule, unlike core's
+# release-provenance-rehearsal.yml. Core's rehearsal has real weekly signal
+# value because core's dependency graph / SBOM can change on nearly every
+# PR. This repo's vendored xcframework changes only on a deliberate,
+# human-gated BUILD bump (a few times a year at most), so a recurring rerun
+# of an unchanging script against an unchanging, checksum-pinned upstream
+# asset has near-zero marginal signal — not worth a real ~257MB download +
+# full xcodebuild on a 10x-billed macOS runner every week. Dispatch by hand
+# before cutting a real vendor bump, or after touching the repackage script.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "Upstream build tag to rehearse (default: this repo's currently pinned build, scripts/repackage-xcframework.sh's BUILD default). A BUILD with no case arm yet in expected_upstream_sha256() fails closed here too, same as the real workflow — this can't pre-flight a brand-new BUILD until procedure step 0 (pinning its upstream SHA256) has landed."
+        required: false
+        type: string
+
+concurrency:
+  group: vendor-release-rehearsal
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    name: Rehearse the vendor xcframework repackage (no publish, no attestation)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Select newest Xcode 26 toolchain
+        run: |
+          xcodes=( /Applications/Xcode_26*.app )
+          newest=$(printf '%s\n' "${xcodes[@]}" | sort -V | tail -1)
+          sudo xcode-select -s "$newest/Contents/Developer"
+          swift --version
+
+      - name: Repackage (rehearsal — no publish, no attestation)
+        env:
+          BUILD: ${{ github.event.inputs.build }}
+          WORK_DIR: ${{ runner.temp }}/repackage-xcframework
+        run: |
+          set -euo pipefail
+          if [[ -n "${BUILD}" ]]; then
+            scripts/repackage-xcframework.sh "${BUILD}"
+          else
+            scripts/repackage-xcframework.sh
+          fi
+
+      - name: Persist rehearsal artifacts
+        # if: always() — a FAILING rehearsal is the interesting case (it's
+        # what this workflow exists to catch). Deliberately uses a glob over
+        # WORK_DIR rather than steps.repackage.outputs.*: those outputs are
+        # only written after the script SUCCEEDS (set -euo pipefail), so on
+        # a failure they're empty and if: always() would be inert — this
+        # picks up whatever partial output (e.g. a written provenance file,
+        # or no slim zip at all if it died earlier) actually exists.
+        # Deliberately NOT globbing the ~257MB upstream
+        # llama-<BUILD>-xcframework.zip (no "-slim" in its name).
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vendor-release-rehearsal-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/repackage-xcframework/llama-*-slim.xcframework.zip
+            ${{ runner.temp }}/repackage-xcframework/PROVENANCE-*.md
+          retention-days: 14
+          if-no-files-found: ignore

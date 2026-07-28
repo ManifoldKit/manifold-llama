@@ -15,11 +15,21 @@
 # with all dSYMs dropped. Measured for b9859: ~769 MB → ~30 MB extracted,
 # ~257 MB → ~11 MB zipped.
 #
-# It then zips the slim framework, computes the SwiftPM package checksum, and
-# prints the exact `url` + `checksum` lines to paste into Package.swift. The URL
-# is a PLACEHOLDER — the maintainer must host the slim zip as a manifold-llama
-# GitHub release asset and substitute the real download URL. See
-# docs/LLAMA_CONTRACT.md ("Slimming the xcframework").
+# It then zips the slim framework and computes the SwiftPM package checksum.
+#
+# The production artifact is published by `.github/workflows/vendor-release.yml`,
+# NOT by hand-running this script and uploading the result: the repackage is
+# NOT byte-reproducible (ditto + xcodebuild embed timestamps — measured:
+# three independent local runs against identical, checksum-verified upstream
+# input produced three different output checksums), so only ONE run's output
+# may ever be published and pinned. Running this script locally is useful to
+# sanity-check a new BUILD before dispatching that workflow (does it extract
+# cleanly, pass the upstream checksum assertion, produce the expected three
+# slices?) — but the `url`/`checksum` printed below are that LOCAL run's
+# values, good for a diagnostic sanity check only. Never paste them into
+# Package.swift or host this local run's zip as a release asset; pin only
+# the checksum the vendor-release.yml workflow run prints in its job
+# summary. See docs/LLAMA_CONTRACT.md ("Slimming the xcframework").
 #
 # Usage:
 #   scripts/repackage-xcframework.sh                 # build b9859 (default)
@@ -312,11 +322,28 @@ echo "  dSYM directories:    ${DSYM_COUNT}  (none — good)"
 echo "  Slim checksum:       ${CHECKSUM}"
 echo "  Provenance record:   ${PROVENANCE_FILE}"
 echo "--------------------------------------------------------------------------"
-echo "  Paste into Package.swift (.binaryTarget name: \"llama-cpp\"):"
-echo
-echo "    url: \"https://github.com/ManifoldKit/manifold-llama/releases/download/<TAG>/llama-${BUILD}-slim.xcframework.zip\","
-echo "    checksum: \"${CHECKSUM}\""
-echo
-echo "  NOTE: the url above is a PLACEHOLDER. Host ${SLIM_ZIP##*/} as a"
-echo "  manifold-llama GitHub release asset, then substitute the real URL."
+# VENDOR_RELEASE_PUBLISH=1 is set ONLY by vendor-release.yml's repackage
+# step — NOT by vendor-release-rehearsal.yml, and NOT by GITHUB_ACTIONS
+# alone (that's true on every Actions runner, including the rehearsal,
+# which would otherwise print this same "authoritative, paste this"
+# footer for a run that is never published). This run is only
+# authoritative — safe to pin in Package.swift — when it's the one
+# vendor-release.yml itself performs; every other run (local, or the
+# read-only rehearsal) is diagnostic-only because the repackage is not
+# byte-reproducible (see the header comment). Vary the footer accordingly
+# so a maintainer can't mistake a rehearsal or local sanity-check run's
+# checksum for the one to publish.
+if [[ "${VENDOR_RELEASE_PUBLISH:-}" == "1" ]]; then
+    echo "  Paste into Package.swift (.binaryTarget name: \"llama-cpp\"):"
+    echo
+    echo "    url: \"https://github.com/ManifoldKit/manifold-llama/releases/download/vendor-llama-${BUILD}/llama-${BUILD}-slim.xcframework.zip\","
+    echo "    checksum: \"${CHECKSUM}\""
+else
+    echo "  DIAGNOSTIC RUN — not the publishable one. This checksum is NOT reproducible: do"
+    echo "  NOT paste it into Package.swift and do NOT upload ${SLIM_ZIP##*/}"
+    echo "  anywhere. To publish and pin a real vendor-llama-${BUILD} release,"
+    echo "  dispatch .github/workflows/vendor-release.yml (build: ${BUILD}) and"
+    echo "  use the checksum ITS run summary prints instead. See"
+    echo "  docs/LLAMA_CONTRACT.md \"Slimming the xcframework\"."
+fi
 echo "=========================================================================="
