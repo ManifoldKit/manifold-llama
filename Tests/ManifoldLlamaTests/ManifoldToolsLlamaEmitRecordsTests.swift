@@ -198,8 +198,112 @@ final class ManifoldToolsLlamaEmitRecordsTests: XCTestCase {
         XCTAssertEqual(record.status, .measured)
         XCTAssertEqual(record.backend, "llama.cpp")
         XCTAssertEqual(record.model, modelURL.lastPathComponent, "must be the real GGUF file name, not a placeholder")
-        XCTAssertNotEqual(record.quant, "unknown", "the Qwen3.5-2B fixture on disk carries a real Qxx quant token in its filename")
+        // Exact equality, not XCTAssertNotEqual(quant, "unknown") — the original
+        // version of this assertion passed on the truncated "Q4" the pre-fix
+        // parser actually returned (rev-183 finding on #183): it proved the
+        // capability didn't TOTALLY fail, not that it worked. The fixture's
+        // real filename carries "Q4_K_M"; assert the whole label survives.
+        XCTAssertEqual(record.quant, "Q4_K_M", "the fixture's real quant label must survive whole, not truncated to its leading \"Q4\"")
         XCTAssertEqual(record.renderer, "jinja-prompt")
         XCTAssertNotNil(record.verdict, "a measured record always carries a verdict")
+    }
+
+    // MARK: - quantLabel(fromFileName:) precision (rev-183 blocker 2 on #183)
+
+    /// Drives the CLI's missing-GGUF absence path (no real weights needed —
+    /// `quantLabel(fromFileName:)` runs on the file NAME before the
+    /// existence check's error path returns) purely to exercise quant-label
+    /// parsing against a crafted file name, and returns the emitted record's
+    /// `quant` field.
+    private func quantFromMissingModel(named fileName: String) throws -> String {
+        let tmp = FileManager.default.temporaryDirectory
+        let recordsURL = tmp.appendingPathComponent("records-\(UUID().uuidString).json")
+        let transcriptURL = tmp.appendingPathComponent("transcript-\(UUID().uuidString).jsonl")
+        let missingModel = tmp.appendingPathComponent("quant-probe-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(fileName)
+        defer {
+            try? FileManager.default.removeItem(at: recordsURL)
+            try? FileManager.default.removeItem(at: transcriptURL)
+        }
+
+        _ = try runCLI([
+            "--model", missingModel.path,
+            "--scenario", "01-now",
+            "--output", transcriptURL.path,
+            "--emit-records", recordsURL.path,
+        ])
+        let records = try decodeRecords(at: recordsURL)
+        return try XCTUnwrap(records.first).quant
+    }
+
+    /// The defect this fixes truncated "Q4_K_M" to "Q4": splitting on "_"
+    /// broke the K/M sub-label into its own tokens before the detector ever
+    /// saw the full marker (13 of 14 real GGUFs on rev-183's machine
+    /// truncated this way).
+    func test_quantLabel_fullKQuantSuffix_notTruncated() throws {
+        XCTAssertEqual(try quantFromMissingModel(named: "model-Q4_K_M.gguf"), "Q4_K_M")
+    }
+
+    /// The defect this fixes returned "unknown" for the entire I-quant family
+    /// — the old detector's `hasPrefix("q")` check never matched a leading
+    /// "I" (IQ4_XS, IQ2_XXS, ...) at all: total loss, not truncation.
+    func test_quantLabel_iQuant_notUnknown() throws {
+        XCTAssertEqual(try quantFromMissingModel(named: "model-IQ4_XS.gguf"), "IQ4_XS")
+    }
+
+    /// The defect this fixes could return the WRONG label, not just a
+    /// truncated one: a reversed token scan with no ordering guard between
+    /// the quant and precision branches returned whichever pattern the scan
+    /// hit last, so "m-Q4_K_M-f16.gguf" returned "f16" — a 4-bit K-quant cell
+    /// mislabelled full-precision. A quant match must always win over a
+    /// precision match, regardless of which sits later in the name.
+    func test_quantLabel_prefersQuantOverTrailingPrecisionToken() throws {
+        XCTAssertEqual(try quantFromMissingModel(named: "m-Q4_K_M-f16.gguf"), "Q4_K_M")
+    }
+
+    // MARK: - Blocker 1 (rev-183): a mid-stream scenario failure must not read as measured/fail
+
+    private func context(transcriptRef: String = "probe") -> ConformanceScorer.RecordContext {
+        ConformanceScorer.RecordContext(renderer: "jinja-prompt", coreCommit: "test", transcriptRef: transcriptRef)
+    }
+
+    /// Validates the CORE mechanism `main.swift`'s scenario-loop catch block
+    /// now relies on (appending `.error(scenarioId:message:)` on any thrown
+    /// error), rather than driving the real CLI: forcing llama.cpp to throw
+    /// mid-generation deterministically (a decode failure, context overflow)
+    /// is not something a test can trigger against a real model on demand.
+    /// What CAN be driven directly is `ConformanceScorer`'s behavior on the
+    /// two transcript shapes the fix distinguishes — the exact demonstration
+    /// rev-183 used to find the defect (a hand-built transcript group of
+    /// "partial turn, zero assertions, no error event").
+    func test_partialTurnWithoutErrorEvent_documentsPreFixDefectShape_andFixRoutesToHole() throws {
+        // BEFORE this PR's fix: the scenario streamed one token and then threw,
+        // so `token_delta` proves `producedModelTurn == true`, but nothing ever
+        // logged the failure — `errored` stays false with zero assertions.
+        let unfixedTranscript = """
+        {"kind":"prompt","scenario":"partial","user":"x","requiredTools":[],"backend":"llama.cpp","model":"m.gguf","quant":"Q4_K_M"}
+        {"kind":"token_delta","scenario":"partial","text":"partial output","backend":"llama.cpp","model":"m.gguf","quant":"Q4_K_M"}
+        """
+        let unfixedRecords = ConformanceScorer.records(jsonl: unfixedTranscript, context: context())
+        let unfixedRecord = try XCTUnwrap(unfixedRecords.first)
+        // Documents the pre-fix defect this blocker exists to close: a cell
+        // that was never actually measured reads as a fabricated MEASURED
+        // FAIL — precisely the "absence read as failure" confusion
+        // CellStatus exists to prevent.
+        XCTAssertEqual(unfixedRecord.status, .measured, "documents the pre-fix defect: no .error event, so the hole is invisible to the scorer")
+        XCTAssertEqual(unfixedRecord.verdict, .fail, "documents the pre-fix defect: a fabricated failure, not a real measurement")
+
+        // AFTER the fix: `main.swift`'s catch block now appends this event
+        // before falling through to the next scenario.
+        let fixedTranscript = unfixedTranscript + "\n"
+            + #"{"kind":"error","scenario":"partial","message":"scenario run failed: decode failure","backend":"llama.cpp","model":"m.gguf","quant":"Q4_K_M"}"#
+        let fixedRecords = ConformanceScorer.records(jsonl: fixedTranscript, context: context())
+        let fixedRecord = try XCTUnwrap(fixedRecords.first)
+        XCTAssertNotEqual(fixedRecord.status, .measured, "the fix must route a mid-stream failure to a hole, never a measured record")
+        guard case .loadFail(let reason) = fixedRecord.status else {
+            return XCTFail("expected .loadFail, got \(fixedRecord.status)")
+        }
+        XCTAssertTrue(reason.contains("decode failure"), "the real error detail must survive into the hole's reason")
+        XCTAssertNil(fixedRecord.verdict, "a hole carries no verdict — this is what prevents the fabricated .fail above")
     }
 }
