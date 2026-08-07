@@ -8,7 +8,8 @@ llama.cpp (GGUF) inference backend family for [ManifoldKit](https://github.com/M
    compiled to one page.
 2. Read this repo's known-issues buffer — solved non-obvious failures.
    **Check it before diagnosing**, and append to it when you solve one.
-   Which file:
+   Which file (canonical source: `~/Repos/roryford/estate/estate.yaml`
+   `conventions.memory_files.known_issues` / `known_issues_legacy`):
    - `.agents/known-issues.md` if present; otherwise `.claude/known-issues.md`
      (the older path, still in use in most repos). "Present" means it has
      content — a file that is empty, or only newlines and spaces, does not
