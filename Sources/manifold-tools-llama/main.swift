@@ -56,6 +56,13 @@ struct CLI {
     /// it; the benchmark prints the plan-effective value.
     var context: Int = 4096
 
+    /// Write the normalized `[ConformanceRecord]` schema (ManifoldKit #2041) to
+    /// this path after the run, matching the shape and semantics
+    /// `manifold-tools score --emit-records` and `manifold-tools-mlx
+    /// --emit-records` already produce — so a downstream collator can fold all
+    /// three legs without re-deriving per-backend vocabulary (manifold-llama#178).
+    var emitRecords: URL? = nil
+
     /// Argument errors exit with status 2 via `exit(2)` + stderr rather than
     /// `precondition` / `fatalError` (those trap with SIGABRT in debug builds,
     /// producing a confusing stack trace instead of the clean "bad arguments"
@@ -119,6 +126,10 @@ struct CLI {
                 cli.context = n
             case "--describe":
                 cli.describe = true
+            case "--emit-records":
+                i += 1
+                guard i < remainder.count else { fail("--emit-records requires a value") }
+                cli.emitRecords = URL(fileURLWithPath: remainder[i])
             default:
                 fail("unknown argument: \(arg)")
             }
@@ -175,6 +186,14 @@ struct CLI {
                                 RenderConsistencyChecker verdict. Reads GGUF
                                 metadata only — no weights, no Metal, no
                                 generation. Runs anywhere, including CI.
+          --emit-records <path>  Write the normalized [ConformanceRecord] JSON
+                                (the cross-leg eval schema, ManifoldKit #2041)
+                                to <path> after the run. Additive — the
+                                transcript at --output is still written.
+                                Absence (a missing GGUF, a failed load) is
+                                recorded as a notMeasured/loadFail hole for
+                                every requested scenario, never as a measured
+                                failure — see ConformanceRecord's CellStatus.
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
@@ -609,6 +628,92 @@ func describeModel(_ modelURL: URL) -> Int32 {
     return 0
 }
 
+// MARK: - ConformanceRecord emission (--emit-records)
+
+/// Best-effort quantization label parsed from a GGUF file name — the llama.cpp
+/// analogue of `manifold-tools`' `quantLabel(from:)` (Sources/manifold-tools/main.swift
+/// in ManifoldKit core), which parses an Ollama tag instead. llama.cpp model
+/// identity is a file path, not a tag, so this keys off the last path component.
+/// Returns `"unknown"` when nothing matches (`quant` still gets a value — every
+/// leg stamps a non-optional `quant` on `ConformanceRecord`, unlike core's
+/// scorer row where it's optional).
+func quantLabel(fromFileName name: String) -> String {
+    let separators = CharacterSet(charactersIn: "_-. ")
+    let tokens = name.components(separatedBy: separators).filter { !$0.isEmpty }
+    for token in tokens.reversed() {
+        let lower = token.lowercased()
+        if lower.hasPrefix("q") && lower.dropFirst().first?.isNumber == true {
+            return token            // Q4_K_M, Q8_0, Q5_K_S, ...
+        }
+        if lower == "fp16" || lower == "fp32" || lower == "bf16" || lower == "f16" {
+            return token
+        }
+        if lower.hasPrefix("int") && lower.dropFirst(3).allSatisfy(\.isNumber) && lower.count > 3 {
+            return token            // int4, int8
+        }
+    }
+    return "unknown"
+}
+
+/// The caller-declared provenance stamped on every emitted record.
+///
+/// `renderer` is `"jinja-prompt"` — llama.cpp renders the model's own embedded
+/// chat template through `JinjaPromptRenderer`/`PromptRenderer` (see the
+/// production-load-path comment in `runCLI` below), the same label
+/// `ConformanceRecord.renderer`'s doc comment names as an example. `coreCommit`
+/// prefers `$MANIFOLD_CORE_COMMIT` — the same env var `manifold-tools score
+/// --core-commit` defaults from in ManifoldKit core — so a sweep that exports it
+/// gets a real, comparable value instead of the hardcoded `"unknown"`
+/// `manifold-tools-mlx` currently ships (a known limitation flagged in
+/// ManifoldKit's `scripts/local-integration-sweep.sh`).
+func recordContext(transcriptRef: URL) -> ConformanceScorer.RecordContext {
+    ConformanceScorer.RecordContext(
+        renderer: "jinja-prompt",
+        coreCommit: ProcessInfo.processInfo.environment["MANIFOLD_CORE_COMMIT"] ?? "unknown",
+        transcriptRef: transcriptRef.path
+    )
+}
+
+/// One `ExpectedCell` per scenario, all naming the same (backend, model, quant)
+/// cell — the coordinates an absence hole must carry so a downstream matrix can
+/// attribute it to the right row instead of silently having no row at all.
+func expectedCells(for scenarios: [Scenario], model: String, quant: String) -> [ConformanceScorer.ExpectedCell] {
+    scenarios.map {
+        ConformanceScorer.ExpectedCell(backend: "llama.cpp", model: model, quant: quant, scenario: $0.id)
+    }
+}
+
+/// Resolves the scenario list to attribute absence records to, best-effort: an
+/// invalid `--scenario` filter here just yields no absence records rather than
+/// aborting — the real scenario-filter failure path (`ScenarioCLIHarness.filterScenarios`
+/// in the main run) still surfaces the actual error to the operator whenever the
+/// run gets far enough to reach it. Used only by the two early-return absence
+/// branches below, which run before the main flow's own `filtered` is computed.
+func resolveScenariosForAbsence(_ scenarios: [Scenario], filter: String) -> [Scenario] {
+    do {
+        return try ScenarioCLIHarness.filterScenarios(scenarios, matching: filter)
+    } catch {
+        return []
+    }
+}
+
+/// Writes `records` as the `[ConformanceRecord]` JSON payload to `url`.
+///
+/// Record emission is additive instrumentation layered on top of a run whose
+/// exit code is already decided by the scenario results (or by the load/absence
+/// path that called this) — a write failure here must not change that exit
+/// code, so the error is logged (do/catch, not `try?`) rather than propagated.
+func writeRecords(_ records: [ConformanceRecord], to url: URL) {
+    do {
+        let data = try ConformanceScorer.encodeJSON(records)
+        try data.write(to: url)
+        print("Records written to \(url.path) (\(records.count) record(s))")
+    } catch {
+        FileHandle.standardError.write(Data(
+            "manifold-tools-llama: WARNING — failed to write --emit-records payload to \(url.path): \(error)\n".utf8))
+    }
+}
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -638,6 +743,22 @@ func runCLI() async -> Int32 {
     let modelURL = URL(fileURLWithPath: modelPath)
     guard FileManager.default.fileExists(atPath: modelURL.path) else {
         FileHandle.standardError.write(Data("model file not found: \(modelURL.path)\n".utf8))
+        // Absence is not failure (ConformanceRecord.CellStatus doc): a missing
+        // GGUF is a `notMeasured` hole for every scenario this invocation would
+        // have run, never a measured `fail` verdict.
+        if let emitURL = cli.emitRecords {
+            let scenariosForHole = resolveScenariosForAbsence(scenarios, filter: cli.common.scenarioFilter)
+            let cells = expectedCells(
+                for: scenariosForHole,
+                model: modelURL.lastPathComponent,
+                quant: quantLabel(fromFileName: modelURL.lastPathComponent)
+            )
+            let context = recordContext(transcriptRef: cli.common.output)
+            let records = cells.map {
+                ConformanceScorer.notMeasuredRecord($0, context: context, status: .notMeasured("gguf model file not found at \(modelURL.path)"))
+            }
+            writeRecords(records, to: emitURL)
+        }
         return 1
     }
 
@@ -676,9 +797,20 @@ func runCLI() async -> Int32 {
     let fixturesRoot = resolveFixturesRoot(cli.common.fixturesRoot)
     print("Fixtures root: \(fixturesRoot.path)")
 
+    // Stamp backend/model/quant onto every transcript record so
+    // `ConformanceScorer.resolve(jsonl:)` — and this run's own --emit-records
+    // re-scoring below — group rows by the real cell instead of falling back to
+    // "unknown"/"unknown"/"unknown" (the default when a record carries none).
+    let modelLabel = modelURL.lastPathComponent
+    let quantLabelForRun = quantLabel(fromFileName: modelLabel)
     let logger: TranscriptLogger
     do {
-        logger = try TranscriptLogger(url: cli.common.output)
+        logger = try TranscriptLogger(
+            url: cli.common.output,
+            backend: "llama.cpp",
+            model: modelLabel,
+            quant: quantLabelForRun
+        )
     } catch {
         FileHandle.standardError.write(Data("failed to open log: \(error)\n".utf8))
         return 1
@@ -765,6 +897,17 @@ func runCLI() async -> Int32 {
         FileHandle.standardError.write(Data((banner + "\n").utf8))
         print(banner)
         print("  (model never loaded — this is a load failure, NOT a tool-dispatch failure)")
+        // Absence is not failure: the model existed but its weights/arch could
+        // not be loaded, so every requested scenario is a `loadFail` hole, not a
+        // measured `fail` verdict.
+        if let emitURL = cli.emitRecords {
+            let cells = expectedCells(for: filtered, model: modelLabel, quant: quantLabelForRun)
+            let context = recordContext(transcriptRef: logger.destination)
+            let records = cells.map {
+                ConformanceScorer.notMeasuredRecord($0, context: context, status: .loadFail(detail))
+            }
+            writeRecords(records, to: emitURL)
+        }
         // Best-effort teardown of any half-constructed backend before exit.
         if let backend = backendBox.backend {
             await backend.unloadAndWait()
@@ -869,6 +1012,19 @@ func runCLI() async -> Int32 {
             allPassed = false
             print("  ERROR \(error)")
         }
+    }
+
+    // Re-score the just-written transcript into ConformanceRecord[] for
+    // --emit-records. Reuses ConformanceScorer.records(fileAt:context:) — the
+    // same reduction `manifold-tools score --emit-records` and
+    // `manifold-tools-mlx --emit-records` apply — so per-scenario absence
+    // (a scenario whose run errored before producing a transcript group) also
+    // comes back as a notMeasured/loadFail hole automatically, not just the
+    // whole-invocation absence cases handled above.
+    if let emitURL = cli.emitRecords {
+        let context = recordContext(transcriptRef: logger.destination)
+        let records = ConformanceScorer.records(fileAt: logger.destination, context: context)
+        writeRecords(records, to: emitURL)
     }
 
     if let backend = backendBox.backend {
