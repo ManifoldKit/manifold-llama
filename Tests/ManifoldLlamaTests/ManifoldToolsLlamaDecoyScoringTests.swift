@@ -62,6 +62,14 @@ final class ManifoldToolsLlamaDecoyScoringTests: XCTestCase {
     /// the event `ScenarioRunner` logs before generation starts, carrying
     /// `requiredTools` (the scored expected set) and `advertisedTools` (every
     /// tool actually offered to the model).
+    ///
+    /// Fails loudly (not `XCTSkip`) when the event is absent: a missing
+    /// `.prompt` event almost always means the run itself failed upstream
+    /// (e.g. the model stopped loading after a llama.cpp bump) — exactly the
+    /// class of failure this test exists to catch. `XCTSkip` here would let
+    /// the suite's skip count quietly absorb a real regression instead of
+    /// reddening for it (the guard-defeated-upstream shape this run has hit
+    /// repeatedly elsewhere tonight).
     private func promptEvent(scenario: String, in transcriptURL: URL) throws -> (requiredTools: [String], advertisedTools: [String]) {
         let text = try String(contentsOf: transcriptURL, encoding: .utf8)
         for line in text.split(separator: "\n") {
@@ -74,7 +82,9 @@ final class ManifoldToolsLlamaDecoyScoringTests: XCTestCase {
             let advertised = obj["advertisedTools"] as? [String] ?? []
             return (required, advertised)
         }
-        throw XCTSkip("no .prompt event for scenario '\(scenario)' found in \(transcriptURL.path)")
+        XCTFail("no .prompt event for scenario '\(scenario)' found in \(transcriptURL.path) — the run likely failed before logging one")
+        struct MissingPromptEvent: Error {}
+        throw MissingPromptEvent()
     }
 
     private func decodeRecords(at url: URL) throws -> [ConformanceRecord] {
@@ -113,7 +123,16 @@ final class ManifoldToolsLlamaDecoyScoringTests: XCTestCase {
             "--output", transcriptURL.path,
             "--emit-records", recordsURL.path,
         ])
-        XCTAssertNotEqual(result.exitCode, 3, "model load must have succeeded for this assertion to be meaningful: \(result.stderr)")
+        // A `guard`, not a recorded-but-non-aborting `XCTAssertNotEqual`: if
+        // the model failed to load, every assertion below is meaningless
+        // against an empty/absent transcript. Failing here loudly, instead of
+        // falling through into `promptEvent`'s "not found" path, keeps the
+        // failure attributable to the real cause (a load failure) rather than
+        // a downstream symptom.
+        guard result.exitCode != 3 else {
+            XCTFail("model failed to load (exit 3): \(result.stderr)")
+            return
+        }
 
         let (required, advertised) = try promptEvent(scenario: "01-now", in: transcriptURL)
         let decoyNames = Set(DecoyTools.names(5))
