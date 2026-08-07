@@ -56,6 +56,13 @@ struct CLI {
     /// it; the benchmark prints the plan-effective value.
     var context: Int = 4096
 
+    /// Write the normalized `[ConformanceRecord]` schema (ManifoldKit #2041) to
+    /// this path after the run, matching the shape and semantics
+    /// `manifold-tools score --emit-records` and `manifold-tools-mlx
+    /// --emit-records` already produce — so a downstream collator can fold all
+    /// three legs without re-deriving per-backend vocabulary (manifold-llama#178).
+    var emitRecords: URL? = nil
+
     /// Argument errors exit with status 2 via `exit(2)` + stderr rather than
     /// `precondition` / `fatalError` (those trap with SIGABRT in debug builds,
     /// producing a confusing stack trace instead of the clean "bad arguments"
@@ -119,6 +126,10 @@ struct CLI {
                 cli.context = n
             case "--describe":
                 cli.describe = true
+            case "--emit-records":
+                i += 1
+                guard i < remainder.count else { fail("--emit-records requires a value") }
+                cli.emitRecords = URL(fileURLWithPath: remainder[i])
             default:
                 fail("unknown argument: \(arg)")
             }
@@ -175,6 +186,14 @@ struct CLI {
                                 RenderConsistencyChecker verdict. Reads GGUF
                                 metadata only — no weights, no Metal, no
                                 generation. Runs anywhere, including CI.
+          --emit-records <path>  Write the normalized [ConformanceRecord] JSON
+                                (the cross-leg eval schema, ManifoldKit #2041)
+                                to <path> after the run. Additive — the
+                                transcript at --output is still written.
+                                Absence (a missing GGUF, a failed load) is
+                                recorded as a notMeasured/loadFail hole for
+                                every requested scenario, never as a measured
+                                failure — see ConformanceRecord's CellStatus.
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
@@ -228,114 +247,32 @@ func makeFullRegistry(fixturesRoot: URL) -> ToolRegistry {
 
 // MARK: - Decoy tools (--extra-tools)
 
-/// A fixed pool of plausible, distinct decoy `ToolDefinition`s used to pad the
-/// advertised tool set when `--extra-tools N` is passed. None of these is ever
-/// the correct answer for the single-tool scenarios (`now` / `calc` / file
-/// reads), so a model that dispatches one has been distracted — the scenario's
-/// own assertions (which require the REAL tool) still gate pass/fail.
+/// Registers the first `count` decoys from `ManifoldTools.DecoyTools` — the
+/// shared, deterministic pool published from ManifoldKit core specifically so
+/// this repo, `manifold-tools-mlx`, and core's own `manifold-tools` all
+/// advertise the SAME distractor set at the same `--extra-tools N` level
+/// (its own doc comment: "the companions, from their next adoption pass,
+/// [should] delete their local copy and depend on one deterministic pool").
 ///
-/// Names and parameter schemas are deliberately realistic and varied so the
-/// model faces genuine selection pressure rather than obvious throwaways. There
-/// are 24 entries so `--extra-tools` can pad well past 20.
-enum DecoyTools {
-
-    /// Helper to build a one-string-parameter object schema.
-    private static func obj(_ props: [(String, String)], required: [String]) -> JSONSchemaValue {
-        var properties: [String: JSONSchemaValue] = [:]
-        for (name, desc) in props {
-            properties[name] = .object([
-                "type": .string("string"),
-                "description": .string(desc)
-            ])
-        }
-        return .object([
-            "type": .string("object"),
-            "properties": .object(properties),
-            "required": .array(required.map(JSONSchemaValue.string))
-        ])
-    }
-
-    /// The ordered decoy pool. `--extra-tools N` advertises the first N entries.
-    static let pool: [ToolDefinition] = [
-        ToolDefinition(name: "get_weather", description: "Returns the current weather for a city.",
-                       parameters: obj([("city", "City name")], required: ["city"])),
-        ToolDefinition(name: "send_email", description: "Sends an email to a recipient.",
-                       parameters: obj([("to", "Recipient address"), ("subject", "Subject line"), ("body", "Email body")], required: ["to", "body"])),
-        ToolDefinition(name: "search_web", description: "Searches the web and returns result snippets.",
-                       parameters: obj([("query", "Search query")], required: ["query"])),
-        ToolDefinition(name: "translate_text", description: "Translates text into a target language.",
-                       parameters: obj([("text", "Text to translate"), ("target_language", "Target language code")], required: ["text", "target_language"])),
-        ToolDefinition(name: "set_timer", description: "Starts a countdown timer for the given duration.",
-                       parameters: obj([("duration", "Duration, e.g. '10 minutes'")], required: ["duration"])),
-        ToolDefinition(name: "currency_convert", description: "Converts an amount between two currencies.",
-                       parameters: obj([("amount", "Amount to convert"), ("from", "Source currency code"), ("to", "Target currency code")], required: ["amount", "from", "to"])),
-        ToolDefinition(name: "create_event", description: "Creates a calendar event.",
-                       parameters: obj([("title", "Event title"), ("start", "Start time"), ("end", "End time")], required: ["title", "start"])),
-        ToolDefinition(name: "get_stock_price", description: "Returns the latest price for a stock ticker.",
-                       parameters: obj([("ticker", "Stock ticker symbol")], required: ["ticker"])),
-        ToolDefinition(name: "roll_dice", description: "Rolls dice and returns the total.",
-                       parameters: obj([("notation", "Dice notation, e.g. '2d6'")], required: ["notation"])),
-        ToolDefinition(name: "unit_convert", description: "Converts a value between measurement units.",
-                       parameters: obj([("value", "Numeric value"), ("from_unit", "Source unit"), ("to_unit", "Target unit")], required: ["value", "from_unit", "to_unit"])),
-        ToolDefinition(name: "send_sms", description: "Sends a text message to a phone number.",
-                       parameters: obj([("phone", "Destination phone number"), ("message", "Message text")], required: ["phone", "message"])),
-        ToolDefinition(name: "get_directions", description: "Returns driving directions between two places.",
-                       parameters: obj([("origin", "Starting location"), ("destination", "Ending location")], required: ["origin", "destination"])),
-        ToolDefinition(name: "play_music", description: "Plays a song or playlist.",
-                       parameters: obj([("query", "Song, artist, or playlist name")], required: ["query"])),
-        ToolDefinition(name: "set_reminder", description: "Creates a reminder at a given time.",
-                       parameters: obj([("text", "Reminder text"), ("time", "When to remind")], required: ["text", "time"])),
-        ToolDefinition(name: "get_news", description: "Returns recent news headlines for a topic.",
-                       parameters: obj([("topic", "News topic or category")], required: ["topic"])),
-        ToolDefinition(name: "book_flight", description: "Searches and books a flight.",
-                       parameters: obj([("origin", "Departure airport"), ("destination", "Arrival airport"), ("date", "Travel date")], required: ["origin", "destination", "date"])),
-        ToolDefinition(name: "get_definition", description: "Returns the dictionary definition of a word.",
-                       parameters: obj([("word", "Word to define")], required: ["word"])),
-        ToolDefinition(name: "create_note", description: "Saves a note to the user's notebook.",
-                       parameters: obj([("title", "Note title"), ("content", "Note body")], required: ["content"])),
-        ToolDefinition(name: "get_traffic", description: "Returns current traffic conditions for a route.",
-                       parameters: obj([("route", "Route or area name")], required: ["route"])),
-        ToolDefinition(name: "shorten_url", description: "Creates a shortened URL.",
-                       parameters: obj([("url", "URL to shorten")], required: ["url"])),
-        ToolDefinition(name: "get_recipe", description: "Returns a recipe for a dish.",
-                       parameters: obj([("dish", "Dish name")], required: ["dish"])),
-        ToolDefinition(name: "track_package", description: "Returns the delivery status of a package.",
-                       parameters: obj([("tracking_number", "Carrier tracking number")], required: ["tracking_number"])),
-        ToolDefinition(name: "get_horoscope", description: "Returns the daily horoscope for a star sign.",
-                       parameters: obj([("sign", "Zodiac sign")], required: ["sign"])),
-        ToolDefinition(name: "convert_timezone", description: "Converts a time between two time zones.",
-                       parameters: obj([("time", "Time to convert"), ("from_zone", "Source time zone"), ("to_zone", "Target time zone")], required: ["time", "from_zone", "to_zone"])),
-    ]
-
-    /// Result shape every decoy executor returns. Decoys should never actually be
-    /// dispatched on a passing run; if a model does call one, this benign payload
-    /// keeps the runner loop alive so the transcript records the wrong-tool call.
-    struct DecoyResult: Encodable, Sendable {
-        let note: String
-    }
-
-    /// Builds a no-op executor for a decoy definition. Accepts any arguments
-    /// (`EmptyArgs` is permissive) and returns a fixed marker so a wrong-tool
-    /// dispatch is visible in the transcript without crashing the run.
-    static func makeExecutor(for definition: ToolDefinition) -> TypedToolExecutor<EmptyArgs, DecoyResult> {
-        TypedToolExecutor(definition: definition) { _ in
-            DecoyResult(note: "decoy tool '\(definition.name)' is not the right tool for this task")
-        }
-    }
-}
-
-/// Registers the first `count` decoy tools (clamped to the pool size) into the
-/// registry and returns their names so the caller can add them to the scenario's
-/// advertised set. Returns an empty array when `count <= 0`.
+/// This CLI previously hand-rolled its own 24-entry local pool, which had
+/// already drifted from core's: 4 of the 24 names weren't in core's 46-entry
+/// pool at all, so `--extra-tools 10` on this leg advertised `decoyLevel: 7`
+/// once scored against core's pool — and a sweep folding this leg with
+/// Ollama/MLX at the "same" decoy level was actually comparing two DIFFERENT
+/// advertised sets, confounding decoy-identity divergence with genuine
+/// runtime divergence (found live during the collate probe for #178).
+///
+/// Returns the registered names, in pool order, so the caller can add them to
+/// a scenario's advertised set. Returns `[]` for `count <= 0`; `DecoyTools`
+/// itself clamps `count` to its pool size (`maxCount`), so no local clamping
+/// is needed here.
 @MainActor
 func registerDecoys(count: Int, into registry: ToolRegistry) -> [String] {
     guard count > 0 else { return [] }
-    let n = min(count, DecoyTools.pool.count)
-    let chosen = Array(DecoyTools.pool.prefix(n))
-    for definition in chosen {
-        registry.register(DecoyTools.makeExecutor(for: definition))
+    for executor in DecoyTools.executors(count) {
+        registry.register(executor)
     }
-    return chosen.map(\.name)
+    return DecoyTools.names(count)
 }
 
 /// Returns a copy of `scenario` whose `requiredTools` also lists `decoyNames`.
@@ -609,6 +546,137 @@ func describeModel(_ modelURL: URL) -> Int32 {
     return 0
 }
 
+// MARK: - ConformanceRecord emission (--emit-records)
+
+/// Best-effort quantization label parsed from a GGUF file name — the llama.cpp
+/// analogue of `manifold-tools`' `quantLabel(from:)` (Sources/manifold-tools/main.swift
+/// in ManifoldKit core), which parses an Ollama tag instead. llama.cpp model
+/// identity is a file path, not a tag, so this keys off the last path component.
+/// Returns `"unknown"` when nothing matches (`quant` still gets a value — every
+/// leg stamps a non-optional `quant` on `ConformanceRecord`, unlike core's
+/// scorer row where it's optional).
+func quantLabel(fromFileName name: String) -> String {
+    // BLOCKER 2 (rev-183 on #183): the previous separator-split approach
+    // fragmented the label BEFORE the detector ever saw it — splitting on "_"
+    // broke "Q4_K_M" into "Q4"/"K"/"M" tokens, so the detector matched only
+    // the leading "Q4" and silently dropped the "_K_M" sub-label (13 of 14
+    // real GGUFs on the reviewer's machine truncated this way). It also never
+    // matched I-quants at all (`hasPrefix("q")` fails on "iq4_xs" — the "I"
+    // prefix), and its reversed-token scan had no ordering guard between the
+    // quant and precision branches, so a name like "m-Q4_K_M-f16.gguf" could
+    // return the wrong, later-scanned "f16" instead of the real "Q4_K_M".
+    //
+    // Fix: match the FULL quant marker as one boundary-delimited run against
+    // the ORIGINAL (unsplit) string, and always prefer a quant match over a
+    // precision match regardless of where either sits in the name.
+    if let quant = firstMatch(in: name, pattern: #"\bI?Q\d+(?:_[A-Za-z0-9]+)*\b"#) {
+        return quant            // Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, IQ2_XXS, ...
+    }
+    if let precision = firstMatch(in: name, pattern: #"\b(?:fp16|fp32|bf16|f16|f32)\b"#) {
+        return precision
+    }
+    if let intN = firstMatch(in: name, pattern: #"\bint\d+\b"#) {
+        return intN              // int4, int8
+    }
+    return "unknown"
+}
+
+/// Returns the first case-insensitive regex match of `pattern` in `string`,
+/// verbatim (original casing, e.g. `"Q4_K_M"` not `"q4_k_m"`).
+///
+/// `pattern` is always a fixed string literal at every call site above, so a
+/// compile failure here would be a build-time-catchable typo, not a runtime
+/// condition — logging and treating it as "not found" (rather than trapping
+/// the whole CLI) keeps a cosmetic regex mistake from taking down a run over
+/// nothing worse than a missing Quant-column label.
+func firstMatch(in string: String, pattern: String) -> String? {
+    let regex: NSRegularExpression
+    do {
+        regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    } catch {
+        FileHandle.standardError.write(Data(
+            "manifold-tools-llama: WARNING — invalid quant-label regex '\(pattern)': \(error)\n".utf8))
+        return nil
+    }
+    let range = NSRange(string.startIndex..., in: string)
+    guard let match = regex.firstMatch(in: string, options: [], range: range),
+          let matchRange = Range(match.range, in: string) else {
+        return nil
+    }
+    return String(string[matchRange])
+}
+
+/// The caller-declared provenance stamped on every emitted record.
+///
+/// `renderer` is `"jinja-prompt"` — llama.cpp renders the model's own embedded
+/// chat template through `JinjaPromptRenderer`/`PromptRenderer` (see the
+/// production-load-path comment in `runCLI` below), the same label
+/// `ConformanceRecord.renderer`'s doc comment names as an example. `coreCommit`
+/// prefers `$MANIFOLD_CORE_COMMIT` — the same env var `manifold-tools score
+/// --core-commit` defaults from in ManifoldKit core — so a sweep that exports it
+/// gets a real, comparable value instead of the hardcoded `"unknown"`
+/// `manifold-tools-mlx` currently ships (a known limitation flagged in
+/// ManifoldKit's `scripts/local-integration-sweep.sh`).
+func recordContext(transcriptRef: URL) -> ConformanceScorer.RecordContext {
+    ConformanceScorer.RecordContext(
+        renderer: "jinja-prompt",
+        coreCommit: ProcessInfo.processInfo.environment["MANIFOLD_CORE_COMMIT"] ?? "unknown",
+        transcriptRef: transcriptRef.path
+    )
+}
+
+/// One `ExpectedCell` per scenario, all naming the same (backend, model, quant)
+/// cell — the coordinates an absence hole must carry so a downstream matrix can
+/// attribute it to the right row instead of silently having no row at all.
+func expectedCells(for scenarios: [Scenario], model: String, quant: String) -> [ConformanceScorer.ExpectedCell] {
+    scenarios.map {
+        ConformanceScorer.ExpectedCell(backend: "llama.cpp", model: model, quant: quant, scenario: $0.id)
+    }
+}
+
+/// Resolves the scenario list to attribute absence records to, best-effort: an
+/// invalid `--scenario` filter here just yields no absence records rather than
+/// aborting — the real scenario-filter failure path (`ScenarioCLIHarness.filterScenarios`
+/// in the main run) still surfaces the actual error to the operator whenever the
+/// run gets far enough to reach it. Used only by the two early-return absence
+/// branches below, which run before the main flow's own `filtered` is computed.
+func resolveScenariosForAbsence(_ scenarios: [Scenario], filter: String) -> [Scenario] {
+    do {
+        return try ScenarioCLIHarness.filterScenarios(scenarios, matching: filter)
+    } catch {
+        return []
+    }
+}
+
+/// Warns on stderr when `--emit-records` was requested but the CLI is about
+/// to take an early-return path (`--list`, `--describe`, `--bench`, a missing
+/// `--model`) that never runs the scenario harness — so `--emit-records`
+/// would otherwise silently no-op with no file and no explanation (rev-183
+/// finding on #183). A no-op here is correct behavior (none of these modes
+/// have a cell to report on), but it must not be a SILENT no-op.
+func warnEmitRecordsIgnored(_ emitRecords: URL?, becauseOf reason: String) {
+    guard let emitRecords else { return }
+    FileHandle.standardError.write(Data(
+        "manifold-tools-llama: WARNING — --emit-records \(emitRecords.path) ignored: \(reason) never runs the scenario harness, so there is no cell to report on\n".utf8))
+}
+
+/// Writes `records` as the `[ConformanceRecord]` JSON payload to `url`.
+///
+/// Record emission is additive instrumentation layered on top of a run whose
+/// exit code is already decided by the scenario results (or by the load/absence
+/// path that called this) — a write failure here must not change that exit
+/// code, so the error is logged (do/catch, not `try?`) rather than propagated.
+func writeRecords(_ records: [ConformanceRecord], to url: URL) {
+    do {
+        let data = try ConformanceScorer.encodeJSON(records)
+        try data.write(to: url)
+        print("Records written to \(url.path) (\(records.count) record(s))")
+    } catch {
+        FileHandle.standardError.write(Data(
+            "manifold-tools-llama: WARNING — failed to write --emit-records payload to \(url.path): \(error)\n".utf8))
+    }
+}
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -623,6 +691,7 @@ func runCLI() async -> Int32 {
     }
 
     if cli.common.list {
+        warnEmitRecordsIgnored(cli.emitRecords, becauseOf: "--list")
         print("Available scenarios:")
         for s in scenarios {
             print("  \(s.id) — \(s.description)")
@@ -631,6 +700,7 @@ func runCLI() async -> Int32 {
     }
 
     guard let modelPath = cli.modelPath else {
+        warnEmitRecordsIgnored(cli.emitRecords, becauseOf: "a missing --model")
         FileHandle.standardError.write(Data(
             "manifold-tools-llama: --model <path.gguf> is required (use --list to inspect scenarios)\n".utf8))
         return 2
@@ -638,6 +708,22 @@ func runCLI() async -> Int32 {
     let modelURL = URL(fileURLWithPath: modelPath)
     guard FileManager.default.fileExists(atPath: modelURL.path) else {
         FileHandle.standardError.write(Data("model file not found: \(modelURL.path)\n".utf8))
+        // Absence is not failure (ConformanceRecord.CellStatus doc): a missing
+        // GGUF is a `notMeasured` hole for every scenario this invocation would
+        // have run, never a measured `fail` verdict.
+        if let emitURL = cli.emitRecords {
+            let scenariosForHole = resolveScenariosForAbsence(scenarios, filter: cli.common.scenarioFilter)
+            let cells = expectedCells(
+                for: scenariosForHole,
+                model: modelURL.lastPathComponent,
+                quant: quantLabel(fromFileName: modelURL.lastPathComponent)
+            )
+            let context = recordContext(transcriptRef: cli.common.output)
+            let records = cells.map {
+                ConformanceScorer.notMeasuredRecord($0, context: context, status: .notMeasured("gguf model file not found at \(modelURL.path)"))
+            }
+            writeRecords(records, to: emitURL)
+        }
         return 1
     }
 
@@ -649,6 +735,7 @@ func runCLI() async -> Int32 {
     // template that declares a dialect MK's renderer does not emit is flagged by
     // the render-consistency check (the #1909 class) with no model run.
     if cli.describe {
+        warnEmitRecordsIgnored(cli.emitRecords, becauseOf: "--describe")
         return describeModel(modelURL)
     }
 
@@ -656,6 +743,7 @@ func runCLI() async -> Int32 {
     // directly to time the cold (first) vs warm (subsequent) generations and the
     // one-time per-process Metal pipeline warm-up between them.
     if cli.bench {
+        warnEmitRecordsIgnored(cli.emitRecords, becauseOf: "--bench")
         return await Benchmark.run(
             modelURL: modelURL,
             flash: cli.flash,
@@ -676,9 +764,20 @@ func runCLI() async -> Int32 {
     let fixturesRoot = resolveFixturesRoot(cli.common.fixturesRoot)
     print("Fixtures root: \(fixturesRoot.path)")
 
+    // Stamp backend/model/quant onto every transcript record so
+    // `ConformanceScorer.resolve(jsonl:)` — and this run's own --emit-records
+    // re-scoring below — group rows by the real cell instead of falling back to
+    // "unknown"/"unknown"/"unknown" (the default when a record carries none).
+    let modelLabel = modelURL.lastPathComponent
+    let quantLabelForRun = quantLabel(fromFileName: modelLabel)
     let logger: TranscriptLogger
     do {
-        logger = try TranscriptLogger(url: cli.common.output)
+        logger = try TranscriptLogger(
+            url: cli.common.output,
+            backend: "llama.cpp",
+            model: modelLabel,
+            quant: quantLabelForRun
+        )
     } catch {
         FileHandle.standardError.write(Data("failed to open log: \(error)\n".utf8))
         return 1
@@ -765,6 +864,17 @@ func runCLI() async -> Int32 {
         FileHandle.standardError.write(Data((banner + "\n").utf8))
         print(banner)
         print("  (model never loaded — this is a load failure, NOT a tool-dispatch failure)")
+        // Absence is not failure: the model existed but its weights/arch could
+        // not be loaded, so every requested scenario is a `loadFail` hole, not a
+        // measured `fail` verdict.
+        if let emitURL = cli.emitRecords {
+            let cells = expectedCells(for: filtered, model: modelLabel, quant: quantLabelForRun)
+            let context = recordContext(transcriptRef: logger.destination)
+            let records = cells.map {
+                ConformanceScorer.notMeasuredRecord($0, context: context, status: .loadFail(detail))
+            }
+            writeRecords(records, to: emitURL)
+        }
         // Best-effort teardown of any half-constructed backend before exit.
         if let backend = backendBox.backend {
             await backend.unloadAndWait()
@@ -821,6 +931,15 @@ func runCLI() async -> Int32 {
         } catch {
             allPassed = false
             print("\n── \(baseScenario.id) — ERROR preparing scenario: \(error)")
+            // A preparation failure (padScenario/groundScenario) means this
+            // scenario never even reaches the point of logging a `.prompt`
+            // event — without an explicit `.error` here it vanishes from the
+            // transcript entirely, so `ConformanceScorer.resolve` never creates
+            // a group for it at all: a hole that isn't even a hole (rev-183
+            // finding on #183). `TranscriptLogger.append` stamps this CLI's
+            // backend/model/quant onto the event, so a group forms from this
+            // one line, `errored` maps it to a `loadFail` record.
+            logger.append(.error(scenarioId: baseScenario.id, message: "scenario preparation failed: \(error)"))
             continue
         }
         print("\n── \(scenario.id) (\(scenario.description)) ──")
@@ -868,7 +987,35 @@ func runCLI() async -> Int32 {
         } catch {
             allPassed = false
             print("  ERROR \(error)")
+            // BLOCKER 1 (rev-183 on #183): a scenario that streams at least one
+            // token/tool_call and THEN throws (mid-generation decode error,
+            // context overflow, ...) leaves `producedModelTurn == true` and
+            // `errored == false` with zero assertions in the transcript —
+            // ConformanceScorer.resolve's verdict(passed:0, failed:0,
+            // errored:false) resolves to `.fail`, so the record emitter (which
+            // only routes to a notMeasured/loadFail hole when `row.errored ||
+            // !row.producedModelTurn`) would emit this as a FABRICATED
+            // `.measured` record with `verdict: .fail` — a cell that was never
+            // actually measured. Logging the `.error` event here — the same
+            // event `TranscriptLogger`/`ConformanceScorer` already define for
+            // exactly this ("so the scorer can positively distinguish an infra
+            // failure from a model that ran and declined to call a tool") —
+            // marks the group `errored`, which routes it to `loadFail` instead.
+            logger.append(.error(scenarioId: scenario.id, message: "scenario run failed: \(error)"))
         }
+    }
+
+    // Re-score the just-written transcript into ConformanceRecord[] for
+    // --emit-records. Reuses ConformanceScorer.records(fileAt:context:) — the
+    // same reduction `manifold-tools score --emit-records` and
+    // `manifold-tools-mlx --emit-records` apply — so per-scenario absence
+    // (a scenario whose run errored before producing a transcript group) also
+    // comes back as a notMeasured/loadFail hole automatically, not just the
+    // whole-invocation absence cases handled above.
+    if let emitURL = cli.emitRecords {
+        let context = recordContext(transcriptRef: logger.destination)
+        let records = ConformanceScorer.records(fileAt: logger.destination, context: context)
+        writeRecords(records, to: emitURL)
     }
 
     if let backend = backendBox.backend {
