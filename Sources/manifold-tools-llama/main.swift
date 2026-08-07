@@ -275,27 +275,6 @@ func registerDecoys(count: Int, into registry: ToolRegistry) -> [String] {
     return DecoyTools.names(count)
 }
 
-/// Returns a copy of `scenario` whose `requiredTools` also lists `decoyNames`.
-///
-/// `ScenarioRunner` advertises exactly the tools named in `requiredTools` (it
-/// filters the registry by that set), so padding the list is how decoys reach
-/// the model. The scenario's assertions are unchanged — success still requires
-/// the original required tool to be dispatched with correct args. `Scenario` has
-/// no public memberwise initialiser, so we round-trip through its `Codable`
-/// conformance and splice the names in via JSON.
-func padScenario(_ scenario: Scenario, advertisingAlso decoyNames: [String]) throws -> Scenario {
-    guard !decoyNames.isEmpty else { return scenario }
-    let data = try JSONEncoder().encode(scenario)
-    guard var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        return scenario
-    }
-    let existing = (dict["requiredTools"] as? [String]) ?? []
-    // Required tool(s) first so the real tool keeps a stable, leading position.
-    dict["requiredTools"] = existing + decoyNames.filter { !existing.contains($0) }
-    let patched = try JSONSerialization.data(withJSONObject: dict)
-    return try JSONDecoder().decode(Scenario.self, from: patched)
-}
-
 /// Result-grounding directive appended to every scenario's system prompt
 /// (lever 1 of #100).
 ///
@@ -328,8 +307,9 @@ func groundedSystemPrompt(base: String, requiredTools: [String]) -> String {
 }
 
 /// Returns a copy of `scenario` whose `systemPrompt` carries the
-/// ``resultGroundingDirective`` (lever 1 of #100). Mirrors ``padScenario``'s
-/// Codable round-trip because `Scenario` has no public memberwise initialiser.
+/// ``resultGroundingDirective`` (lever 1 of #100). Round-trips through
+/// `Scenario`'s `Codable` conformance because it has no public memberwise
+/// initialiser.
 func groundScenario(_ scenario: Scenario) throws -> Scenario {
     let grounded = groundedSystemPrompt(
         base: scenario.systemPrompt,
@@ -916,34 +896,38 @@ func runCLI() async -> Int32 {
 
         let scenario: Scenario
         do {
-            // Decoy padding extends `requiredTools` so `--extra-tools` decoys are
-            // advertised alongside the scenario's real tool. The templateless
-            // tool-format instruction is supplied upstream by 0.58's
-            // `ToolSystemPromptBuilder` fold (MK#2002), so no per-scenario system
-            // prompt injection happens here for tool *format*.
+            // `--extra-tools` decoys are NOT spliced into `requiredTools` here —
+            // that was the bug this fix removes (see `ScenarioRunner`'s own
+            // `passAllRegisteredTools` mode below, which advertises decoys
+            // without inflating the scored expected-tool set; the sibling
+            // `manifold-tools-mlx` harness's doc comment calls the old
+            // requiredTools-splicing approach this replaced "the old
+            // requiredTools-patching hack"). The templateless tool-format
+            // instruction is supplied upstream by 0.58's `ToolSystemPromptBuilder`
+            // fold (MK#2002), so no per-scenario system prompt injection happens
+            // here for tool *format*.
             //
             // Tool-*result grounding* (lever 1 of #100) IS injected here: the
             // system prompt is in force on the second turn (after a tool returns)
             // where the soak found llama/gemma narrate instead of grounding, and
             // the harness cannot reach the orchestrator's second-turn instruction.
-            let padded = try padScenario(baseScenario, advertisingAlso: decoyNames)
-            scenario = try groundScenario(padded)
+            scenario = try groundScenario(baseScenario)
         } catch {
             allPassed = false
             print("\n── \(baseScenario.id) — ERROR preparing scenario: \(error)")
-            // A preparation failure (padScenario/groundScenario) means this
-            // scenario never even reaches the point of logging a `.prompt`
-            // event — without an explicit `.error` here it vanishes from the
-            // transcript entirely, so `ConformanceScorer.resolve` never creates
-            // a group for it at all: a hole that isn't even a hole (rev-183
-            // finding on #183). `TranscriptLogger.append` stamps this CLI's
-            // backend/model/quant onto the event, so a group forms from this
-            // one line, `errored` maps it to a `loadFail` record.
+            // A preparation failure (groundScenario) means this scenario never
+            // even reaches the point of logging a `.prompt` event — without an
+            // explicit `.error` here it vanishes from the transcript entirely,
+            // so `ConformanceScorer.resolve` never creates a group for it at
+            // all: a hole that isn't even a hole (rev-183 finding on #183).
+            // `TranscriptLogger.append` stamps this CLI's backend/model/quant
+            // onto the event, so a group forms from this one line, `errored`
+            // maps it to a `loadFail` record.
             logger.append(.error(scenarioId: baseScenario.id, message: "scenario preparation failed: \(error)"))
             continue
         }
         print("\n── \(scenario.id) (\(scenario.description)) ──")
-        print("  advertising tool(s): \(scenario.requiredTools.joined(separator: ", "))")
+        print("  required tool(s): \(scenario.requiredTools.joined(separator: ", "))")
         do {
             // Lever 2 of #100: for structured-json extraction scenarios, apply a
             // GBNF grammar on the final-answer turn. The grammar constrains output
@@ -968,9 +952,18 @@ func runCLI() async -> Int32 {
                 // Standard path: drive scenarios through the production
                 // InferenceService → GenerationQueue → dispatch-loop. That path
                 // renders the chat template and injects each scenario's tool
-                // definitions (#1983/#1985); the runner filters the registry by
-                // `scenario.requiredTools` so each run advertises only its own tools.
-                let runner = ScenarioRunner(service: service, logger: logger)
+                // definitions (#1983/#1985). `passAllRegisteredTools` advertises
+                // every registered tool (required + decoys) when decoys are
+                // present — the harness-native way to expose distractors without
+                // touching `scenario.requiredTools` (the scored expected-tool
+                // set), mirroring `manifold-tools-mlx`'s identical flag. Without
+                // it, the runner filters the registry to `scenario.requiredTools`
+                // and no decoy is ever advertised.
+                let runner = ScenarioRunner(
+                    service: service,
+                    logger: logger,
+                    passAllRegisteredTools: cli.common.extraTools > 0
+                )
                 let outcome = try await runner.run(scenario)
                 assertions = outcome.assertions
                 finalAnswer = outcome.finalAnswer
