@@ -38,6 +38,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # TRIPWIRE: if .py files land in this repo, add `python` to this
+        # list — see manifold-mlx's codeql.yml for the actions+python shape.
         language: [actions]
 
     steps:
