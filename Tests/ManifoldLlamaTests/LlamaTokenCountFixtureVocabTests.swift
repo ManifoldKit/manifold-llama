@@ -273,7 +273,9 @@ extension Array where Element == String {
     -> R
   {
     let cStrings: [UnsafeMutablePointer<CChar>] = map { strdup($0) }
-    defer { cStrings.forEach { free($0) } }
+    defer {
+      for cString in cStrings { free(cString) }
+    }
     var ptrs: [UnsafePointer<CChar>?] = cStrings.map { UnsafePointer($0) }
     return ptrs.withUnsafeMutableBufferPointer { body($0.baseAddress!) }
   }

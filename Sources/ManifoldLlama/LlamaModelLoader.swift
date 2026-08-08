@@ -595,7 +595,8 @@ import os
       return read(size) != nil
     }
 
-    guard let magic = read(4), magic == Data([0x47, 0x47, 0x55, 0x46]) else { return nil }  // "GGUF"
+    // "GGUF"
+    guard let magic = read(4), magic == Data([0x47, 0x47, 0x55, 0x46]) else { return nil }
     guard let version = readU32(), version == 2 || version == 3 else { return nil }
     guard readU64() != nil else { return nil }  // tensor count (unused)
     guard let kvCount = readU64() else { return nil }
