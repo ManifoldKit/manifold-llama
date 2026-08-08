@@ -1,7 +1,10 @@
-import XCTest
-import ManifoldInference
 // BackendInternals SPI: seam published for the companion split (#1749).
 @_spi(BackendInternals) import ManifoldHardware
+import ManifoldInference
+import ManifoldLlama
+@_spi(Testing) import ManifoldLlama
+import ManifoldTestSupport
+import XCTest
 
 // MARK: - Thread-safe counter for @Sendable callback closures
 
@@ -11,20 +14,20 @@ import ManifoldInference
 /// `@unchecked Sendable` because the counter is protected by the `NSLock`, but
 /// Swift's type system cannot verify that automatically.
 private final class SendableCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = 0
+  private let lock = NSLock()
+  private var value = 0
 
-    func increment(by n: Int = 1) {
-        lock.lock()
-        defer { lock.unlock() }
-        value += n
-    }
+  func increment(by n: Int = 1) {
+    lock.lock()
+    defer { lock.unlock() }
+    value += n
+  }
 
-    var current: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
+  var current: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return value
+  }
 }
 
 // MARK: - Hardware-free: MemoryPressureHandler callback API
@@ -38,159 +41,159 @@ private final class SendableCounter: @unchecked Sendable {
 /// for memory pressure abort.
 final class MemoryPressureCallbackAPITests: XCTestCase {
 
-    // MARK: - Registration and removal
+  // MARK: - Registration and removal
 
-    func test_addPressureCallback_replacesExistingEntryForSameOwner() {
-        let handler = MemoryPressureHandler()
-        let owner = NSObject()
-        let callCount = SendableCounter()
+  func test_addPressureCallback_replacesExistingEntryForSameOwner() {
+    let handler = MemoryPressureHandler()
+    let owner = NSObject()
+    let callCount = SendableCounter()
 
-        handler.addPressureCallback(for: owner) { _ in callCount.increment(by: 1) }
-        // Registering again for the same owner replaces the previous entry.
-        handler.addPressureCallback(for: owner) { _ in callCount.increment(by: 10) }
+    handler.addPressureCallback(for: owner) { _ in callCount.increment(by: 1) }
+    // Registering again for the same owner replaces the previous entry.
+    handler.addPressureCallback(for: owner) { _ in callCount.increment(by: 10) }
 
-        // Drive the dispatch path: only the *replacement* closure must fire.
-        // If addPressureCallback appended instead of replacing by owner, both
-        // would run and callCount would be 11.
-        handler.fireCallbacks(level: .warning)
-        XCTAssertEqual(callCount.current, 10,
-            "Re-registering for the same owner must REPLACE the prior closure, not append it")
-    }
+    // Drive the dispatch path: only the *replacement* closure must fire.
+    // If addPressureCallback appended instead of replacing by owner, both
+    // would run and callCount would be 11.
+    handler.fireCallbacks(level: .warning)
+    XCTAssertEqual(
+      callCount.current, 10,
+      "Re-registering for the same owner must REPLACE the prior closure, not append it")
+  }
 
-    func test_removeCallback_forUnregisteredOwner_isNoOp() {
-        let handler = MemoryPressureHandler()
-        let owner = NSObject()
-        let callCount = SendableCounter()
+  func test_removeCallback_forUnregisteredOwner_isNoOp() {
+    let handler = MemoryPressureHandler()
+    let owner = NSObject()
+    let callCount = SendableCounter()
 
-        // Remove before registering — must be a no-op (and must not corrupt the
-        // table so a later registration still fires).
-        handler.removeCallback(for: owner)
-        handler.removeCallback(for: owner)
+    // Remove before registering — must be a no-op (and must not corrupt the
+    // table so a later registration still fires).
+    handler.removeCallback(for: owner)
+    handler.removeCallback(for: owner)
 
-        handler.addPressureCallback(for: owner) { _ in callCount.increment() }
-        handler.fireCallbacks(level: .warning)
-        XCTAssertEqual(callCount.current, 1,
-            "A removeCallback on an empty table must not break subsequent registration")
-    }
+    handler.addPressureCallback(for: owner) { _ in callCount.increment() }
+    handler.fireCallbacks(level: .warning)
+    XCTAssertEqual(
+      callCount.current, 1,
+      "A removeCallback on an empty table must not break subsequent registration")
+  }
 
-    func test_removeCallback_afterRegistration_isIdempotent() {
-        let handler = MemoryPressureHandler()
-        let owner = NSObject()
-        let callCount = SendableCounter()
+  func test_removeCallback_afterRegistration_isIdempotent() {
+    let handler = MemoryPressureHandler()
+    let owner = NSObject()
+    let callCount = SendableCounter()
 
-        handler.addPressureCallback(for: owner) { _ in callCount.increment() }
-        handler.removeCallback(for: owner)
-        // Second remove must be a no-op, not a corruption.
-        handler.removeCallback(for: owner)
+    handler.addPressureCallback(for: owner) { _ in callCount.increment() }
+    handler.removeCallback(for: owner)
+    // Second remove must be a no-op, not a corruption.
+    handler.removeCallback(for: owner)
 
-        handler.fireCallbacks(level: .warning)
-        XCTAssertEqual(callCount.current, 0,
-            "Callback removed twice must not fire — and the double-remove must not crash")
-    }
+    handler.fireCallbacks(level: .warning)
+    XCTAssertEqual(
+      callCount.current, 0,
+      "Callback removed twice must not fire — and the double-remove must not crash")
+  }
 
-    func test_multipleOwners_independentCallbacks() {
-        let handler = MemoryPressureHandler()
-        let owner1 = NSObject()
-        let owner2 = NSObject()
-        let count1 = SendableCounter()
-        let count2 = SendableCounter()
+  func test_multipleOwners_independentCallbacks() {
+    let handler = MemoryPressureHandler()
+    let owner1 = NSObject()
+    let owner2 = NSObject()
+    let count1 = SendableCounter()
+    let count2 = SendableCounter()
 
-        handler.addPressureCallback(for: owner1) { _ in count1.increment() }
-        handler.addPressureCallback(for: owner2) { _ in count2.increment() }
+    handler.addPressureCallback(for: owner1) { _ in count1.increment() }
+    handler.addPressureCallback(for: owner2) { _ in count2.increment() }
 
-        // Both fire while both are registered.
-        handler.fireCallbacks(level: .warning)
-        XCTAssertEqual(count1.current, 1, "owner1 callback must fire")
-        XCTAssertEqual(count2.current, 1, "owner2 callback must fire independently")
+    // Both fire while both are registered.
+    handler.fireCallbacks(level: .warning)
+    XCTAssertEqual(count1.current, 1, "owner1 callback must fire")
+    XCTAssertEqual(count2.current, 1, "owner2 callback must fire independently")
 
-        // Removing one must leave the other intact.
-        handler.removeCallback(for: owner1)
-        handler.fireCallbacks(level: .warning)
-        XCTAssertEqual(count1.current, 1, "Removed owner1 must not fire again")
-        XCTAssertEqual(count2.current, 2, "owner2 must still fire after owner1 is removed")
-    }
+    // Removing one must leave the other intact.
+    handler.removeCallback(for: owner1)
+    handler.fireCallbacks(level: .warning)
+    XCTAssertEqual(count1.current, 1, "Removed owner1 must not fire again")
+    XCTAssertEqual(count2.current, 2, "owner2 must still fire after owner1 is removed")
+  }
 
-    // MARK: - Lifecycle: deinit of handler while callbacks are registered
+  // MARK: - Lifecycle: deinit of handler while callbacks are registered
 
-    func test_handlerDeinit_withRegisteredCallbacks_doesNotCrash() {
-        let owner = NSObject()
-        var handler: MemoryPressureHandler? = MemoryPressureHandler()
-        handler?.addPressureCallback(for: owner) { _ in }
-        handler = nil
-        // If we reach here, the handler released its callback table cleanly.
-    }
+  func test_handlerDeinit_withRegisteredCallbacks_doesNotCrash() {
+    let owner = NSObject()
+    var handler: MemoryPressureHandler? = MemoryPressureHandler()
+    handler?.addPressureCallback(for: owner) { _ in }
+    handler = nil
+    // If we reach here, the handler released its callback table cleanly.
+  }
 
-    // MARK: - Callback firing via fireCallbacks
+  // MARK: - Callback firing via fireCallbacks
 
-    /// Verifies that `fireCallbacks` actually invokes registered callbacks and
-    /// delivers the correct level. This exercises the same synchronous dispatch path
-    /// the DispatchSource event handler uses when the OS sends a pressure event.
-    ///
-    /// Sabotage check: comment out `self.fireCallbacks(level: level)` in
-    /// `startMonitoring`'s event handler — the production wiring stops working,
-    /// but this test (which calls `fireCallbacks` directly) still catches regressions
-    /// in the dispatch logic itself.
-    func test_fireCallbacks_invokesRegisteredCallbackWithCorrectLevel() {
-        let handler = MemoryPressureHandler()
-        let owner = NSObject()
+  /// Verifies that `fireCallbacks` actually invokes registered callbacks and
+  /// delivers the correct level. This exercises the same synchronous dispatch path
+  /// the DispatchSource event handler uses when the OS sends a pressure event.
+  ///
+  /// Sabotage check: comment out `self.fireCallbacks(level: level)` in
+  /// `startMonitoring`'s event handler — the production wiring stops working,
+  /// but this test (which calls `fireCallbacks` directly) still catches regressions
+  /// in the dispatch logic itself.
+  func test_fireCallbacks_invokesRegisteredCallbackWithCorrectLevel() {
+    let handler = MemoryPressureHandler()
+    let owner = NSObject()
 
-        // Use a class box so the @Sendable closure can mutate the array.
-        // fireCallbacks is always called synchronously on one thread in these tests,
-        // so no actual concurrent access occurs — the wrapper satisfies the
-        // @Sendable requirement at the type-system level.
-        final class LevelBox: @unchecked Sendable { var levels: [MemoryPressureLevel] = [] }
-        let box = LevelBox()
+    // Use a class box so the @Sendable closure can mutate the array.
+    // fireCallbacks is always called synchronously on one thread in these tests,
+    // so no actual concurrent access occurs — the wrapper satisfies the
+    // @Sendable requirement at the type-system level.
+    final class LevelBox: @unchecked Sendable { var levels: [MemoryPressureLevel] = [] }
+    let box = LevelBox()
 
-        handler.addPressureCallback(for: owner) { level in box.levels.append(level) }
+    handler.addPressureCallback(for: owner) { level in box.levels.append(level) }
 
-        handler.fireCallbacks(level: .warning)
-        handler.fireCallbacks(level: .critical)
-        handler.fireCallbacks(level: .nominal)
+    handler.fireCallbacks(level: .warning)
+    handler.fireCallbacks(level: .critical)
+    handler.fireCallbacks(level: .nominal)
 
-        // fireCallbacks runs synchronously; no async coordination needed.
-        XCTAssertEqual(box.levels, [.warning, .critical, .nominal],
-            "fireCallbacks must invoke the registered callback once per call, in order")
-    }
+    // fireCallbacks runs synchronously; no async coordination needed.
+    XCTAssertEqual(
+      box.levels, [.warning, .critical, .nominal],
+      "fireCallbacks must invoke the registered callback once per call, in order")
+  }
 
-    /// Verifies that after `removeCallback`, subsequent `fireCallbacks` calls do
-    /// not invoke the removed callback. This guards against a stale closure firing
-    /// after `LlamaBackend` has been deallocated.
-    func test_fireCallbacks_afterRemove_doesNotInvokeCallback() {
-        let handler = MemoryPressureHandler()
-        let owner = NSObject()
-        let callCount = SendableCounter()
+  /// Verifies that after `removeCallback`, subsequent `fireCallbacks` calls do
+  /// not invoke the removed callback. This guards against a stale closure firing
+  /// after `LlamaBackend` has been deallocated.
+  func test_fireCallbacks_afterRemove_doesNotInvokeCallback() {
+    let handler = MemoryPressureHandler()
+    let owner = NSObject()
+    let callCount = SendableCounter()
 
-        handler.addPressureCallback(for: owner) { _ in callCount.increment() }
-        handler.removeCallback(for: owner)
+    handler.addPressureCallback(for: owner) { _ in callCount.increment() }
+    handler.removeCallback(for: owner)
 
-        handler.fireCallbacks(level: .critical)
+    handler.fireCallbacks(level: .critical)
 
-        XCTAssertEqual(callCount.current, 0, "Callback must not fire after removeCallback")
-    }
+    XCTAssertEqual(callCount.current, 0, "Callback must not fire after removeCallback")
+  }
 
-    /// Verifies that removing one owner does not suppress other registered callbacks —
-    /// each `ObjectIdentifier` key is independent.
-    func test_fireCallbacks_removingOneOwner_preservesOtherCallbacks() {
-        let handler = MemoryPressureHandler()
-        let owner1 = NSObject()
-        let owner2 = NSObject()
-        let count1 = SendableCounter()
-        let count2 = SendableCounter()
+  /// Verifies that removing one owner does not suppress other registered callbacks —
+  /// each `ObjectIdentifier` key is independent.
+  func test_fireCallbacks_removingOneOwner_preservesOtherCallbacks() {
+    let handler = MemoryPressureHandler()
+    let owner1 = NSObject()
+    let owner2 = NSObject()
+    let count1 = SendableCounter()
+    let count2 = SendableCounter()
 
-        handler.addPressureCallback(for: owner1) { _ in count1.increment() }
-        handler.addPressureCallback(for: owner2) { _ in count2.increment() }
+    handler.addPressureCallback(for: owner1) { _ in count1.increment() }
+    handler.addPressureCallback(for: owner2) { _ in count2.increment() }
 
-        handler.removeCallback(for: owner1)
-        handler.fireCallbacks(level: .warning)
+    handler.removeCallback(for: owner1)
+    handler.fireCallbacks(level: .warning)
 
-        XCTAssertEqual(count1.current, 0, "Removed owner1 callback must not fire")
-        XCTAssertEqual(count2.current, 1, "owner2 callback must still fire after owner1 is removed")
-    }
+    XCTAssertEqual(count1.current, 0, "Removed owner1 callback must not fire")
+    XCTAssertEqual(count2.current, 1, "owner2 callback must still fire after owner1 is removed")
+  }
 }
-
-import ManifoldLlama
-@_spi(Testing) import ManifoldLlama
-import ManifoldTestSupport
 
 // MARK: - Hardware-gated tests
 
@@ -207,123 +210,133 @@ import ManifoldTestSupport
 /// `llama_backend_init` (invoked by `LlamaBackend.init`) requires Metal.
 final class LlamaBackendMemoryPressureTests: XCTestCase {
 
-    override func setUp() async throws {
-        try await super.setUp()
-        try XCTSkipUnless(HardwareRequirements.isPhysicalDevice,
-            "LlamaBackend requires Metal (unavailable in simulator)")
-        try XCTSkipUnless(HardwareRequirements.isAppleSilicon,
-            "LlamaBackend requires Apple Silicon")
-    }
+  override func setUp() async throws {
+    try await super.setUp()
+    try XCTSkipUnless(
+      HardwareRequirements.isPhysicalDevice,
+      "LlamaBackend requires Metal (unavailable in simulator)")
+    try XCTSkipUnless(
+      HardwareRequirements.isAppleSilicon,
+      "LlamaBackend requires Apple Silicon")
+  }
 
-    // MARK: - stopGeneration() is safe from a GCD utility queue
+  // MARK: - stopGeneration() is safe from a GCD utility queue
 
-    /// The memory pressure callback fires on a GCD utility queue.
-    /// `stopGeneration()` must not crash when called from that context on an
-    /// idle (unloaded) backend — the same state LlamaBackend is in at app
-    /// launch before the user picks a model.
-    ///
-    /// Sabotage check: replacing `Atomic<Bool>` with a plain `var Bool` in
-    /// LlamaBackend would produce a TSan data-race violation here when multiple
-    /// concurrent queues call `stopGeneration()` simultaneously.
-    func test_stopGeneration_fromGCDQueue_doesNotCrash() async {
-        let backend = LlamaBackend()
+  /// The memory pressure callback fires on a GCD utility queue.
+  /// `stopGeneration()` must not crash when called from that context on an
+  /// idle (unloaded) backend — the same state LlamaBackend is in at app
+  /// launch before the user picks a model.
+  ///
+  /// Sabotage check: replacing `Atomic<Bool>` with a plain `var Bool` in
+  /// LlamaBackend would produce a TSan data-race violation here when multiple
+  /// concurrent queues call `stopGeneration()` simultaneously.
+  func test_stopGeneration_fromGCDQueue_doesNotCrash() async {
+    let backend = LlamaBackend()
 
-        // Fire stopGeneration() concurrently from 20 GCD utility threads,
-        // matching the kind of concurrent access a real pressure callback
-        // could produce if multiple watchdog sources fired simultaneously.
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<20 {
-                group.addTask {
-                    await withCheckedContinuation { continuation in
-                        DispatchQueue.global(qos: .utility).async {
-                            backend.stopGeneration()
-                            continuation.resume()
-                        }
-                    }
-                }
+    // Fire stopGeneration() concurrently from 20 GCD utility threads,
+    // matching the kind of concurrent access a real pressure callback
+    // could produce if multiple watchdog sources fired simultaneously.
+    await withTaskGroup(of: Void.self) { group in
+      for _ in 0..<20 {
+        group.addTask {
+          await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+              backend.stopGeneration()
+              continuation.resume()
             }
+          }
         }
-
-        XCTAssertFalse(backend.isGenerating,
-            "isGenerating must remain false after concurrent GCD-queue stopGeneration() calls")
+      }
     }
 
-    // MARK: - unloadAndWait() is safe from a detached Task
+    XCTAssertFalse(
+      backend.isGenerating,
+      "isGenerating must remain false after concurrent GCD-queue stopGeneration() calls")
+  }
 
-    /// On `.critical` pressure the callback spawns:
-    ///   `Task.detached { [weak self] in await self?.unloadAndWait() }`
-    /// Verify that `unloadAndWait()` called from a detached Task on an unloaded
-    /// backend completes without crashing and leaves the backend clean.
-    ///
-    /// Sabotage check: if `unloadAndWait()` were not safe to call from a
-    /// non-MainActor context this test would fail with a concurrency violation.
-    func test_unloadAndWait_fromDetachedTask_isIdempotentAndSafe() async {
-        let backend = LlamaBackend()
+  // MARK: - unloadAndWait() is safe from a detached Task
 
-        // Replicate exactly what the critical-pressure arm does.
-        let task = Task.detached { [weak backend] in
-            await backend?.unloadAndWait()
-        }
-        await task.value
+  /// On `.critical` pressure the callback spawns:
+  ///   `Task.detached { [weak self] in await self?.unloadAndWait() }`
+  /// Verify that `unloadAndWait()` called from a detached Task on an unloaded
+  /// backend completes without crashing and leaves the backend clean.
+  ///
+  /// Sabotage check: if `unloadAndWait()` were not safe to call from a
+  /// non-MainActor context this test would fail with a concurrency violation.
+  func test_unloadAndWait_fromDetachedTask_isIdempotentAndSafe() async {
+    let backend = LlamaBackend()
 
-        XCTAssertFalse(backend.isModelLoaded,
-            "isModelLoaded must be false after unloadAndWait() from a detached task")
-        XCTAssertFalse(backend.isGenerating,
-            "isGenerating must be false after unloadAndWait() from a detached task")
+    // Replicate exactly what the critical-pressure arm does.
+    let task = Task.detached { [weak backend] in
+      await backend?.unloadAndWait()
     }
+    await task.value
 
-    // MARK: - Callback registration does not cause a retain cycle
+    XCTAssertFalse(
+      backend.isModelLoaded,
+      "isModelLoaded must be false after unloadAndWait() from a detached task")
+    XCTAssertFalse(
+      backend.isGenerating,
+      "isGenerating must be false after unloadAndWait() from a detached task")
+  }
 
-    /// `registerMemoryPressureCallback()` captures `self` weakly. If the capture
-    /// were strong, the `MemoryPressureHandler` closure would keep `LlamaBackend`
-    /// alive past its last external reference, causing a leak.
-    ///
-    /// We verify this by releasing the backend and confirming no crash occurs.
-    /// A retain cycle would keep `backend` alive, and `deinit` would not call
-    /// `memoryPressure.removeCallback(for:)`, leaving a dangling AnyObject key.
-    /// The absence of EXC_BAD_ACCESS confirms the weak capture is in effect.
-    func test_deinit_removesCallbackWithoutCrash() {
-        weak var weakRef: LlamaBackend?
-        do {
-            let backend = LlamaBackend()
-            weakRef = backend
-            withExtendedLifetime(backend) {}
-        }
-        // If the memory-pressure callback captured `self` strongly, the handler's
-        // closure storage would keep the backend alive and weakRef would be
-        // non-nil here — directly catching the retain cycle the [weak self]
-        // capture exists to prevent.
-        XCTAssertNil(weakRef,
-            "LlamaBackend must deallocate after its last strong reference — a non-nil weakRef means the memory-pressure callback created a retain cycle")
+  // MARK: - Callback registration does not cause a retain cycle
+
+  /// `registerMemoryPressureCallback()` captures `self` weakly. If the capture
+  /// were strong, the `MemoryPressureHandler` closure would keep `LlamaBackend`
+  /// alive past its last external reference, causing a leak.
+  ///
+  /// We verify this by releasing the backend and confirming no crash occurs.
+  /// A retain cycle would keep `backend` alive, and `deinit` would not call
+  /// `memoryPressure.removeCallback(for:)`, leaving a dangling AnyObject key.
+  /// The absence of EXC_BAD_ACCESS confirms the weak capture is in effect.
+  func test_deinit_removesCallbackWithoutCrash() {
+    weak var weakRef: LlamaBackend?
+    do {
+      let backend = LlamaBackend()
+      weakRef = backend
+      withExtendedLifetime(backend) {}
     }
+    // If the memory-pressure callback captured `self` strongly, the handler's
+    // closure storage would keep the backend alive and weakRef would be
+    // non-nil here — directly catching the retain cycle the [weak self]
+    // capture exists to prevent.
+    XCTAssertNil(
+      weakRef,
+      "LlamaBackend must deallocate after its last strong reference — a non-nil weakRef means the memory-pressure callback created a retain cycle"
+    )
+  }
 
-    // MARK: - Backend-level pressure dispatch (#415)
+  // MARK: - Backend-level pressure dispatch (#415)
 
-    /// Fires the backend's registered memory-pressure callback directly (via the
-    /// `@_spi(Testing)` seam) and asserts the dispatch body actually ran
-    /// `stopGeneration()` for the escalating levels. This covers the callback body
-    /// (`registerMemoryPressureCallback`) without a live decode loop.
-    ///
-    /// Sabotage check: drop the `self.stopGeneration()` call from the `.warning`
-    /// arm — `isCancelledForTesting` stays false and this test fails.
-    func test_simulateMemoryPressure_warningAndCritical_setCancelled() async {
-        let warnBackend = LlamaBackend()
-        XCTAssertFalse(warnBackend.isCancelledForTesting)
-        warnBackend.simulateMemoryPressure(.warning)
-        XCTAssertTrue(warnBackend.isCancelledForTesting,
-            ".warning pressure must call stopGeneration() (sets the cancelled flag)")
+  /// Fires the backend's registered memory-pressure callback directly (via the
+  /// `@_spi(Testing)` seam) and asserts the dispatch body actually ran
+  /// `stopGeneration()` for the escalating levels. This covers the callback body
+  /// (`registerMemoryPressureCallback`) without a live decode loop.
+  ///
+  /// Sabotage check: drop the `self.stopGeneration()` call from the `.warning`
+  /// arm — `isCancelledForTesting` stays false and this test fails.
+  func test_simulateMemoryPressure_warningAndCritical_setCancelled() async {
+    let warnBackend = LlamaBackend()
+    XCTAssertFalse(warnBackend.isCancelledForTesting)
+    warnBackend.simulateMemoryPressure(.warning)
+    XCTAssertTrue(
+      warnBackend.isCancelledForTesting,
+      ".warning pressure must call stopGeneration() (sets the cancelled flag)")
 
-        let critBackend = LlamaBackend()
-        critBackend.simulateMemoryPressure(.critical)
-        XCTAssertTrue(critBackend.isCancelledForTesting,
-            ".critical pressure must call stopGeneration() (sets the cancelled flag)")
-    }
+    let critBackend = LlamaBackend()
+    critBackend.simulateMemoryPressure(.critical)
+    XCTAssertTrue(
+      critBackend.isCancelledForTesting,
+      ".critical pressure must call stopGeneration() (sets the cancelled flag)")
+  }
 
-    /// `.nominal` is the no-op arm — it must NOT cancel an idle backend.
-    func test_simulateMemoryPressure_nominal_doesNotCancel() {
-        let backend = LlamaBackend()
-        backend.simulateMemoryPressure(.nominal)
-        XCTAssertFalse(backend.isCancelledForTesting,
-            ".nominal pressure must be a no-op and must not flip the cancelled flag")
-    }
+  /// `.nominal` is the no-op arm — it must NOT cancel an idle backend.
+  func test_simulateMemoryPressure_nominal_doesNotCancel() {
+    let backend = LlamaBackend()
+    backend.simulateMemoryPressure(.nominal)
+    XCTAssertFalse(
+      backend.isCancelledForTesting,
+      ".nominal pressure must be a no-op and must not flip the cancelled flag")
+  }
 }

@@ -5,80 +5,80 @@ import ManifoldInference
 /// Inputs for one raw-prompt eval run. These map 1:1 to the runner's CLI flags
 /// (manifold-eval invokes `manifold-llama-eval` with exactly these).
 public struct EvalOptions: Sendable {
-    /// Path to the `.gguf` model file (`--model`).
-    public var modelPath: String
-    /// Path to the prompt file, read verbatim (`--prompt-file`).
-    public var promptFile: String
-    /// Sampling temperature (`--temperature`). `0` selects greedy decoding.
-    public var temperature: Double
-    /// Sampling seed (`--seed`). Negative means "unseeded".
-    public var seed: Int
-    /// Max tokens to generate (`--max-tokens`).
-    public var maxTokens: Int
-    /// 0-based index within a repeat sweep (`--repeat-index`).
-    public var repeatIndex: Int
-    /// Requested context size for the load plan. Not a CLI flag; the planner
-    /// clamps it to the model's trained context.
-    public var requestedContextSize: Int
-    /// Top-k sampling cutoff (`--top-k`). `0` (the default) means "not applied" —
-    /// the neutral default that keeps the differential's default mode a clean
-    /// function of the model rather than sampler luck. Positive values are
-    /// forwarded to `GenerationConfig.topK`; note that at `temperature == 0`
-    /// (the only supported diff mode) the driver decodes greedily and top-k has
-    /// no effect regardless of this value.
-    public var topK: Int
-    /// Repetition penalty (`--repeat-penalty`). `1.0` (the default) is
-    /// llama.cpp's no-op value — the neutral default. Overriding it lets an
-    /// operator force-match samplers across the Ollama/llama.cpp differential
-    /// legs when debugging a divergence. Must be `> 0`; values in `(0, 1.0]`
-    /// are accepted but have no effect — the driver only applies the penalty
-    /// sampler when the effective value is `> 1.0` (see
-    /// `LlamaGenerationDriver`'s `penaltiesActive` gate).
-    public var repeatPenalty: Double
+  /// Path to the `.gguf` model file (`--model`).
+  public var modelPath: String
+  /// Path to the prompt file, read verbatim (`--prompt-file`).
+  public var promptFile: String
+  /// Sampling temperature (`--temperature`). `0` selects greedy decoding.
+  public var temperature: Double
+  /// Sampling seed (`--seed`). Negative means "unseeded".
+  public var seed: Int
+  /// Max tokens to generate (`--max-tokens`).
+  public var maxTokens: Int
+  /// 0-based index within a repeat sweep (`--repeat-index`).
+  public var repeatIndex: Int
+  /// Requested context size for the load plan. Not a CLI flag; the planner
+  /// clamps it to the model's trained context.
+  public var requestedContextSize: Int
+  /// Top-k sampling cutoff (`--top-k`). `0` (the default) means "not applied" —
+  /// the neutral default that keeps the differential's default mode a clean
+  /// function of the model rather than sampler luck. Positive values are
+  /// forwarded to `GenerationConfig.topK`; note that at `temperature == 0`
+  /// (the only supported diff mode) the driver decodes greedily and top-k has
+  /// no effect regardless of this value.
+  public var topK: Int
+  /// Repetition penalty (`--repeat-penalty`). `1.0` (the default) is
+  /// llama.cpp's no-op value — the neutral default. Overriding it lets an
+  /// operator force-match samplers across the Ollama/llama.cpp differential
+  /// legs when debugging a divergence. Must be `> 0`; values in `(0, 1.0]`
+  /// are accepted but have no effect — the driver only applies the penalty
+  /// sampler when the effective value is `> 1.0` (see
+  /// `LlamaGenerationDriver`'s `penaltiesActive` gate).
+  public var repeatPenalty: Double
 
-    public init(
-        modelPath: String,
-        promptFile: String,
-        temperature: Double,
-        seed: Int,
-        maxTokens: Int,
-        repeatIndex: Int,
-        requestedContextSize: Int = 8192,
-        topK: Int = 0,
-        repeatPenalty: Double = 1.0
-    ) {
-        self.modelPath = modelPath
-        self.promptFile = promptFile
-        self.temperature = temperature
-        self.seed = seed
-        self.maxTokens = maxTokens
-        self.repeatIndex = repeatIndex
-        self.requestedContextSize = requestedContextSize
-        self.topK = topK
-        self.repeatPenalty = repeatPenalty
-    }
+  public init(
+    modelPath: String,
+    promptFile: String,
+    temperature: Double,
+    seed: Int,
+    maxTokens: Int,
+    repeatIndex: Int,
+    requestedContextSize: Int = 8192,
+    topK: Int = 0,
+    repeatPenalty: Double = 1.0
+  ) {
+    self.modelPath = modelPath
+    self.promptFile = promptFile
+    self.temperature = temperature
+    self.seed = seed
+    self.maxTokens = maxTokens
+    self.repeatIndex = repeatIndex
+    self.requestedContextSize = requestedContextSize
+    self.topK = topK
+    self.repeatPenalty = repeatPenalty
+  }
 }
 
 /// Errors surfaced by ``EvalRunner``. Each carries an actionable message so the
 /// CLI can print it to stderr and exit non-zero without a stack trace.
 public enum EvalError: Error, LocalizedError {
-    case promptFileUnreadable(path: String, underlying: Error)
-    case modelNotFound(path: String)
-    case tokenizationFailed
-    case emptyOutput
+  case promptFileUnreadable(path: String, underlying: Error)
+  case modelNotFound(path: String)
+  case tokenizationFailed
+  case emptyOutput
 
-    public var errorDescription: String? {
-        switch self {
-        case let .promptFileUnreadable(path, underlying):
-            return "could not read prompt file at \(path): \(underlying)"
-        case let .modelNotFound(path):
-            return "model file not found: \(path)"
-        case .tokenizationFailed:
-            return "prompt tokenized to zero tokens (empty prompt or vocab not loaded)"
-        case .emptyOutput:
-            return "generation produced no output tokens"
-        }
+  public var errorDescription: String? {
+    switch self {
+    case .promptFileUnreadable(let path, let underlying):
+      return "could not read prompt file at \(path): \(underlying)"
+    case .modelNotFound(let path):
+      return "model file not found: \(path)"
+    case .tokenizationFailed:
+      return "prompt tokenized to zero tokens (empty prompt or vocab not loaded)"
+    case .emptyOutput:
+      return "generation produced no output tokens"
     }
+  }
 }
 
 /// Drives a single raw-prompt generation through ``LlamaBackend`` and produces a
@@ -112,91 +112,91 @@ public enum EvalError: Error, LocalizedError {
 /// > runs greedy.
 public enum EvalRunner {
 
-    public static func run(_ options: EvalOptions) async throws -> RawRun {
-        let modelURL = URL(fileURLWithPath: options.modelPath)
-        guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            throw EvalError.modelNotFound(path: modelURL.path)
-        }
-
-        // Read the prompt file's raw bytes. The SHA-256 is computed over these
-        // exact bytes (the string we feed the tokenizer), before any decoding —
-        // no trimming, no re-templating.
-        let promptURL = URL(fileURLWithPath: options.promptFile)
-        let promptData: Data
-        do {
-            promptData = try Data(contentsOf: promptURL)
-        } catch {
-            throw EvalError.promptFileUnreadable(path: promptURL.path, underlying: error)
-        }
-        let promptString = String(decoding: promptData, as: UTF8.self)
-        let promptSha256 = EvalMetadata.sha256Hex(promptData)
-
-        let backend = LlamaBackend()
-        do {
-            try await backend.loadModel(
-                from: modelURL,
-                plan: .systemManaged(requestedContextSize: options.requestedContextSize))
-
-            // The exact input token ids generation will decode from (BOS included).
-            let inputTokenIds = backend.inputTokenIds(forPrompt: promptString)
-            guard !inputTokenIds.isEmpty else {
-                throw EvalError.tokenizationFailed
-            }
-
-            var config = GenerationConfig(
-                temperature: Float(options.temperature),
-                topP: 1.0,
-                repeatPenalty: Float(options.repeatPenalty),
-                topK: options.topK > 0 ? Int32(options.topK) : nil,
-                maxOutputTokens: options.maxTokens)
-            config.seed = options.seed >= 0 ? UInt64(options.seed) : nil
-
-            var output = ""
-            let stream = try backend.generate(
-                prompt: promptString, systemPrompt: nil, config: config)
-            for try await event in stream.events {
-                if case let .token(text) = event {
-                    output += text
-                }
-            }
-            // Without awaiting settle the generation task's `defer` (which clears
-            // `isGenerating`) has no happens-before with the consumer loop exit —
-            // see LlamaSeedDeterminismTests. Harmless here (single run) but keeps
-            // the backend in a clean state before teardown.
-            await backend.awaitGenerationSettled()
-
-            await backend.unloadAndWait()
-
-            let sampler = RawRun.Sampler(
-                temperature: options.temperature,
-                seed: options.seed,
-                // Record the values actually used, not a hardcoded stand-in —
-                // at the neutral defaults this is topK: 0 ("not applied") and
-                // repeatPenalty: 1.0 (no-op), unchanged from before this was
-                // overridable.
-                topK: options.topK,
-                repeatPenalty: options.repeatPenalty,
-                maxTokens: options.maxTokens)
-
-            return RawRun(
-                backend: "llama.cpp",
-                model: EvalMetadata.modelIdentifier(fromFileName: modelURL.lastPathComponent),
-                quant: EvalMetadata.parseQuant(fromFileName: modelURL.lastPathComponent),
-                promptSha256: promptSha256,
-                inputTokenIds: inputTokenIds,
-                output: output,
-                // The streaming backend surfaces decoded text, not generated ids;
-                // see RawRun.outputTokenIds. Empty rather than misleading.
-                outputTokenIds: [],
-                sampler: sampler,
-                coreCommit: EvalMetadata.resolveCoreCommit(),
-                toolingVersions: RawRun.ToolingVersions(llamaCpp: EvalMetadata.llamaCppBuild),
-                repeatIndex: options.repeatIndex)
-        } catch {
-            // Ensure the C/Metal resources are released before propagating — the
-            // backend holds a llama_context/model that must be torn down.
-            await backend.unloadAndWait()
-            throw error
-        }
+  public static func run(_ options: EvalOptions) async throws -> RawRun {
+    let modelURL = URL(fileURLWithPath: options.modelPath)
+    guard FileManager.default.fileExists(atPath: modelURL.path) else {
+      throw EvalError.modelNotFound(path: modelURL.path)
     }
+
+    // Read the prompt file's raw bytes. The SHA-256 is computed over these
+    // exact bytes (the string we feed the tokenizer), before any decoding —
+    // no trimming, no re-templating.
+    let promptURL = URL(fileURLWithPath: options.promptFile)
+    let promptData: Data
+    do {
+      promptData = try Data(contentsOf: promptURL)
+    } catch {
+      throw EvalError.promptFileUnreadable(path: promptURL.path, underlying: error)
+    }
+    let promptString = String(decoding: promptData, as: UTF8.self)
+    let promptSha256 = EvalMetadata.sha256Hex(promptData)
+
+    let backend = LlamaBackend()
+    do {
+      try await backend.loadModel(
+        from: modelURL,
+        plan: .systemManaged(requestedContextSize: options.requestedContextSize))
+
+      // The exact input token ids generation will decode from (BOS included).
+      let inputTokenIds = backend.inputTokenIds(forPrompt: promptString)
+      guard !inputTokenIds.isEmpty else {
+        throw EvalError.tokenizationFailed
+      }
+
+      var config = GenerationConfig(
+        temperature: Float(options.temperature),
+        topP: 1.0,
+        repeatPenalty: Float(options.repeatPenalty),
+        topK: options.topK > 0 ? Int32(options.topK) : nil,
+        maxOutputTokens: options.maxTokens)
+      config.seed = options.seed >= 0 ? UInt64(options.seed) : nil
+
+      var output = ""
+      let stream = try backend.generate(
+        prompt: promptString, systemPrompt: nil, config: config)
+      for try await event in stream.events {
+        if case .token(let text) = event {
+          output += text
+        }
+      }
+      // Without awaiting settle the generation task's `defer` (which clears
+      // `isGenerating`) has no happens-before with the consumer loop exit —
+      // see LlamaSeedDeterminismTests. Harmless here (single run) but keeps
+      // the backend in a clean state before teardown.
+      await backend.awaitGenerationSettled()
+
+      await backend.unloadAndWait()
+
+      let sampler = RawRun.Sampler(
+        temperature: options.temperature,
+        seed: options.seed,
+        // Record the values actually used, not a hardcoded stand-in —
+        // at the neutral defaults this is topK: 0 ("not applied") and
+        // repeatPenalty: 1.0 (no-op), unchanged from before this was
+        // overridable.
+        topK: options.topK,
+        repeatPenalty: options.repeatPenalty,
+        maxTokens: options.maxTokens)
+
+      return RawRun(
+        backend: "llama.cpp",
+        model: EvalMetadata.modelIdentifier(fromFileName: modelURL.lastPathComponent),
+        quant: EvalMetadata.parseQuant(fromFileName: modelURL.lastPathComponent),
+        promptSha256: promptSha256,
+        inputTokenIds: inputTokenIds,
+        output: output,
+        // The streaming backend surfaces decoded text, not generated ids;
+        // see RawRun.outputTokenIds. Empty rather than misleading.
+        outputTokenIds: [],
+        sampler: sampler,
+        coreCommit: EvalMetadata.resolveCoreCommit(),
+        toolingVersions: RawRun.ToolingVersions(llamaCpp: EvalMetadata.llamaCppBuild),
+        repeatIndex: options.repeatIndex)
+    } catch {
+      // Ensure the C/Metal resources are released before propagating — the
+      // backend holds a llama_context/model that must be torn down.
+      await backend.unloadAndWait()
+      throw error
+    }
+  }
 }

@@ -15,24 +15,24 @@ import ManifoldTools
 /// `loadScenarios()` in `Sources/manifold-tools-llama/main.swift`.
 enum ScenarioCorpusFixture {
 
-    /// Resolves `Sources/manifold-tools-llama/ScenarioOverrides` from this
-    /// file's location so the suite does not depend on the executable's
-    /// resource bundle.
-    static func overridesDirectory() -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // ManifoldLlamaTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // package root
-            .appendingPathComponent("Sources/manifold-tools-llama/ScenarioOverrides", isDirectory: true)
-    }
+  /// Resolves `Sources/manifold-tools-llama/ScenarioOverrides` from this
+  /// file's location so the suite does not depend on the executable's
+  /// resource bundle.
+  static func overridesDirectory() -> URL {
+    URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()  // ManifoldLlamaTests
+      .deletingLastPathComponent()  // Tests
+      .deletingLastPathComponent()  // package root
+      .appendingPathComponent("Sources/manifold-tools-llama/ScenarioOverrides", isDirectory: true)
+  }
 
-    /// Core's bundled `built-in` scenarios with this package's overrides
-    /// spliced in by id — the same corpus `manifold-tools-llama` runs against
-    /// a real model.
-    static func load() throws -> [Scenario] {
-        let base = try ScenarioLoader.loadBuiltIn()
-        let overrides = try ScenarioLoader.load(from: overridesDirectory())
-        let overridesByID = Dictionary(uniqueKeysWithValues: overrides.map { ($0.id, $0) })
-        return base.map { overridesByID[$0.id] ?? $0 }
-    }
+  /// Core's bundled `built-in` scenarios with this package's overrides
+  /// spliced in by id — the same corpus `manifold-tools-llama` runs against
+  /// a real model.
+  static func load() throws -> [Scenario] {
+    let base = try ScenarioLoader.loadBuiltIn()
+    let overrides = try ScenarioLoader.load(from: overridesDirectory())
+    let overridesByID = Dictionary(uniqueKeysWithValues: overrides.map { ($0.id, $0) })
+    return base.map { overridesByID[$0.id] ?? $0 }
+  }
 }
