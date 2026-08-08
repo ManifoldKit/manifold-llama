@@ -1,5 +1,5 @@
-import ManifoldInference
 @_spi(BackendInternals) import ManifoldHardware
+import ManifoldInference
 
 /// Infers the tool-call dialect a loaded GGUF model will emit from its
 /// `general.architecture` string.
@@ -14,82 +14,82 @@ import ManifoldInference
 /// once the Jinja renderer exposes the selected tool block at load time.
 enum LlamaToolCallDialect {
 
-    /// Returns the dialect inferred from `architecture`, or `nil` when
-    /// `architecture` is `nil` (model not yet loaded).
-    static func infer(from architecture: String?) -> ToolCallDialect? {
-        guard let arch = architecture?.lowercased() else { return nil }
+  /// Returns the dialect inferred from `architecture`, or `nil` when
+  /// `architecture` is `nil` (model not yet loaded).
+  static func infer(from architecture: String?) -> ToolCallDialect? {
+    guard let arch = architecture?.lowercased() else { return nil }
 
-        if arch.hasPrefix("gemma") {
-            // Gemma 3 / gemma2 / gemma emit a native `<|tool_call>` block with a
-            // custom `call:name{key:value}` body; closed by the `<tool_call|>`
-            // token (pipe before the bracket — verified byte-for-byte against a
-            // real gemma-4 GGUF). The turn-end EOG that follows is a special
-            // token, not literal text. The JSON body alternative
-            // (`<tool_call>…</tool_call>`) is also supported via LlamaToolMarkers
-            // but the native path is primary.
-            return ToolCallDialect(
-                family: .gemma,
-                openDelimiter: "<|tool_call>",
-                closeDelimiter: "<tool_call|>",
-                argEncoding: .json,
-                extractability: .buried
-            )
-        } else if arch.hasPrefix("qwen35") {
-            // Qwen3.5 / Qwen3.6 (BOTH report `general.architecture == "qwen35"`)
-            // keep Qwen2.5's `<tool_call>` … `</tool_call>` delimiters but
-            // changed the body to nested XML (#158):
-            //   <function=name><parameter=key>\nvalue\n</parameter></function>
-            // Checked BEFORE the generic `qwen` prefix — otherwise these models
-            // are misreported as the Qwen2.5 JSON dialect. This branch is
-            // REPORTAGE ONLY and fixes no dispatch: nothing reads `toolDialect`
-            // today (it is stored, merged and Codable-round-tripped in
-            // `BackendCapabilities`, never branched on), so the misclassification
-            // did NOT cause the #158 zero-dispatch — the body parser in
-            // `LlamaToolMarkers` did. Kept because a capability surface that
-            // lies is a trap for the first consumer that does branch on it.
-            // Reported as `.custom`/`.custom` because `ToolCallDialectFamily`
-            // has no XML family and `.json` would be an outright false
-            // statement about the argument encoding.
-            return ToolCallDialect(
-                family: .custom,
-                openDelimiter: "<tool_call>",
-                closeDelimiter: "</tool_call>",
-                argEncoding: .custom,
-                extractability: .clean
-            )
-        } else if arch.hasPrefix("qwen") {
-            // Qwen2.5-Instruct emits `<tool_call>\n{json}\n</tool_call>`.
-            return ToolCallDialect(
-                family: .qwen,
-                openDelimiter: "<tool_call>",
-                closeDelimiter: "</tool_call>",
-                argEncoding: .json,
-                extractability: .clean
-            )
-        } else if arch.hasPrefix("llama") {
-            // Llama 3.x bare-JSON custom tool: no open/close delimiter, the
-            // call is a top-level JSON object (`{"name":…,"parameters":{…}}`).
-            // Buried because there is no opening delimiter to anchor extraction.
-            return ToolCallDialect(
-                family: .llamaPythonTag,
-                openDelimiter: nil,
-                closeDelimiter: nil,
-                argEncoding: .json,
-                extractability: .buried
-            )
-        } else if arch.hasPrefix("mistral") || arch.hasPrefix("mixtral") {
-            // Mistral v0.3 / Mixtral: `[TOOL_CALLS] [{…}]` with no close tag.
-            return ToolCallDialect(
-                family: .mistral,
-                openDelimiter: "[TOOL_CALLS]",
-                closeDelimiter: nil,
-                argEncoding: .json,
-                extractability: .buried
-            )
-        }
-
-        // Unknown architecture — report the family as unknown rather than nil
-        // so consumers know the backend loaded a model but can't classify it.
-        return ToolCallDialect(family: .unknown, extractability: .toolLess)
+    if arch.hasPrefix("gemma") {
+      // Gemma 3 / gemma2 / gemma emit a native `<|tool_call>` block with a
+      // custom `call:name{key:value}` body; closed by the `<tool_call|>`
+      // token (pipe before the bracket — verified byte-for-byte against a
+      // real gemma-4 GGUF). The turn-end EOG that follows is a special
+      // token, not literal text. The JSON body alternative
+      // (`<tool_call>…</tool_call>`) is also supported via LlamaToolMarkers
+      // but the native path is primary.
+      return ToolCallDialect(
+        family: .gemma,
+        openDelimiter: "<|tool_call>",
+        closeDelimiter: "<tool_call|>",
+        argEncoding: .json,
+        extractability: .buried
+      )
+    } else if arch.hasPrefix("qwen35") {
+      // Qwen3.5 / Qwen3.6 (BOTH report `general.architecture == "qwen35"`)
+      // keep Qwen2.5's `<tool_call>` … `</tool_call>` delimiters but
+      // changed the body to nested XML (#158):
+      //   <function=name><parameter=key>\nvalue\n</parameter></function>
+      // Checked BEFORE the generic `qwen` prefix — otherwise these models
+      // are misreported as the Qwen2.5 JSON dialect. This branch is
+      // REPORTAGE ONLY and fixes no dispatch: nothing reads `toolDialect`
+      // today (it is stored, merged and Codable-round-tripped in
+      // `BackendCapabilities`, never branched on), so the misclassification
+      // did NOT cause the #158 zero-dispatch — the body parser in
+      // `LlamaToolMarkers` did. Kept because a capability surface that
+      // lies is a trap for the first consumer that does branch on it.
+      // Reported as `.custom`/`.custom` because `ToolCallDialectFamily`
+      // has no XML family and `.json` would be an outright false
+      // statement about the argument encoding.
+      return ToolCallDialect(
+        family: .custom,
+        openDelimiter: "<tool_call>",
+        closeDelimiter: "</tool_call>",
+        argEncoding: .custom,
+        extractability: .clean
+      )
+    } else if arch.hasPrefix("qwen") {
+      // Qwen2.5-Instruct emits `<tool_call>\n{json}\n</tool_call>`.
+      return ToolCallDialect(
+        family: .qwen,
+        openDelimiter: "<tool_call>",
+        closeDelimiter: "</tool_call>",
+        argEncoding: .json,
+        extractability: .clean
+      )
+    } else if arch.hasPrefix("llama") {
+      // Llama 3.x bare-JSON custom tool: no open/close delimiter, the
+      // call is a top-level JSON object (`{"name":…,"parameters":{…}}`).
+      // Buried because there is no opening delimiter to anchor extraction.
+      return ToolCallDialect(
+        family: .llamaPythonTag,
+        openDelimiter: nil,
+        closeDelimiter: nil,
+        argEncoding: .json,
+        extractability: .buried
+      )
+    } else if arch.hasPrefix("mistral") || arch.hasPrefix("mixtral") {
+      // Mistral v0.3 / Mixtral: `[TOOL_CALLS] [{…}]` with no close tag.
+      return ToolCallDialect(
+        family: .mistral,
+        openDelimiter: "[TOOL_CALLS]",
+        closeDelimiter: nil,
+        argEncoding: .json,
+        extractability: .buried
+      )
     }
+
+    // Unknown architecture — report the family as unknown rather than nil
+    // so consumers know the backend loaded a model but can't classify it.
+    return ToolCallDialect(family: .unknown, extractability: .toolLess)
+  }
 }

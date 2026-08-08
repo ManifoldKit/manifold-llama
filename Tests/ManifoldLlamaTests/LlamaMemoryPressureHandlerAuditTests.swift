@@ -1,5 +1,5 @@
-import XCTest
 @_spi(Testing) import ManifoldLlama
+import XCTest
 
 /// Re-homed from core's cross-family `MLXMemoryPressureMissingTests`
 /// (Tests/ManifoldBackendsTests, retired in core PR C2 — ManifoldKit#1749).
@@ -16,14 +16,17 @@ import XCTest
 /// no-op and `isCancelledForTesting` stays false.
 final class LlamaMemoryPressureHandlerAuditTests: XCTestCase {
 
-    func test_llamaBackend_respondsToMemoryPressure() {
-        let backend = LlamaBackend()
-        XCTAssertFalse(backend.isCancelledForTesting,
-            "Precondition: a fresh backend is not cancelled")
+  func test_llamaBackend_respondsToMemoryPressure() {
+    let backend = LlamaBackend()
+    XCTAssertFalse(
+      backend.isCancelledForTesting,
+      "Precondition: a fresh backend is not cancelled")
 
-        backend.simulateMemoryPressure(.warning)
+    backend.simulateMemoryPressure(.warning)
 
-        XCTAssertTrue(backend.isCancelledForTesting,
-            "LlamaBackend must register a memory-pressure callback in init (#415) that stops generation on .warning — a no-op here means the handler is no longer wired")
-    }
+    XCTAssertTrue(
+      backend.isCancelledForTesting,
+      "LlamaBackend must register a memory-pressure callback in init (#415) that stops generation on .warning — a no-op here means the handler is no longer wired"
+    )
+  }
 }

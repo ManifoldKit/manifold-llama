@@ -1,7 +1,7 @@
 import Foundation
 import LlamaSwift
-import os
 import ManifoldInference
+import os
 
 /// llama.cpp cross-encoder reranker for RANK-pooling GGUF models
 /// (e.g. `bge-reranker-v2-m3`, `jina-reranker`).
@@ -36,516 +36,534 @@ import ManifoldInference
 /// imply.
 public final class LlamaReranker: Reranker, @unchecked Sendable {
 
-    // MARK: - Logging
+  // MARK: - Logging
 
-    private static let logger = Logger(
-        subsystem: ManifoldConfiguration.shared.logSubsystem,
-        category: "reranker"
-    )
+  private static let logger = Logger(
+    subsystem: ManifoldConfiguration.shared.logSubsystem,
+    category: "reranker"
+  )
 
-    // MARK: - Storage
+  // MARK: - Storage
 
-    /// Owns all C-level resources. Confined to an actor so the C pointers are
-    /// never read from more than one task concurrently.
-    fileprivate actor Storage {
-        var model: OpaquePointer?
-        var context: OpaquePointer?
-        var vocab: OpaquePointer?
-        var contextSize: Int32 = 0
-        /// Sentence-separator token inserted between the query and the document
-        /// halves of the pair. `LLAMA_TOKEN_NULL` when the vocab has none.
-        var sepToken: llama_token = -1
-        var eosToken: llama_token = -1
+  /// Owns all C-level resources. Confined to an actor so the C pointers are
+  /// never read from more than one task concurrently.
+  fileprivate actor Storage {
+    var model: OpaquePointer?
+    var context: OpaquePointer?
+    var vocab: OpaquePointer?
+    var contextSize: Int32 = 0
+    /// Sentence-separator token inserted between the query and the document
+    /// halves of the pair. `LLAMA_TOKEN_NULL` when the vocab has none.
+    var sepToken: llama_token = -1
+    var eosToken: llama_token = -1
 
-        var isLoaded: Bool { model != nil && context != nil }
+    var isLoaded: Bool { model != nil && context != nil }
 
-        func install(
-            model: OpaquePointer,
-            context: OpaquePointer,
-            vocab: OpaquePointer,
-            contextSize: Int32,
-            sepToken: llama_token,
-            eosToken: llama_token
-        ) {
-            self.model = model
-            self.context = context
-            self.vocab = vocab
-            self.contextSize = contextSize
-            self.sepToken = sepToken
-            self.eosToken = eosToken
-        }
-
-        /// Drops references and frees the C resources in the order
-        /// `llama_free` (context) → `llama_model_free` (model). Safe to call
-        /// when nothing is loaded.
-        func unload() {
-            let ctx = context
-            let mdl = model
-            context = nil
-            model = nil
-            vocab = nil
-            contextSize = 0
-            sepToken = -1
-            eosToken = -1
-            if let ctx {
-                // Drain GPU work and clear KV/output buffers before llama_free.
-                // `llama_free` releases the Metal residency set; releasing it
-                // while encode() command buffers are still enqueued trips
-                //   GGML_ASSERT([rsets->data count] == 0)   (ggml-metal-device.m)
-                // and aborts the process with SIGABRT (#1394). Mirrors the same
-                // synchronize→clear→synchronize dance in LlamaEmbeddingBackend.
-                llama_synchronize(ctx)
-                if let mem = llama_get_memory(ctx) {
-                    llama_memory_clear(mem, false)
-                }
-                llama_synchronize(ctx)
-                llama_free(ctx)
-            }
-            if let mdl { llama_model_free(mdl) }
-        }
-
-        /// Scores a single `[query, document]` pair, returning the raw rank
-        /// logit emitted by the classification head.
-        ///
-        /// Builds the sequence `[BOS] query [EOS] [SEP] document [EOS]`,
-        /// encodes it, and reads `llama_get_embeddings_seq(ctx, 0)[0]`. Pointers
-        /// are read under the actor's serial executor so `unload()` cannot
-        /// interleave.
-        func score(query: String, document: String) throws -> Float {
-            guard let context, let vocab else {
-                throw RerankerError.modelNotLoaded
-            }
-            let maxTokens = Int(contextSize)
-
-            // Query half carries the BOS; document half does not. Separator and
-            // closing EOS tokens frame the pair the way BERT rerankers were
-            // trained on (`[CLS] q [SEP] d [SEP]`); we use EOS as the trailing
-            // marker since not every reranker vocab defines a distinct SEP.
-            var tokens = LlamaTokenization.tokenize(query, vocab: vocab, addBos: true)
-            if eosToken >= 0 { tokens.append(eosToken) }
-            if sepToken >= 0 { tokens.append(sepToken) }
-            tokens.append(contentsOf: LlamaTokenization.tokenize(document, vocab: vocab, addBos: false))
-            if eosToken >= 0 { tokens.append(eosToken) }
-
-            guard !tokens.isEmpty else {
-                // An all-empty pair has no relevance signal; the lowest possible
-                // score keeps it at the bottom of the ranking without throwing.
-                return -.greatestFiniteMagnitude
-            }
-
-            // Truncate from the tail so the query (sequence head) always
-            // survives — a query-less pair scores nothing meaningful.
-            if tokens.count > maxTokens {
-                tokens = Array(tokens.prefix(maxTokens))
-            }
-
-            // Clear KV / output state so back-to-back pair scores never share
-            // buffers across sequences.
-            if let mem = llama_get_memory(context) {
-                llama_memory_clear(mem, true)
-            }
-
-            var batch = llama_batch_init(Int32(tokens.count), 0, 1)
-            defer { llama_batch_free(batch) }
-            for i in 0..<tokens.count {
-                batch.token[i] = tokens[i]
-                batch.pos[i] = Int32(i)
-                batch.n_seq_id[i] = 1
-                batch.seq_id[i]?[0] = 0
-                batch.logits[i] = 1
-            }
-            batch.n_tokens = Int32(tokens.count)
-
-            let rc = llama_encode(context, batch)
-            if rc != 0 {
-                // Some reranker GGUFs expose only decode, mirroring the
-                // embedding backend's resilience to upstream packaging.
-                let drc = llama_decode(context, batch)
-                if drc != 0 {
-                    throw RerankerError.scoringFailed(underlying: NSError(
-                        domain: "LlamaReranker",
-                        code: Int(rc),
-                        userInfo: [NSLocalizedDescriptionKey: "llama_encode/decode failed (encode rc=\(rc), decode rc=\(drc))"]
-                    ))
-                }
-            }
-
-            llama_synchronize(context)
-
-            // Under RANK pooling this row is `float[n_cls_out]` — the rank
-            // score(s). Rerankers have a single-output head, so element 0 is the
-            // relevance logit.
-            guard let row = llama_get_embeddings_seq(context, 0) else {
-                throw RerankerError.scoringFailed(underlying: NSError(
-                    domain: "LlamaReranker",
-                    code: -20,
-                    userInfo: [NSLocalizedDescriptionKey: "llama_get_embeddings_seq returned NULL — model is not a RANK-pooling reranker"]
-                ))
-            }
-            return row[0]
-        }
+    func install(
+      model: OpaquePointer,
+      context: OpaquePointer,
+      vocab: OpaquePointer,
+      contextSize: Int32,
+      sepToken: llama_token,
+      eosToken: llama_token
+    ) {
+      self.model = model
+      self.context = context
+      self.vocab = vocab
+      self.contextSize = contextSize
+      self.sepToken = sepToken
+      self.eosToken = eosToken
     }
 
-    private let storage = Storage()
-
-    private let stateLock = NSLock()
-    private var _isReady = false
-
-    // MARK: - CancellableModelLoading state (guarded by stateLock)
-
-    private var _isModelLoadInFlight = false
-    private var _activeLoadTask: Task<LoadedReranker, Error>?
-    private var nextLoadToken: UInt64 = 0
-    private var activeLoadToken: UInt64 = 0
-
-    // Separate lock so cancelModelLoad() is callable while serializedLoad holds loadLock.
-    private let cancelContextLock = NSLock()
-    private var _cancelContext: LlamaModelLoader.ProgressCallbackContext?
-
-    /// `true` once a RANK-pooling GGUF is resident. Reads are lock-guarded so a
-    /// concurrent `loadModel` / `unloadModel` cannot expose a half-installed
-    /// context to a scoring call.
-    public var isReady: Bool {
-        stateLock.withLock { _isReady }
-    }
-
-    // MARK: - Init / Deinit
-
-    public init() {
-        LlamaBackendProcessLifecycle.retain()
-    }
-
-    deinit {
-        // Fire-and-forget the actor unload; never block deinit. Same rationale
-        // as ``LlamaEmbeddingBackend``: blocking here freezes the owning actor
-        // (often @MainActor) or deadlocks on a main-actor hop inside unload.
-        // Keep the process refcount alive until the detached unload finishes.
-        LlamaBackendProcessLifecycle.retain()
-        let storage = storage
-        Task.detached(priority: .utility) {
-            await storage.unload()
-            LlamaBackendProcessLifecycle.release()
+    /// Drops references and frees the C resources in the order
+    /// `llama_free` (context) → `llama_model_free` (model). Safe to call
+    /// when nothing is loaded.
+    func unload() {
+      let ctx = context
+      let mdl = model
+      context = nil
+      model = nil
+      vocab = nil
+      contextSize = 0
+      sepToken = -1
+      eosToken = -1
+      if let ctx {
+        // Drain GPU work and clear KV/output buffers before llama_free.
+        // `llama_free` releases the Metal residency set; releasing it
+        // while encode() command buffers are still enqueued trips
+        //   GGML_ASSERT([rsets->data count] == 0)   (ggml-metal-device.m)
+        // and aborts the process with SIGABRT (#1394). Mirrors the same
+        // synchronize→clear→synchronize dance in LlamaEmbeddingBackend.
+        llama_synchronize(ctx)
+        if let mem = llama_get_memory(ctx) {
+          llama_memory_clear(mem, false)
         }
-        LlamaBackendProcessLifecycle.release()
+        llama_synchronize(ctx)
+        llama_free(ctx)
+      }
+      if let mdl { llama_model_free(mdl) }
     }
 
-    // MARK: - Loading
-
-    /// Loads a cross-encoder reranker GGUF and makes the instance ``isReady``.
+    /// Scores a single `[query, document]` pair, returning the raw rank
+    /// logit emitted by the classification head.
     ///
-    /// - Throws: ``RerankerError/modelLoadFailed`` when the GGUF cannot be
-    ///   opened or a RANK context cannot be created, or `CancellationError` when
-    ///   a cooperative cancel via ``cancelModelLoad()`` aborted the native load.
-    public func loadModel(from url: URL) async throws {
-        await storage.unload()
+    /// Builds the sequence `[BOS] query [EOS] [SEP] document [EOS]`,
+    /// encodes it, and reads `llama_get_embeddings_seq(ctx, 0)[0]`. Pointers
+    /// are read under the actor's serial executor so `unload()` cannot
+    /// interleave.
+    func score(query: String, document: String) throws -> Float {
+      guard let context, let vocab else {
+        throw RerankerError.modelNotLoaded
+      }
+      let maxTokens = Int(contextSize)
 
-        let loadToken = stateLock.withLock {
-            _isReady = false
-            nextLoadToken &+= 1
-            activeLoadToken = nextLoadToken
-            return activeLoadToken
-        }
+      // Query half carries the BOS; document half does not. Separator and
+      // closing EOS tokens frame the pair the way BERT rerankers were
+      // trained on (`[CLS] q [SEP] d [SEP]`); we use EOS as the trailing
+      // marker since not every reranker vocab defines a distinct SEP.
+      var tokens = LlamaTokenization.tokenize(query, vocab: vocab, addBos: true)
+      if eosToken >= 0 { tokens.append(eosToken) }
+      if sepToken >= 0 { tokens.append(sepToken) }
+      tokens.append(contentsOf: LlamaTokenization.tokenize(document, vocab: vocab, addBos: false))
+      if eosToken >= 0 { tokens.append(eosToken) }
 
-        let loadTask = Task.detached(priority: .userInitiated) { [weak self] in
-            // Set in-flight before any work so the flag tracks native load lifetime.
-            // Both the set and clear happen inside the task to eliminate the TOCTOU
-            // where a fast-failing task's defer fires before the spawning thread can
-            // reach its own stateLock{_isModelLoadInFlight = true}.
-            self?.stateLock.withLock {
-                if self?.activeLoadToken == loadToken {
-                    self?._isModelLoadInFlight = true
-                }
-            }
+      guard !tokens.isEmpty else {
+        // An all-empty pair has no relevance signal; the lowest possible
+        // score keeps it at the bottom of the ranking without throwing.
+        return -.greatestFiniteMagnitude
+      }
 
-            let cancelCtx = LlamaModelLoader.ProgressCallbackContext()
-            self?.cancelContextLock.withLock { self?._cancelContext = cancelCtx }
+      // Truncate from the tail so the query (sequence head) always
+      // survives — a query-less pair scores nothing meaningful.
+      if tokens.count > maxTokens {
+        tokens = Array(tokens.prefix(maxTokens))
+      }
 
-            defer {
-                self?.cancelContextLock.withLock { self?._cancelContext = nil }
-                self?.stateLock.withLock {
-                    // Guard: unloadModel() bumps activeLoadToken so a superseded
-                    // detached task cannot mistakenly flip the flag after unload.
-                    if self?.activeLoadToken == loadToken {
-                        self?._isModelLoadInFlight = false
-                        self?._activeLoadTask = nil
-                    }
-                }
-            }
+      // Clear KV / output state so back-to-back pair scores never share
+      // buffers across sequences.
+      if let mem = llama_get_memory(context) {
+        llama_memory_clear(mem, true)
+      }
 
-            return try Self.serializedLoad(from: url, callbackContext: cancelCtx)
-        }
+      var batch = llama_batch_init(Int32(tokens.count), 0, 1)
+      defer { llama_batch_free(batch) }
+      for i in 0..<tokens.count {
+        batch.token[i] = tokens[i]
+        batch.pos[i] = Int32(i)
+        batch.n_seq_id[i] = 1
+        batch.seq_id[i]?[0] = 0
+        batch.logits[i] = 1
+      }
+      batch.n_tokens = Int32(tokens.count)
 
-        stateLock.withLock { _activeLoadTask = loadTask }
-
-        let loaded: LoadedReranker
-        do {
-            loaded = try await loadTask.value
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as RerankerError {
-            throw error
-        } catch {
-            throw RerankerError.modelLoadFailed(underlying: error)
-        }
-
-        await storage.install(
-            model: loaded.model,
-            context: loaded.context,
-            vocab: loaded.vocab,
-            contextSize: loaded.contextSize,
-            sepToken: loaded.sepToken,
-            eosToken: loaded.eosToken
-        )
-        stateLock.withLock { _isReady = true }
-
-        Self.logger.info("LlamaReranker loaded \(url.lastPathComponent) (n_ctx=\(loaded.contextSize))")
-    }
-
-    /// Unloads the model, flipping ``isReady`` to `false` immediately. Any
-    /// in-flight scoring finishes first via the actor's serial executor.
-    public func unloadModel() {
-        stateLock.withLock {
-            _isReady = false
-            // Bump the load token so the in-flight task's defer skips its flag-clear,
-            // then clear the flag immediately so callers see the unloaded state.
-            nextLoadToken &+= 1
-            activeLoadToken = nextLoadToken
-            _isModelLoadInFlight = false
-            // _activeLoadTask is intentionally NOT cleared here — awaitModelLoadSettled()
-            // reads it to suspend until the native C work truly finishes.
-        }
-        let storage = storage
-        Task.detached(priority: .utility) {
-            await storage.unload()
-        }
-    }
-
-    // MARK: - Reranker
-
-    public func rerank(
-        query: String,
-        candidates: [VectorSearchHit],
-        limit: Int
-    ) async throws -> [VectorSearchHit] {
-        guard isReady else {
-            // Defensive: `RAGService` only calls us when `isReady`, but honour
-            // the contract directly rather than scoring against a freed context
-            // if the model was unloaded between the gate and this call.
-            return Array(candidates.prefix(limit))
-        }
-        guard !candidates.isEmpty, limit > 0 else { return [] }
-
-        // Score each candidate against the query, then sort by descending
-        // relevance. Scoring is sequential because the actor owns one context;
-        // the candidate set is small (top-k*3) so this stays well-bounded.
-        var scored: [(hit: VectorSearchHit, score: Float)] = []
-        scored.reserveCapacity(candidates.count)
-        for hit in candidates {
-            let logit = try await storage.score(query: query, document: hit.chunk.text)
-            scored.append((hit, logit))
-        }
-
-        scored.sort { $0.score > $1.score }
-
-        return scored.prefix(limit).map { entry in
-            VectorSearchHit(
-                chunk: entry.hit.chunk,
-                documentTitle: entry.hit.documentTitle,
-                // Squash the unbounded logit into (0, 1) so the surfaced score
-                // is a comparable relevance probability, not a raw activation.
-                score: Self.sigmoid(entry.score)
-            )
-        }
-    }
-
-    /// Numerically stable logistic squash. Branches on the sign so neither
-    /// `exp(+large)` nor `exp(-large)` overflows.
-    @_spi(Testing) public static func sigmoid(_ x: Float) -> Float {
-        if x >= 0 {
-            return 1 / (1 + expf(-x))
-        } else {
-            let e = expf(x)
-            return e / (1 + e)
-        }
-    }
-
-    // MARK: - Loader
-
-    private struct LoadedReranker: @unchecked Sendable {
-        let model: OpaquePointer
-        let context: OpaquePointer
-        let vocab: OpaquePointer
-        let contextSize: Int32
-        let sepToken: llama_token
-        let eosToken: llama_token
-    }
-
-    /// BERT-family architectures a reranker GGUF can legitimately declare. Same
-    /// set the embedding loader allows — rerankers are BERT classifiers — minus
-    /// the encoder-only families that have no classification head.
-    private static let rerankerArchitectureAllowlist: Set<String> = [
-        "bert",
-        "nomic-bert",
-        "jina-bert-v2",
-    ]
-
-    private static func serializedLoad(
-        from url: URL,
-        callbackContext: LlamaModelLoader.ProgressCallbackContext? = nil
-    ) throws -> LoadedReranker {
-        loadLock.lock()
-        defer { loadLock.unlock() }
-
-        var modelParams = llama_model_default_params()
-        modelParams.n_gpu_layers = LlamaSamplingPolicy.gpuLayerCount()
-
-        // Wire cancel callback when a context is provided. The C callback returns
-        // false when cancelRequested is set, instructing llama_model_load_from_file
-        // to abort. callbackAborted is set only when the callback actually returned
-        // false — distinct from cancelRequested, which a racing cancelModelLoad()
-        // call could set after a genuine OOM failure, misclassifying it as
-        // CancellationError.
-        var callbackContextRef: Unmanaged<LlamaModelLoader.ProgressCallbackContext>?
-        if let ctx = callbackContext {
-            callbackContextRef = Unmanaged.passRetained(ctx)
-            modelParams.progress_callback_user_data = callbackContextRef!.toOpaque()
-            modelParams.progress_callback = { _, userData -> Bool in
-                guard let ptr = userData else { return true }
-                let ctx = LlamaModelLoader.progressContext(fromOpaque: ptr)
-                if ctx.cancelRequested.load(ordering: .sequentiallyConsistent) {
-                    ctx.callbackAborted.store(true, ordering: .sequentiallyConsistent)
-                    return false
-                }
-                return true
-            }
-        }
-        defer { callbackContextRef?.release() }
-
-        guard let rawModel = llama_model_load_from_file(url.path, modelParams) else {
-            if callbackContext?.callbackAborted.load(ordering: .sequentiallyConsistent) == true {
-                throw CancellationError()
-            }
-            throw RerankerError.modelLoadFailed(underlying: NSError(
-                domain: "LlamaReranker",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to load reranker GGUF from \(url.lastPathComponent)"]
+      let rc = llama_encode(context, batch)
+      if rc != 0 {
+        // Some reranker GGUFs expose only decode, mirroring the
+        // embedding backend's resilience to upstream packaging.
+        let drc = llama_decode(context, batch)
+        if drc != 0 {
+          throw RerankerError.scoringFailed(
+            underlying: NSError(
+              domain: "LlamaReranker",
+              code: Int(rc),
+              userInfo: [
+                NSLocalizedDescriptionKey:
+                  "llama_encode/decode failed (encode rc=\(rc), decode rc=\(drc))"
+              ]
             ))
         }
+      }
 
-        if let architecture = LlamaModelLoader.readArchitectureMetadata(model: rawModel) {
-            let normalized = architecture.lowercased()
-            let isRerankerAllowlisted = rerankerArchitectureAllowlist.contains(normalized)
-            let isGenerationDenied = LlamaModelLoader.isUnsupportedArchitecture(architecture)
-            if !isRerankerAllowlisted && isGenerationDenied {
-                llama_model_free(rawModel)
-                throw RerankerError.modelLoadFailed(underlying: InferenceError.unsupportedModelArchitecture(architecture))
-            }
-        }
+      llama_synchronize(context)
 
-        var ctxParams = llama_context_default_params()
-        ctxParams.embeddings = true
-        // Force the rank head on rather than trusting GGUF pooling metadata —
-        // this is what makes `llama_get_embeddings_seq` return a score instead
-        // of a hidden-state vector. Matches llama.cpp's rerank example.
-        ctxParams.pooling_type = LLAMA_POOLING_TYPE_RANK
-        let trainCtx = llama_model_n_ctx_train(rawModel)
-        let requestedCtx = max(Int32(512), min(trainCtx, Int32(8192)))
-        ctxParams.n_ctx = UInt32(requestedCtx)
-        ctxParams.n_batch = UInt32(requestedCtx)
-        ctxParams.n_ubatch = UInt32(requestedCtx)
-        ctxParams.n_threads = LlamaSamplingPolicy.threadCount()
-        ctxParams.n_threads_batch = ctxParams.n_threads
+      // Under RANK pooling this row is `float[n_cls_out]` — the rank
+      // score(s). Rerankers have a single-output head, so element 0 is the
+      // relevance logit.
+      guard let row = llama_get_embeddings_seq(context, 0) else {
+        throw RerankerError.scoringFailed(
+          underlying: NSError(
+            domain: "LlamaReranker",
+            code: -20,
+            userInfo: [
+              NSLocalizedDescriptionKey:
+                "llama_get_embeddings_seq returned NULL — model is not a RANK-pooling reranker"
+            ]
+          ))
+      }
+      return row[0]
+    }
+  }
 
-        guard let ctx = llama_init_from_model(rawModel, ctxParams) else {
-            llama_model_free(rawModel)
-            throw RerankerError.modelLoadFailed(underlying: NSError(
-                domain: "LlamaReranker",
-                code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to create RANK context for \(url.lastPathComponent)"]
-            ))
-        }
+  private let storage = Storage()
 
-        llama_set_embeddings(ctx, true)
+  private let stateLock = NSLock()
+  private var _isReady = false
 
-        guard let vocab = llama_model_get_vocab(rawModel) else {
-            // Load-failure path: no llama_encode has been called yet so no Metal
-            // command buffers are enqueued — synchronize dance (#1394) not needed.
-            llama_free(ctx)
-            llama_model_free(rawModel)
-            throw RerankerError.modelLoadFailed(underlying: NSError(
-                domain: "LlamaReranker",
-                code: -3,
-                userInfo: [NSLocalizedDescriptionKey: "Reranker model has no vocabulary"]
-            ))
-        }
+  // MARK: - CancellableModelLoading state (guarded by stateLock)
 
-        return LoadedReranker(
-            model: rawModel,
-            context: ctx,
-            vocab: vocab,
-            contextSize: requestedCtx,
-            sepToken: llama_vocab_sep(vocab),
-            eosToken: llama_vocab_eos(vocab)
-        )
+  private var _isModelLoadInFlight = false
+  private var _activeLoadTask: Task<LoadedReranker, Error>?
+  private var nextLoadToken: UInt64 = 0
+  private var activeLoadToken: UInt64 = 0
+
+  // Separate lock so cancelModelLoad() is callable while serializedLoad holds loadLock.
+  private let cancelContextLock = NSLock()
+  private var _cancelContext: LlamaModelLoader.ProgressCallbackContext?
+
+  /// `true` once a RANK-pooling GGUF is resident. Reads are lock-guarded so a
+  /// concurrent `loadModel` / `unloadModel` cannot expose a half-installed
+  /// context to a scoring call.
+  public var isReady: Bool {
+    stateLock.withLock { _isReady }
+  }
+
+  // MARK: - Init / Deinit
+
+  public init() {
+    LlamaBackendProcessLifecycle.retain()
+  }
+
+  deinit {
+    // Fire-and-forget the actor unload; never block deinit. Same rationale
+    // as ``LlamaEmbeddingBackend``: blocking here freezes the owning actor
+    // (often @MainActor) or deadlocks on a main-actor hop inside unload.
+    // Keep the process refcount alive until the detached unload finishes.
+    LlamaBackendProcessLifecycle.retain()
+    let storage = storage
+    Task.detached(priority: .utility) {
+      await storage.unload()
+      LlamaBackendProcessLifecycle.release()
+    }
+    LlamaBackendProcessLifecycle.release()
+  }
+
+  // MARK: - Loading
+
+  /// Loads a cross-encoder reranker GGUF and makes the instance ``isReady``.
+  ///
+  /// - Throws: ``RerankerError/modelLoadFailed`` when the GGUF cannot be
+  ///   opened or a RANK context cannot be created, or `CancellationError` when
+  ///   a cooperative cancel via ``cancelModelLoad()`` aborted the native load.
+  public func loadModel(from url: URL) async throws {
+    await storage.unload()
+
+    let loadToken = stateLock.withLock {
+      _isReady = false
+      nextLoadToken &+= 1
+      activeLoadToken = nextLoadToken
+      return activeLoadToken
     }
 
-    /// Serializes reranker-load `llama_model_load_from_file` calls against each
-    /// other. Eventually funnels through GGML's process-global init lock, so
-    /// cross-pool serialisation with generation / embedding loads is implicit.
-    private static let loadLock = NSLock()
+    let loadTask = Task.detached(priority: .userInitiated) { [weak self] in
+      // Set in-flight before any work so the flag tracks native load lifetime.
+      // Both the set and clear happen inside the task to eliminate the TOCTOU
+      // where a fast-failing task's defer fires before the spawning thread can
+      // reach its own stateLock{_isModelLoadInFlight = true}.
+      self?.stateLock.withLock {
+        if self?.activeLoadToken == loadToken {
+          self?._isModelLoadInFlight = true
+        }
+      }
+
+      let cancelCtx = LlamaModelLoader.ProgressCallbackContext()
+      self?.cancelContextLock.withLock { self?._cancelContext = cancelCtx }
+
+      defer {
+        self?.cancelContextLock.withLock { self?._cancelContext = nil }
+        self?.stateLock.withLock {
+          // Guard: unloadModel() bumps activeLoadToken so a superseded
+          // detached task cannot mistakenly flip the flag after unload.
+          if self?.activeLoadToken == loadToken {
+            self?._isModelLoadInFlight = false
+            self?._activeLoadTask = nil
+          }
+        }
+      }
+
+      return try Self.serializedLoad(from: url, callbackContext: cancelCtx)
+    }
+
+    stateLock.withLock { _activeLoadTask = loadTask }
+
+    let loaded: LoadedReranker
+    do {
+      loaded = try await loadTask.value
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch let error as RerankerError {
+      throw error
+    } catch {
+      throw RerankerError.modelLoadFailed(underlying: error)
+    }
+
+    await storage.install(
+      model: loaded.model,
+      context: loaded.context,
+      vocab: loaded.vocab,
+      contextSize: loaded.contextSize,
+      sepToken: loaded.sepToken,
+      eosToken: loaded.eosToken
+    )
+    stateLock.withLock { _isReady = true }
+
+    Self.logger.info("LlamaReranker loaded \(url.lastPathComponent) (n_ctx=\(loaded.contextSize))")
+  }
+
+  /// Unloads the model, flipping ``isReady`` to `false` immediately. Any
+  /// in-flight scoring finishes first via the actor's serial executor.
+  public func unloadModel() {
+    stateLock.withLock {
+      _isReady = false
+      // Bump the load token so the in-flight task's defer skips its flag-clear,
+      // then clear the flag immediately so callers see the unloaded state.
+      nextLoadToken &+= 1
+      activeLoadToken = nextLoadToken
+      _isModelLoadInFlight = false
+      // _activeLoadTask is intentionally NOT cleared here — awaitModelLoadSettled()
+      // reads it to suspend until the native C work truly finishes.
+    }
+    let storage = storage
+    Task.detached(priority: .utility) {
+      await storage.unload()
+    }
+  }
+
+  // MARK: - Reranker
+
+  public func rerank(
+    query: String,
+    candidates: [VectorSearchHit],
+    limit: Int
+  ) async throws -> [VectorSearchHit] {
+    guard isReady else {
+      // Defensive: `RAGService` only calls us when `isReady`, but honour
+      // the contract directly rather than scoring against a freed context
+      // if the model was unloaded between the gate and this call.
+      return Array(candidates.prefix(limit))
+    }
+    guard !candidates.isEmpty, limit > 0 else { return [] }
+
+    // Score each candidate against the query, then sort by descending
+    // relevance. Scoring is sequential because the actor owns one context;
+    // the candidate set is small (top-k*3) so this stays well-bounded.
+    var scored: [(hit: VectorSearchHit, score: Float)] = []
+    scored.reserveCapacity(candidates.count)
+    for hit in candidates {
+      let logit = try await storage.score(query: query, document: hit.chunk.text)
+      scored.append((hit, logit))
+    }
+
+    scored.sort { $0.score > $1.score }
+
+    return scored.prefix(limit).map { entry in
+      VectorSearchHit(
+        chunk: entry.hit.chunk,
+        documentTitle: entry.hit.documentTitle,
+        // Squash the unbounded logit into (0, 1) so the surfaced score
+        // is a comparable relevance probability, not a raw activation.
+        score: Self.sigmoid(entry.score)
+      )
+    }
+  }
+
+  /// Numerically stable logistic squash. Branches on the sign so neither
+  /// `exp(+large)` nor `exp(-large)` overflows.
+  @_spi(Testing) public static func sigmoid(_ x: Float) -> Float {
+    if x >= 0 {
+      return 1 / (1 + expf(-x))
+    } else {
+      let e = expf(x)
+      return e / (1 + e)
+    }
+  }
+
+  // MARK: - Loader
+
+  private struct LoadedReranker: @unchecked Sendable {
+    let model: OpaquePointer
+    let context: OpaquePointer
+    let vocab: OpaquePointer
+    let contextSize: Int32
+    let sepToken: llama_token
+    let eosToken: llama_token
+  }
+
+  /// BERT-family architectures a reranker GGUF can legitimately declare. Same
+  /// set the embedding loader allows — rerankers are BERT classifiers — minus
+  /// the encoder-only families that have no classification head.
+  private static let rerankerArchitectureAllowlist: Set<String> = [
+    "bert",
+    "nomic-bert",
+    "jina-bert-v2",
+  ]
+
+  private static func serializedLoad(
+    from url: URL,
+    callbackContext: LlamaModelLoader.ProgressCallbackContext? = nil
+  ) throws -> LoadedReranker {
+    loadLock.lock()
+    defer { loadLock.unlock() }
+
+    var modelParams = llama_model_default_params()
+    modelParams.n_gpu_layers = LlamaSamplingPolicy.gpuLayerCount()
+
+    // Wire cancel callback when a context is provided. The C callback returns
+    // false when cancelRequested is set, instructing llama_model_load_from_file
+    // to abort. callbackAborted is set only when the callback actually returned
+    // false — distinct from cancelRequested, which a racing cancelModelLoad()
+    // call could set after a genuine OOM failure, misclassifying it as
+    // CancellationError.
+    var callbackContextRef: Unmanaged<LlamaModelLoader.ProgressCallbackContext>?
+    if let ctx = callbackContext {
+      callbackContextRef = Unmanaged.passRetained(ctx)
+      modelParams.progress_callback_user_data = callbackContextRef!.toOpaque()
+      modelParams.progress_callback = { _, userData -> Bool in
+        guard let ptr = userData else { return true }
+        let ctx = LlamaModelLoader.progressContext(fromOpaque: ptr)
+        if ctx.cancelRequested.load(ordering: .sequentiallyConsistent) {
+          ctx.callbackAborted.store(true, ordering: .sequentiallyConsistent)
+          return false
+        }
+        return true
+      }
+    }
+    defer { callbackContextRef?.release() }
+
+    guard let rawModel = llama_model_load_from_file(url.path, modelParams) else {
+      if callbackContext?.callbackAborted.load(ordering: .sequentiallyConsistent) == true {
+        throw CancellationError()
+      }
+      throw RerankerError.modelLoadFailed(
+        underlying: NSError(
+          domain: "LlamaReranker",
+          code: -1,
+          userInfo: [
+            NSLocalizedDescriptionKey: "Failed to load reranker GGUF from \(url.lastPathComponent)"
+          ]
+        ))
+    }
+
+    if let architecture = LlamaModelLoader.readArchitectureMetadata(model: rawModel) {
+      let normalized = architecture.lowercased()
+      let isRerankerAllowlisted = rerankerArchitectureAllowlist.contains(normalized)
+      let isGenerationDenied = LlamaModelLoader.isUnsupportedArchitecture(architecture)
+      if !isRerankerAllowlisted && isGenerationDenied {
+        llama_model_free(rawModel)
+        throw RerankerError.modelLoadFailed(
+          underlying: InferenceError.unsupportedModelArchitecture(architecture))
+      }
+    }
+
+    var ctxParams = llama_context_default_params()
+    ctxParams.embeddings = true
+    // Force the rank head on rather than trusting GGUF pooling metadata —
+    // this is what makes `llama_get_embeddings_seq` return a score instead
+    // of a hidden-state vector. Matches llama.cpp's rerank example.
+    ctxParams.pooling_type = LLAMA_POOLING_TYPE_RANK
+    let trainCtx = llama_model_n_ctx_train(rawModel)
+    let requestedCtx = max(Int32(512), min(trainCtx, Int32(8192)))
+    ctxParams.n_ctx = UInt32(requestedCtx)
+    ctxParams.n_batch = UInt32(requestedCtx)
+    ctxParams.n_ubatch = UInt32(requestedCtx)
+    ctxParams.n_threads = LlamaSamplingPolicy.threadCount()
+    ctxParams.n_threads_batch = ctxParams.n_threads
+
+    guard let ctx = llama_init_from_model(rawModel, ctxParams) else {
+      llama_model_free(rawModel)
+      throw RerankerError.modelLoadFailed(
+        underlying: NSError(
+          domain: "LlamaReranker",
+          code: -2,
+          userInfo: [
+            NSLocalizedDescriptionKey: "Failed to create RANK context for \(url.lastPathComponent)"
+          ]
+        ))
+    }
+
+    llama_set_embeddings(ctx, true)
+
+    guard let vocab = llama_model_get_vocab(rawModel) else {
+      // Load-failure path: no llama_encode has been called yet so no Metal
+      // command buffers are enqueued — synchronize dance (#1394) not needed.
+      llama_free(ctx)
+      llama_model_free(rawModel)
+      throw RerankerError.modelLoadFailed(
+        underlying: NSError(
+          domain: "LlamaReranker",
+          code: -3,
+          userInfo: [NSLocalizedDescriptionKey: "Reranker model has no vocabulary"]
+        ))
+    }
+
+    return LoadedReranker(
+      model: rawModel,
+      context: ctx,
+      vocab: vocab,
+      contextSize: requestedCtx,
+      sepToken: llama_vocab_sep(vocab),
+      eosToken: llama_vocab_eos(vocab)
+    )
+  }
+
+  /// Serializes reranker-load `llama_model_load_from_file` calls against each
+  /// other. Eventually funnels through GGML's process-global init lock, so
+  /// cross-pool serialisation with generation / embedding loads is implicit.
+  private static let loadLock = NSLock()
 }
 
 // MARK: - CancellableModelLoading
 
 extension LlamaReranker: CancellableModelLoading {
 
-    /// Whether a native reranker model load is currently mutating state on a
-    /// background thread. Stays `true` from the moment the detached load task
-    /// starts until it truly finishes — which may be *after* the `async loadModel`
-    /// await has already thrown (e.g. a host deadline fired mid-load). Guarded by
-    /// `stateLock`.
-    public var isModelLoadInFlight: Bool {
-        stateLock.withLock { _isModelLoadInFlight }
-    }
+  /// Whether a native reranker model load is currently mutating state on a
+  /// background thread. Stays `true` from the moment the detached load task
+  /// starts until it truly finishes — which may be *after* the `async loadModel`
+  /// await has already thrown (e.g. a host deadline fired mid-load). Guarded by
+  /// `stateLock`.
+  public var isModelLoadInFlight: Bool {
+    stateLock.withLock { _isModelLoadInFlight }
+  }
 
-    /// Requests that the in-flight native reranker load unwind at its next
-    /// progress callback. Best-effort and cooperative — if no progress callback
-    /// fires before the load completes, this is a no-op. Always follow with
-    /// `awaitModelLoadSettled()` before reusing the reranker.
-    public func cancelModelLoad() {
-        cancelContextLock.withLock { _cancelContext }?
-            .cancelRequested.store(true, ordering: .sequentiallyConsistent)
-    }
+  /// Requests that the in-flight native reranker load unwind at its next
+  /// progress callback. Best-effort and cooperative — if no progress callback
+  /// fires before the load completes, this is a no-op. Always follow with
+  /// `awaitModelLoadSettled()` before reusing the reranker.
+  public func cancelModelLoad() {
+    cancelContextLock.withLock { _cancelContext }?
+      .cancelRequested.store(true, ordering: .sequentiallyConsistent)
+  }
 
-    /// Suspends until any in-flight native reranker load has truly finished —
-    /// whether it completed normally, failed, or unwound cooperatively via
-    /// `cancelModelLoad()`. Returns immediately when no load is in flight.
-    /// `isModelLoadInFlight` is `false` the instant this returns.
-    public func awaitModelLoadSettled() async {
-        let task = stateLock.withLock { _activeLoadTask }
-        do {
-            _ = try await task?.value
-        } catch {
-            Self.logger.debug("LlamaReranker.awaitModelLoadSettled: settled with error (already surfaced to caller): \(error)")
-        }
+  /// Suspends until any in-flight native reranker load has truly finished —
+  /// whether it completed normally, failed, or unwound cooperatively via
+  /// `cancelModelLoad()`. Returns immediately when no load is in flight.
+  /// `isModelLoadInFlight` is `false` the instant this returns.
+  public func awaitModelLoadSettled() async {
+    let task = stateLock.withLock { _activeLoadTask }
+    do {
+      _ = try await task?.value
+    } catch {
+      Self.logger.debug(
+        "LlamaReranker.awaitModelLoadSettled: settled with error (already surfaced to caller): \(error)"
+      )
     }
+  }
 }
 
 // MARK: - RerankerError
 
 public enum RerankerError: LocalizedError {
-    case modelNotLoaded
-    case modelLoadFailed(underlying: Error)
-    case scoringFailed(underlying: Error)
+  case modelNotLoaded
+  case modelLoadFailed(underlying: Error)
+  case scoringFailed(underlying: Error)
 
-    public var errorDescription: String? {
-        switch self {
-        case .modelNotLoaded:
-            return "Reranker model is not loaded."
-        case .modelLoadFailed(let underlying):
-            return "Reranker model load failed: \(underlying.localizedDescription)"
-        case .scoringFailed(let underlying):
-            return "Reranker scoring failed: \(underlying.localizedDescription)"
-        }
+  public var errorDescription: String? {
+    switch self {
+    case .modelNotLoaded:
+      return "Reranker model is not loaded."
+    case .modelLoadFailed(let underlying):
+      return "Reranker model load failed: \(underlying.localizedDescription)"
+    case .scoringFailed(let underlying):
+      return "Reranker scoring failed: \(underlying.localizedDescription)"
     }
+  }
 }

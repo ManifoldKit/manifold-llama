@@ -1,8 +1,8 @@
-import XCTest
 import ManifoldInference
-import ManifoldTestSupport
 import ManifoldLlama
 @_spi(Testing) import ManifoldLlama
+import ManifoldTestSupport
+import XCTest
 
 /// Regression coverage for the `top_k` consumption fix.
 ///
@@ -19,70 +19,77 @@ import ManifoldLlama
 /// Requires Apple Silicon and a real GGUF — gated and skipped otherwise.
 final class LlamaTopKConsumptionTests: XCTestCase {
 
-    override func setUp() async throws {
-        try await super.setUp()
-        try XCTSkipUnless(HardwareRequirements.isPhysicalDevice,
-                          "LlamaBackend requires Metal (unavailable in simulator)")
-        try XCTSkipUnless(HardwareRequirements.isAppleSilicon,
-                          "LlamaBackend requires Apple Silicon")
+  override func setUp() async throws {
+    try await super.setUp()
+    try XCTSkipUnless(
+      HardwareRequirements.isPhysicalDevice,
+      "LlamaBackend requires Metal (unavailable in simulator)")
+    try XCTSkipUnless(
+      HardwareRequirements.isAppleSilicon,
+      "LlamaBackend requires Apple Silicon")
+  }
+
+  /// `topK = 1` collapses sampling to greedy — output is identical across seeds.
+  func test_topK1_isGreedyAcrossSeeds() async throws {
+    guard let modelURL = HardwareRequirements.findGGUFModel() else {
+      throw XCTSkip(
+        "No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test."
+      )
     }
 
-    /// `topK = 1` collapses sampling to greedy — output is identical across seeds.
-    func test_topK1_isGreedyAcrossSeeds() async throws {
-        guard let modelURL = HardwareRequirements.findGGUFModel() else {
-            throw XCTSkip("No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test.")
-        }
+    let backend = LlamaBackend()
+    addTeardownBlock { await backend.unloadAndWait() }
+    try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
 
-        let backend = LlamaBackend()
-        addTeardownBlock { await backend.unloadAndWait() }
-        try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
+    var configA = GenerationConfig(temperature: 1.0, topK: 1, maxOutputTokens: 24)
+    configA.seed = 42
+    // Disable thinking: `findGGUFModel()` may pick a reasoning model (Qwen3-0.6B)
+    // whose longer thinking phase widens the back-to-back generation window. The
+    // greedy property under test (topK=1 ⇒ identical streams across seeds) is
+    // about sampler selection, not the thinking transform — keep the compared
+    // output to the visible stream so the assertion is model-shape independent.
+    configA.maxThinkingTokens = 0
+    var configB = configA
+    configB.seed = 1337
 
-        var configA = GenerationConfig(temperature: 1.0, topK: 1, maxOutputTokens: 24)
-        configA.seed = 42
-        // Disable thinking: `findGGUFModel()` may pick a reasoning model (Qwen3-0.6B)
-        // whose longer thinking phase widens the back-to-back generation window. The
-        // greedy property under test (topK=1 ⇒ identical streams across seeds) is
-        // about sampler selection, not the thinking transform — keep the compared
-        // output to the visible stream so the assertion is model-shape independent.
-        configA.maxThinkingTokens = 0
-        var configB = configA
-        configB.seed = 1337
+    let outputA = try await collectTokens(
+      backend: backend, prompt: "Tell me a fact:", config: configA)
+    backend.resetConversation()
+    let outputB = try await collectTokens(
+      backend: backend, prompt: "Tell me a fact:", config: configB)
 
-        let outputA = try await collectTokens(backend: backend, prompt: "Tell me a fact:", config: configA)
-        backend.resetConversation()
-        let outputB = try await collectTokens(backend: backend, prompt: "Tell me a fact:", config: configB)
+    XCTAssertFalse(outputA.isEmpty, "Greedy sampling must still produce tokens")
+    XCTAssertEqual(
+      outputA, outputB,
+      "topK=1 forces greedy sampling — different seeds must produce identical streams. "
+        + "Got A=\(outputA.debugDescription) B=\(outputB.debugDescription). "
+        + "If this fails, topK is being ignored and the hardcoded top_k=40 is back.")
+  }
 
-        XCTAssertFalse(outputA.isEmpty, "Greedy sampling must still produce tokens")
-        XCTAssertEqual(outputA, outputB,
-                       "topK=1 forces greedy sampling — different seeds must produce identical streams. "
-                     + "Got A=\(outputA.debugDescription) B=\(outputB.debugDescription). "
-                     + "If this fails, topK is being ignored and the hardcoded top_k=40 is back.")
+  // MARK: - Helpers
+
+  private func collectTokens(
+    backend: LlamaBackend,
+    prompt: String,
+    config: GenerationConfig
+  ) async throws -> String {
+    let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: config)
+    var text = ""
+    for try await event in stream.events {
+      if case .token(let chunk) = event {
+        text += chunk
+      }
     }
-
-    // MARK: - Helpers
-
-    private func collectTokens(
-        backend: LlamaBackend,
-        prompt: String,
-        config: GenerationConfig
-    ) async throws -> String {
-        let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: config)
-        var text = ""
-        for try await event in stream.events {
-            if case .token(let chunk) = event {
-                text += chunk
-            }
-        }
-        // The stream's terminal element fires from `continuation.finish()`, but
-        // `LlamaBackend` clears `isGenerating` in the generation task's `defer`,
-        // which has no happens-before relationship with this consumer loop exiting.
-        // Draining the stream is NOT sufficient to guarantee the next generate()
-        // won't race the defer and throw `.alreadyGenerating` — observed when a
-        // longer (thinking-capable) model widens the window. Await the in-flight
-        // task to settle so the defer has run and `isGenerating == false` before
-        // the caller starts the second generation. This mirrors the documented
-        // contract on `awaitGenerationSettled()` and LlamaSeedDeterminismTests.
-        await backend.awaitGenerationSettled()
-        return text
-    }
+    // The stream's terminal element fires from `continuation.finish()`, but
+    // `LlamaBackend` clears `isGenerating` in the generation task's `defer`,
+    // which has no happens-before relationship with this consumer loop exiting.
+    // Draining the stream is NOT sufficient to guarantee the next generate()
+    // won't race the defer and throw `.alreadyGenerating` — observed when a
+    // longer (thinking-capable) model widens the window. Await the in-flight
+    // task to settle so the defer has run and `isGenerating == false` before
+    // the caller starts the second generation. This mirrors the documented
+    // contract on `awaitGenerationSettled()` and LlamaSeedDeterminismTests.
+    await backend.awaitGenerationSettled()
+    return text
+  }
 }

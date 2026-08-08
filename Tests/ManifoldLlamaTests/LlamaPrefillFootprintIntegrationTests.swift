@@ -1,12 +1,12 @@
-import XCTest
-import ManifoldInference
 import ManifoldHardware
 // GGUFKVCacheEstimator was promoted to @_spi(BackendInternals) public in
 // core's C2 PR so this suite can reference it symbolically.
 @_spi(BackendInternals) import ManifoldHardware
-import ManifoldTestSupport
+import ManifoldInference
 import ManifoldLlama
 @_spi(Testing) import ManifoldLlama
+import ManifoldTestSupport
+import XCTest
 
 /// Real-model coverage for adaptive prefill footprint learning (issue #1592).
 ///
@@ -26,60 +26,67 @@ import ManifoldLlama
 /// `PrefillFootprintEstimator.wouldExceedHeadroom`.
 final class LlamaPrefillFootprintIntegrationTests: XCTestCase {
 
-    override func setUp() async throws {
-        try await super.setUp()
-        try XCTSkipUnless(HardwareRequirements.isPhysicalDevice,
-                          "LlamaBackend requires Metal (unavailable in simulator)")
-        try XCTSkipUnless(HardwareRequirements.isAppleSilicon,
-                          "LlamaBackend requires Apple Silicon")
+  override func setUp() async throws {
+    try await super.setUp()
+    try XCTSkipUnless(
+      HardwareRequirements.isPhysicalDevice,
+      "LlamaBackend requires Metal (unavailable in simulator)")
+    try XCTSkipUnless(
+      HardwareRequirements.isAppleSilicon,
+      "LlamaBackend requires Apple Silicon")
+  }
+
+  func test_prefill_learnsAStablePerTokenEstimate() async throws {
+    guard let modelURL = HardwareRequirements.findGGUFModel() else {
+      throw XCTSkip(
+        "No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test."
+      )
     }
 
-    func test_prefill_learnsAStablePerTokenEstimate() async throws {
-        guard let modelURL = HardwareRequirements.findGGUFModel() else {
-            throw XCTSkip("No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this test.")
-        }
+    let backend = LlamaBackend()
+    addTeardownBlock { await backend.unloadAndWait() }
+    try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))
 
-        let backend = LlamaBackend()
-        addTeardownBlock { await backend.unloadAndWait() }
-        try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))
+    XCTAssertNil(
+      backend.lastMeasuredBytesPerToken,
+      "No estimate should exist before any prefill has run"
+    )
 
-        XCTAssertNil(
-            backend.lastMeasuredBytesPerToken,
-            "No estimate should exist before any prefill has run"
-        )
+    // A few hundred prompt tokens allocate enough KV during prefill for a
+    // measurable, reliably positive resident delta.
+    let prompt = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 40)
+    var config = GenerationConfig(maxOutputTokens: 8)
+    config.seed = 7
 
-        // A few hundred prompt tokens allocate enough KV during prefill for a
-        // measurable, reliably positive resident delta.
-        let prompt = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 40)
-        var config = GenerationConfig(maxOutputTokens: 8)
-        config.seed = 7
+    let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: config)
+    for try await _ in stream.events {}
 
-        let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: config)
-        for try await _ in stream.events {}
-
-        // The wiring fed the prefill chunk delta into the estimator and surfaced it.
-        // If the run happened to net a reclaim (estimate nil), that is a real signal
-        // worth seeing rather than a faked convergence — fail loudly with context.
-        let learned = backend.lastMeasuredBytesPerToken
-        if let learned {
-            XCTAssertGreaterThan(learned, 0, "A learned per-token cost must be positive")
-            // Feed it into a fresh plan and confirm it is actually consumable as a
-            // measured budget — the cross-load feedback contract.
-            let measuredPlan = ModelLoadPlan.compute(inputs: ModelLoadPlan.Inputs(
-                modelFileSize: 0,
-                memoryStrategy: .external,
-                requestedContextSize: 1_000_000_000,
-                trainedContextLength: nil,
-                kvBytesPerToken: GGUFKVCacheEstimator.legacyFallbackBytesPerToken,
-                availableMemoryBytes: 1_000_000_000,
-                physicalMemoryBytes: 16 * 1_073_741_824,
-                absoluteContextCeiling: 128_000,
-                headroomFraction: 0.40,
-                measuredBytesPerToken: learned
-            ))
-            XCTAssertGreaterThan(measuredPlan.effectiveContextSize, 0)
-        } else {
-            throw XCTSkip("Net reclaim observed across all chunks — device under memory pressure; re-run on an unconstrained host to confirm wiring")
-        }
+    // The wiring fed the prefill chunk delta into the estimator and surfaced it.
+    // If the run happened to net a reclaim (estimate nil), that is a real signal
+    // worth seeing rather than a faked convergence — fail loudly with context.
+    let learned = backend.lastMeasuredBytesPerToken
+    if let learned {
+      XCTAssertGreaterThan(learned, 0, "A learned per-token cost must be positive")
+      // Feed it into a fresh plan and confirm it is actually consumable as a
+      // measured budget — the cross-load feedback contract.
+      let measuredPlan = ModelLoadPlan.compute(
+        inputs: ModelLoadPlan.Inputs(
+          modelFileSize: 0,
+          memoryStrategy: .external,
+          requestedContextSize: 1_000_000_000,
+          trainedContextLength: nil,
+          kvBytesPerToken: GGUFKVCacheEstimator.legacyFallbackBytesPerToken,
+          availableMemoryBytes: 1_000_000_000,
+          physicalMemoryBytes: 16 * 1_073_741_824,
+          absoluteContextCeiling: 128_000,
+          headroomFraction: 0.40,
+          measuredBytesPerToken: learned
+        ))
+      XCTAssertGreaterThan(measuredPlan.effectiveContextSize, 0)
+    } else {
+      throw XCTSkip(
+        "Net reclaim observed across all chunks — device under memory pressure; re-run on an unconstrained host to confirm wiring"
+      )
     }
+  }
 }

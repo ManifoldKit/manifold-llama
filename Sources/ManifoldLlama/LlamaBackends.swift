@@ -13,14 +13,14 @@ import ManifoldInference
 /// let kit = try await ManifoldKit.quickStart(backends: [LlamaBackends.self])
 /// ```
 public enum LlamaBackends: BackendRegistrar {
-    @MainActor
-    public static func register(with service: InferenceService) {
-        service.registerBackendFactory { modelType in
-            switch modelType {
-            case .gguf: return LlamaBackend()
-            default:    return nil
-            }
-        }
-        service.declareSupport(for: .gguf)
+  @MainActor
+  public static func register(with service: InferenceService) {
+    service.registerBackendFactory { modelType in
+      switch modelType {
+      case .gguf: return LlamaBackend()
+      default: return nil
+      }
     }
+    service.declareSupport(for: .gguf)
+  }
 }
