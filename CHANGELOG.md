@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.4](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.3...v0.4.4) (2026-08-08)
+
+
+### Features
+
+* **ci:** supply-chain posture — permissions, CodeQL, dependency review ([#187](https://github.com/ManifoldKit/manifold-llama/issues/187)) ([89bbdf6](https://github.com/ManifoldKit/manifold-llama/commit/89bbdf6dd9a534468d0bdb30a53dfd8c12264f72))
+
+
+### Bug Fixes
+
+* **tools:** add --emit-records to manifold-tools-llama ([#183](https://github.com/ManifoldKit/manifold-llama/issues/183)) ([a121210](https://github.com/ManifoldKit/manifold-llama/commit/a121210140b7ed226060c33e37abaddbaddebaff))
+* **tools:** stop decoy padding from inflating the scored requiredTools set ([#185](https://github.com/ManifoldKit/manifold-llama/issues/185)) ([5967fa5](https://github.com/ManifoldKit/manifold-llama/commit/5967fa51d725860aa8b88b84b1a77d32e8ab705b))
+
 ## [0.4.3](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.2...v0.4.3) (2026-07-28)
 
 
