@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.7](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.6...v0.4.7) (2026-09-10)
+
+### Highlights
+
+**Tracks ManifoldKit 0.78.0** — a compatibility republish for the new core minor.
+The pin update passed the automated build/test workflow; this release adds no backend functionality.
+
+### Dependencies
+
+* Bump ManifoldKit pin to v0.78.0 ([ce0395d](https://github.com/ManifoldKit/manifold-llama/commit/ce0395d097678195e2840e339b27588a1b4d2b3a))
+
 ## [0.4.6](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.5...v0.4.6) (2026-09-06)
 
 ### Highlights
