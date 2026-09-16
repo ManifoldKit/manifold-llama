@@ -126,8 +126,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   /// as `inputTokenIds` in the `RawRun` record so the manifold-eval
   /// differential harness can compare the tokenization of the same GGUF string
   /// across backends (llama.cpp vs Ollama). Mirrors `generate()`'s
-  /// snapshot-under-`stateLock` discipline (see the tokenize call there) so the
-  /// vocab read cannot race `unloadModel()` niling the pointer. Returns `[]`
+  /// lock-through-lookup discipline so unload cannot free the owning model
+  /// while tokenization is reading its vocabulary. Returns `[]`
   /// when no model (and hence no vocab) is loaded.
   ///
   /// `@_spi(Testing)` rather than fully public: it mirrors the existing
@@ -135,8 +135,17 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   /// eval-runner kit and its tests via `@_spi(Testing) import ManifoldLlama`,
   /// not by the library's stable public API.
   @_spi(Testing) public func inputTokenIds(forPrompt prompt: String) -> [Int] {
-    guard let vocab = withStateLock({ vocab }) else { return [] }
-    return LlamaTokenization.tokenize(prompt, vocab: vocab, addBos: true).map(Int.init)
+    withStateLock {
+      guard let vocab else { return [] }
+      return tokenizePromptLocked(prompt, vocab: vocab).map(Int.init)
+    }
+  }
+
+  /// Caller holds stateLock for the entire lookup. Both generation and eval
+  /// use the same tokenizer (including its test seam) and model lifetime.
+  private func tokenizePromptLocked(_ prompt: String, vocab: OpaquePointer) -> [llama_token] {
+    if let seam = _generationSeam { return seam.tokenize(prompt, vocab) }
+    return LlamaTokenization.tokenize(prompt, vocab: vocab, addBos: true)
   }
 
   /// Per-token resident cost (bytes) learned from the most recent prefill via
@@ -662,7 +671,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
       )
     }
 
-    guard isModelLoaded, context != nil, vocab != nil, model != nil else {
+    guard withStateLock({ isModelLoaded && context != nil && vocab != nil && model != nil }) else {
       throw InferenceError.inferenceFailure("No model loaded")
     }
     guard !withStateLock({ isGenerating }) else {
@@ -675,25 +684,17 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     // after the flip, callers who retry on `.contextExhausted` would see
     // an unnecessary `.alreadyGenerating` on the next call.
     //
-    // Snapshot vocab under stateLock before handing it to LlamaTokenization:
-    // without this, the read races with unloadModel() niling `self.vocab`
-    // and freeing the backing model — a use-after-free. The outer
-    // `vocab != nil` check is advisory (Swift pointer reads are atomic at
-    // machine level) but does not survive across the unprotected tokenize().
-    guard let preflightVocab = withStateLock({ vocab }) else {
-      throw InferenceError.inferenceFailure("No model loaded")
+    // Vocabulary belongs to the model. A pointer snapshot does not retain it:
+    // hold the lock through the synchronous lookup so pressure-triggered unload
+    // cannot detach/free the model before the generation task exists to join.
+    let preflight = withStateLock { () -> ([llama_token], LlamaGenerationSeam?)? in
+      guard let vocab else { return nil }
+      let seam = _generationSeam
+      let tokens = tokenizePromptLocked(prompt, vocab: vocab)
+      return (tokens, seam)
     }
-    // Test seam (#165): the tokenize call is one of exactly two places
-    // `generate()` touches llama.cpp, so it has to be swappable for the
-    // Task body below to be reachable without a real vocab. Explicit
-    // `if`/`else` into a `let`, not a ternary over closures — see the
-    // hook construction inside the Task for the compiler-crash rationale.
-    let generationSeam = withStateLock { _generationSeam }
-    let tokens: [llama_token]
-    if let generationSeam {
-      tokens = generationSeam.tokenize(prompt, preflightVocab)
-    } else {
-      tokens = LlamaTokenization.tokenize(prompt, vocab: preflightVocab, addBos: true)
+    guard let (tokens, generationSeam) = preflight else {
+      throw InferenceError.inferenceFailure("No model loaded")
     }
     guard !tokens.isEmpty else {
       throw InferenceError.inferenceFailure("Failed to tokenize prompt")
@@ -875,9 +876,11 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
       // inline expression in the call below) to sidestep a compiler
       // diagnostic-generation crash observed with both of those forms.
       var onTokenHook: (@Sendable () -> Void)?
+      var onGeneratedTokenHook: (@Sendable () -> Void)?
       var onErrorHook: (@Sendable (String) -> Void)?
       if metricsEnabled {
         onTokenHook = { metricTracker.recordToken() }
+        onGeneratedTokenHook = { metricTracker.recordGeneratedToken() }
         onErrorHook = { label in metricTracker.recordError(label) }
       }
       let kvCoherent = await driver.run(
@@ -901,6 +904,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
           }
         },
         onToken: onTokenHook,
+        onGeneratedToken: onGeneratedTokenHook,
         onError: onErrorHook
       )
       // A decode failure leaves the C KV cache in an undefined state.
@@ -934,6 +938,10 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   /// the flag has flipped back to `false`. Issuing the next `generate(...)`
   /// immediately can therefore race the defer and trip `.alreadyGenerating`.
   ///
+  /// Also joins a generation transferred to pending unload cleanup. Cancellation
+  /// and stream termination request a stop; neither proves native quiescence.
+  /// Callers must serialize new generation/load requests with this wait.
+  ///
   /// Await this between back-to-back generations on the same loaded model when
   /// deterministic readiness matters (the determinism tests, programmatic
   /// regenerate loops). It awaits the same `Task` whose `defer` releases the
@@ -941,23 +949,18 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   /// unloading the model — unlike ``unloadAndWait()``, the loaded context and
   /// KV state are preserved for the next turn.
   public func awaitGenerationSettled() async {
-    let task = withStateLock { generationTask }
-    await task?.value
+    let tasks = withStateLock { (generationTask, cleanupTask) }
+    await tasks.0?.value
+    await tasks.1?.value
   }
 
   public func stopGeneration() {
     // Set the atomic flag first so the decode loop can break on its very next
     // iteration check — even before the lock is acquired below.
     cancelled.store(true, ordering: .sequentiallyConsistent)
-    // Capture and nil-out generationTask under stateLock. generationTask is
-    // a mutable var guarded by stateLock everywhere else (generate() assigns
-    // it under the lock, unloadModel() captures it under the lock). Accessing
-    // it here without the lock would be a data race under TSan.
-    let taskToCancel = withStateLock {
-      let t = generationTask
-      generationTask = nil
-      return t
-    }
+    // Cancellation requests do not relinquish ownership. The task may still
+    // be decoding in C; settle and unload must retain a handle they can join.
+    let taskToCancel = withStateLock { generationTask }
     taskToCancel?.cancel()
   }
 
@@ -1016,7 +1019,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     activeLoadToken = nextLoadToken
 
     let previousCleanup = cleanupTask
-    cleanupTask = nil
     let capturedTask = generationTask
     let capturedContext = context
     let capturedModel = model
@@ -1041,16 +1043,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     // running). The task's own defer skips clearing (bumped activeLoadToken)
     // so the reference stays valid until the next loadModel overwrites it.
     _isModelLoadInFlight = false
-    stateLock.unlock()
-
-    capturedTask?.cancel()
-
-    Self.logger.info("Llama backend unloaded")
-
     guard capturedTask != nil || capturedContext != nil || capturedModel != nil else {
-      withStateLock {
-        cleanupTask = previousCleanup
-      }
+      stateLock.unlock()
       return
     }
 
@@ -1087,9 +1081,13 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
       if let mdl = capturedModel { llama_model_free(mdl) }
       LlamaBackendProcessLifecycle.release()
     }
-    withStateLock {
-      self.cleanupTask = newCleanupTask
-    }
+    // Publish ownership before releasing the lock. Concurrent unloads and
+    // waiters must never see a gap between detaching pointers and registering
+    // the task that still owns them.
+    self.cleanupTask = newCleanupTask
+    stateLock.unlock()
+    capturedTask?.cancel()
+    Self.logger.info("Llama backend unloaded")
   }
 
   /// Schedules the same tear-down as `unloadModel()` and awaits completion of
@@ -1114,11 +1112,9 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   // MARK: - Cleanup
 
   private func waitForPendingCleanup() async {
-    let task = withStateLock {
-      let task = cleanupTask
-      cleanupTask = nil
-      return task
-    }
+    // Keep the handle for every waiter, including reload and repeated unload.
+    // A waiter observing the task must not consume another caller's join.
+    let task = withStateLock { cleanupTask }
     await task?.value
   }
 }
@@ -1160,14 +1156,12 @@ extension LlamaBackend: TokenizerVendor, TokenizerProvider {
   /// Falls back to the 4-chars-per-token heuristic if no vocabulary is loaded.
   /// Callers should prefer accessing this through `InferenceService.tokenizer`.
   public func tokenCount(_ text: String) -> Int {
-    // Snapshot vocab under stateLock to avoid a use-after-free race with
-    // unloadModel() — mirrors the `countTokens(_:)` pattern below.
-    guard let currentVocab = withStateLock({ vocab }) else {
-      return HeuristicTokenizer.tokenCount(text)
+    withStateLock {
+      guard let vocab else { return HeuristicTokenizer.tokenCount(text) }
+      let tokens = LlamaTokenization.tokenize(
+        text, vocab: vocab, addBos: false, parseSpecial: false)
+      return tokens.isEmpty ? HeuristicTokenizer.tokenCount(text) : tokens.count
     }
-    let tokens = LlamaTokenization.tokenize(
-      text, vocab: currentVocab, addBos: false, parseSpecial: false)
-    return tokens.isEmpty ? HeuristicTokenizer.tokenCount(text) : tokens.count
   }
 }
 
@@ -1184,13 +1178,10 @@ extension LlamaBackend: TokenCountingBackend {
   /// - Note: Call only after a successful `loadModel`. The model pointer is guarded
   ///   under `stateLock` to prevent a use-after-free race with `unloadModel()`.
   public func countTokens(_ text: String) throws -> Int {
-    // Snapshot the vocab pointer under stateLock and use it directly for
-    // llama_tokenize. Without this snapshot, calling tokenize() outside the
-    // lock would re-read `self.vocab` and race with unloadModel() setting it
-    // to nil and freeing the backing model — a use-after-free crash.
-    // Holding the lock only for the snapshot (not the whole C call) keeps
-    // `unloadModel()` responsive while still preventing the race.
-    guard let currentVocab = withStateLock({ vocab }) else {
+    // Retain model ownership until the synchronous C lookup returns.
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    guard let currentVocab = vocab else {
       throw InferenceError.inferenceFailure("countTokens called before model was loaded")
     }
     let utf8 = text.utf8CString

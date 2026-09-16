@@ -189,6 +189,9 @@ import os
     // non-error completion — consistent with `finishDecodeFailure` never
     // being reached on that path either.
     onToken: (@Sendable () -> Void)? = nil,
+    // Raw non-EOG samples, including tool syntax, reasoning and partial UTF-8.
+    // Separate from visible timing: transforms can buffer or split one sample.
+    onGeneratedToken: (@Sendable () -> Void)? = nil,
     onError: (@Sendable (String) -> Void)? = nil
   ) async -> Bool {
     Self.logger.debug("LlamaGenerationDriver run started")
@@ -531,6 +534,7 @@ import os
     // phase and never emits any visible output (see issue #519 regression: Qwen3-0.6B
     // exhausted a 256-token budget in <think>…</think> and never reached EOG).
     var visibleTokenCount = 0
+    var generatedTokenCount = 0
     // Total loop iterations = visible budget + thinking budget. When thinking is
     // disabled (useParser == false) the thinking budget is 0, so the loop cap equals
     // maxTokens exactly — identical to the previous behaviour for non-thinking models.
@@ -604,6 +608,8 @@ import os
       let token = engine.sample(sampler, logitIndex: logitIndex)
 
       if engine.isEndOfGeneration(token) { break }
+      generatedTokenCount += 1
+      onGeneratedToken?()
 
       // Decode token to text and route through ThinkingTransform when active.
       if let text = engine.tokenToString(token, invalidUTF8Buffer: &invalidUTF8) {
@@ -753,9 +759,9 @@ import os
     // Emit usage only on a complete turn — not when the loop exited due to
     // cancellation (user-initiated stop mid-stream is not a finished turn).
     if !exitedDueToCancellation {
-      onUsage?(tokens.count, visibleTokenCount)
+      onUsage?(tokens.count, generatedTokenCount)
       continuation.yield(
-        .usage(TokenUsage(promptTokens: tokens.count, completionTokens: visibleTokenCount)))
+        .usage(TokenUsage(promptTokens: tokens.count, completionTokens: generatedTokenCount)))
     }
     continuation.finish()
     return true

@@ -19,11 +19,8 @@ final class LlamaMetricTracker: @unchecked Sendable {
   private var firstTokenInstant: ContinuousClock.Instant?
   private var lastTokenInstant: ContinuousClock.Instant?
   private var interTokenGapsNs: [Int64] = []
-  /// Count of visible `.token` events observed (excludes `.thinkingToken`,
-  /// per `InferenceMetric.timeToFirstToken`'s documented exclusion). Used as
-  /// the `completionTokens` value for every emitted metric — including
-  /// failure paths, where it reports however many tokens streamed before
-  /// the failure.
+  /// Raw non-EOG samples, independent of visible output timing. Includes
+  /// reasoning, tool syntax and partial UTF-8, even on failure/cancellation.
   private var tokenCount = 0
   /// First failure label recorded via ``recordError(_:)``, or `nil` on a
   /// clean run. Only the first call wins — driver failure sites are
@@ -61,6 +58,11 @@ final class LlamaMetricTracker: @unchecked Sendable {
       interTokenGapsNs.append(now >= last ? Self.nanoseconds(of: now - last) : 0)
     }
     lastTokenInstant = now
+  }
+
+  func recordGeneratedToken() {
+    lock.lock()
+    defer { lock.unlock() }
     tokenCount += 1
   }
 

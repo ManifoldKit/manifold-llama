@@ -8,8 +8,7 @@ import XCTest
 /// (headless, tests `LlamaMetricTracker.emitMetric` directly) cannot reach:
 /// deleting the `emitMetric(...)` call inside `generate()`'s `defer`,
 /// hardcoding `metricsEnabled = false`, deleting the `onToken:` argument at
-/// the `driver.run(...)` call site, or deleting `onToken?()` inside the
-/// driver's `.token` case. All of those require a real generation to
+/// the `driver.run(...)` call site, or deleting `onGeneratedToken?()` after sampling. All of those require a real generation to
 /// actually run for their absence to be observable.
 ///
 /// This suite is a HAPPY-PATH turn only, so it does NOT reach the backend's
@@ -29,15 +28,15 @@ final class LlamaBackendMetricSinkE2ETests: XCTestCase {
   /// A real `generate()` call, with a stub sink installed, must deliver
   /// EXACTLY ONE plausible `InferenceMetric`: positive TTFT (a real decode
   /// takes measurable wall-clock time), `completionTokens` matching the
-  /// number of `.token` events actually observed on the stream,
+  /// raw non-EOG samples reported in usage,
   /// `promptTokens` > 0, `errorClass` nil (a clean successful turn), and
   /// `provider == "llama"`.
   ///
   /// A sabotage that deleted the `emitMetric(...)` call in `generate()`'s
   /// `defer`, hardcoded `metricsEnabled = false`, or dropped `onToken:` at
   /// the `driver.run(...)` call site would each be caught here by an
-  /// empty/zero-shaped metric or no metric at all. Dropping `onToken?()`
-  /// inside the driver's `.token` case is caught by `completionTokens ==
+  /// empty/zero-shaped metric or no metric at all. Dropping `onGeneratedToken?()`
+  /// after sampling is caught by `completionTokens ==
   /// 0` while `tokenEventCount > 0`. Dropping `onError:` at the
   /// `driver.run(...)` call site is NOT caught here — this is a clean
   /// successful turn, so `errorClass == nil` regardless of whether
@@ -88,8 +87,8 @@ final class LlamaBackendMetricSinkE2ETests: XCTestCase {
     XCTAssertEqual(metric.provider, "llama")
     XCTAssertGreaterThan(metric.promptTokens, 0, "the tokenized prompt must be non-empty")
     XCTAssertEqual(
-      metric.completionTokens, tokenEventCount,
-      "completionTokens must match the number of .token events actually observed on the stream")
+      metric.completionTokens, try XCTUnwrap(backend.lastUsage).completionTokens,
+      "completionTokens must match raw backend usage, including reasoning")
     XCTAssertGreaterThan(
       metric.timeToFirstToken, .zero,
       "a real decode takes measurable wall-clock time before the first token")
