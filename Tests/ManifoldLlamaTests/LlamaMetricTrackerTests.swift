@@ -33,20 +33,27 @@ final class LlamaMetricTrackerTests: XCTestCase {
 
   // MARK: - Token accounting
 
-  /// `completionTokens` on the built metric must equal the number of
-  /// `recordToken()` calls — this is the only source of truth for
-  /// completion-token count (see `LlamaBackend.generate()`, which does not
-  /// thread the driver's separate `onUsage` completion count into the
-  /// metric). A sabotage that dropped every other `recordToken()` call
-  /// would fail this assertion.
-  func test_recordToken_countsExactlyEachCall() {
+  /// Completion counts come from sampled tokens, independently of visible timing.
+  func test_recordGeneratedToken_countsExactlyEachCall() {
     let tracker = LlamaMetricTracker()
     tracker.start()
     for _ in 0..<5 {
+      tracker.recordGeneratedToken()
       tracker.recordToken()
     }
     let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
     XCTAssertEqual(metric.completionTokens, 5)
+  }
+
+  func test_generatedTokensWithoutVisibleOutput_countUsageWithoutTiming() {
+    let tracker = LlamaMetricTracker()
+    tracker.start()
+    tracker.recordGeneratedToken()
+    tracker.recordGeneratedToken()
+    let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 1)
+    XCTAssertEqual(metric.completionTokens, 2)
+    XCTAssertEqual(metric.timeToFirstToken, .zero)
+    XCTAssertEqual(metric.meanInterTokenLatency, .zero)
   }
 
   /// First token defines TTFT; the tracker must not report a TTFT of zero
@@ -55,6 +62,7 @@ final class LlamaMetricTrackerTests: XCTestCase {
     let tracker = LlamaMetricTracker()
     tracker.start()
     Thread.sleep(forTimeInterval: 0.02)
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
     XCTAssertGreaterThan(metric.timeToFirstToken, .zero)
@@ -65,6 +73,7 @@ final class LlamaMetricTrackerTests: XCTestCase {
   func test_recordToken_singleToken_zeroMeanInterTokenLatency() {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
     XCTAssertEqual(metric.meanInterTokenLatency, .zero)
@@ -128,10 +137,13 @@ final class LlamaMetricTrackerTests: XCTestCase {
   func test_recordToken_multipleTokens_meanInterTokenLatencyMatchesKnownGaps() {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     Thread.sleep(forTimeInterval: 0.1)
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     Thread.sleep(forTimeInterval: 0.2)
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 0)
 
@@ -213,7 +225,9 @@ final class LlamaMetricTrackerTests: XCTestCase {
   func test_recordError_afterTokens_preservesBothTokenCountAndErrorClass() {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     tracker.recordError("decodeFailed")
     let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 3)
@@ -228,6 +242,7 @@ final class LlamaMetricTrackerTests: XCTestCase {
   func test_buildMetric_cachedPromptTokensAlwaysZero() {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let metric = tracker.buildMetric(provider: "llama", model: "m", promptTokens: 999)
     XCTAssertEqual(metric.cachedPromptTokens, 0)

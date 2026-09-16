@@ -19,13 +19,13 @@ final class LlamaBackendTraceSinkE2ETests: XCTestCase {
 
   /// Trace-sink-only configuration: `metricSink = nil`, `traceSink` set.
   /// A real `generate()` must deliver exactly one `.llm` span whose
-  /// `usage.completion_tokens` matches the observed `.token` count.
+  /// `usage.completion_tokens` matches raw backend usage.
   ///
   /// Sabotages caught here:
   /// - Dropping `traceSink:` at the emit call site → zero spans
   /// - Gating `metricsEnabled` on metric sink alone → span with
   ///   `completion_tokens == 0` while `tokenEventCount > 0` (the core trap)
-  /// - Dropping `onToken:` / `onToken?()` → same zero-completion shape
+  /// - Dropping `onGeneratedToken:` / `onGeneratedToken?()` → same zero-completion shape
   func test_generate_traceOnly_emitsExactlyOnePlausibleSpan() async throws {
     try XCTSkipUnless(
       HardwareRequirements.isPhysicalDevice,
@@ -77,8 +77,8 @@ final class LlamaBackendTraceSinkE2ETests: XCTestCase {
     XCTAssertEqual(span.attributes[GenAIAttributeKeys.system], .string("llama"))
     XCTAssertEqual(
       span.attributes[GenAIAttributeKeys.usageCompletionTokens],
-      .int(tokenEventCount),
-      "completion_tokens must match observed .token events; zero here with tokenEventCount > 0 means metricsEnabled ignored the trace sink"
+      .int(try XCTUnwrap(backend.lastUsage).completionTokens),
+      "completion_tokens must match raw usage, including reasoning; zero means the trace-only tracker was not wired"
     )
     if case .int(let promptTokens)? = span.attributes[GenAIAttributeKeys.usagePromptTokens] {
       XCTAssertGreaterThan(promptTokens, 0, "tokenized prompt must be non-empty")

@@ -48,19 +48,23 @@ final class LlamaBackendBenchmark: XCTestCase {
     let config = GenerationConfig(temperature: 0.3, maxOutputTokens: benchTokens)
     let t0 = ContinuousClock.now
     var t1: ContinuousClock.Instant?
-    var count = 0
+    var usage: TokenUsage?
     let stream = try backend.generate(prompt: benchPrompt, systemPrompt: nil, config: config)
     for try await event in stream.events {
       if case .token = event {
         if t1 == nil { t1 = ContinuousClock.now }
-        count += 1
       }
+      if case .usage(let value) = event { usage = value }
     }
+    await backend.awaitGenerationSettled()
+    let count = try XCTUnwrap(usage).completionTokens
     let t2 = ContinuousClock.now
     func ms(_ d: Duration) -> Double {
       Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15
     }
-    guard let first = t1 else { return (0, ms(t2 - t0), 0) }
+    // Raw throughput includes reasoning/tool tokens; TTFT remains visible.
+    // A reasoning-only turn still performed measured native decode work.
+    guard let first = t1 else { return (0, ms(t2 - t0), count) }
     return (ms(first - t0), ms(t2 - t0), count)
   }
 
@@ -69,6 +73,7 @@ final class LlamaBackendBenchmark: XCTestCase {
     // Warmup
     let warmup = try backend.generate(prompt: benchPrompt, systemPrompt: nil, config: config)
     for try await _ in warmup.events {}
+    await backend.awaitGenerationSettled()
     backend.resetConversation()
 
     var results: [(ttftMs: Double, totalMs: Double, tokens: Int)] = []

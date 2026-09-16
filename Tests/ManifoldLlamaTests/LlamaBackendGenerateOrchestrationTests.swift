@@ -26,7 +26,7 @@ import XCTest
 /// | delete the `emitMetric(...)` call | `test_generate_emitsExactlyOneMetricOfExpectedShape` (no metric arrives) |
 /// | hardcode `metricsEnabled = false` | same test (`completionTokens == 0`, tracker never started) |
 /// | delete `onToken:` / `onError:` at the `driver.run(...)` call site | same test / `test_generate_promptDecodeFailure_...` |
-/// | delete `onToken?()` in the driver's `.token` case | same test (`completionTokens == 0`) |
+/// | delete `onGeneratedToken?()` after sampling | same test (`completionTokens == 0`) |
 /// | pass a wrong `provider` / `model` / `promptTokens` | same test (each is asserted against an independently known value) |
 final class LlamaBackendGenerateOrchestrationTests: XCTestCase {
 
@@ -120,8 +120,8 @@ final class LlamaBackendGenerateOrchestrationTests: XCTestCase {
       "promptTokens must be the tokenized prompt's count, not maxTokens or the string length")
     XCTAssertEqual(
       metric.completionTokens, 3,
-      "completionTokens comes from the tracker's onToken hook — a nil onToken: at the "
-        + "driver.run(...) call site, a deleted onToken?() in the driver's .token case, or "
+      "completionTokens comes from the tracker's onGeneratedToken hook — a nil onGeneratedToken: at the "
+        + "driver.run(...) call site, a deleted onGeneratedToken?() after sampling, or "
         + "a hardcoded metricsEnabled = false all report 0 here")
     XCTAssertNil(metric.errorClass)
     XCTAssertEqual(metric.cachedPromptTokens, 0)
@@ -165,7 +165,7 @@ final class LlamaBackendGenerateOrchestrationTests: XCTestCase {
     XCTAssertEqual(
       span.attributes[GenAIAttributeKeys.usageCompletionTokens], .int(4),
       "a trace-only configuration must still record tokens — an all-zeros span means the "
-        + "tracker was never started or onToken was never wired")
+        + "tracker was never started or onGeneratedToken was never wired")
     XCTAssertEqual(span.attributes[GenAIAttributeKeys.usagePromptTokens], .int(2))
   }
 

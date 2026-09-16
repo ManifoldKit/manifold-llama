@@ -48,6 +48,7 @@ final class ScriptedLlamaEngine: LlamaEngine, @unchecked Sendable {
   // MARK: - Script
 
   private let script: [String]
+  private let bufferedTokenIndices: Set<Int>
   private let samplerBehavior: SamplerBehavior
   /// Status codes returned by successive ``decodePromptChunk(tokens:startPosition:logitsOnLastToken:)``
   /// calls; a short array is padded with `0` (success).
@@ -60,6 +61,7 @@ final class ScriptedLlamaEngine: LlamaEngine, @unchecked Sendable {
 
   init(
     script: [String] = [],
+    bufferedTokenIndices: Set<Int> = [],
     batchSize: Int = 2048,
     contextCapacity: Int = 4096,
     samplerBehavior: SamplerBehavior = .succeed,
@@ -67,6 +69,7 @@ final class ScriptedLlamaEngine: LlamaEngine, @unchecked Sendable {
     generatedDecodeStatus: Int32 = 0
   ) {
     self.script = script
+    self.bufferedTokenIndices = bufferedTokenIndices
     self.batchSize = batchSize
     self.contextCapacity = contextCapacity
     self.samplerBehavior = samplerBehavior
@@ -154,7 +157,7 @@ final class ScriptedLlamaEngine: LlamaEngine, @unchecked Sendable {
   func tokenToString(_ token: llama_token, invalidUTF8Buffer: inout [CChar]) -> String? {
     let index = Int(token)
     guard index >= 0, index < script.count else { return nil }
-    return script[index]
+    return bufferedTokenIndices.contains(index) ? nil : script[index]
   }
 
   func decodePromptChunk(

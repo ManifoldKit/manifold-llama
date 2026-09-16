@@ -30,6 +30,32 @@ Use this document when upgrading the xcframework pin: diff `docs/vendor/llama.h`
 against the new version's header, then review every section below for contract
 changes before merging.
 
+## Cancellation, joins, and token usage
+
+`stopGeneration()` requests cancellation; it retains the generation task because
+native decode may still be running. Stream completion alone is not a join.
+Await `awaitGenerationSettled()` before generating again or resetting/wiping KV
+state. It also joins a generation transferred to unload cleanup. Callers must
+serialize new generation/load requests with their wait.
+
+`unloadModel()` detaches pointers and publishes the cleanup task under one lock.
+Synchronous preflight, eval-input-token, and token-count vocabulary lookups hold that lock through the C
+call, since a vocabulary pointer snapshot does not retain its owning model.
+Cleanup joins the retained generation before synchronizing, clearing KV,
+synchronizing again, and freeing context/model. Every cleanup waiter retains
+access to the same handle; repeated unloads and reload cannot consume each
+other's join. Memory-pressure warning requests cancellation; critical pressure
+uses this same joined unload path.
+
+Completion usage (`.usage`, `lastUsage`, and metric/trace `completionTokens`)
+counts sampled non-EOG tokens before UTF-8 and thinking/tool parsing. Reasoning,
+tool syntax, buffered bytes, and samples suppressed by repetition guards count;
+EOG does not. Parser events can combine or split samples and are not token counts.
+Visible-output and thinking budgets retain their existing behavior. TTFT and
+inter-token latency still measure visible output events; a tool-only turn can
+have positive completion usage with zero visible TTFT. Cancelled/failed turns
+retain sampled counts in their metric, but do not emit completed-turn usage.
+
 ## Symbol coverage
 
 `grep llama_ Sources/ManifoldLlama/*.swift | grep -oE "llama_[a-z_]+" | sort -u`

@@ -41,7 +41,9 @@ final class LlamaBackendTraceSinkTests: XCTestCase {
   func test_emitMetric_dispatchesExactlyOneSpanOfExpectedShape() async throws {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let sink = RecordingTraceSink()
 
@@ -102,6 +104,7 @@ final class LlamaBackendTraceSinkTests: XCTestCase {
   func test_emitMetric_bothSinksReceiveOneRecord() async throws {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let metricSink = StubMetricSink()
     let traceSink = RecordingTraceSink()
@@ -151,6 +154,7 @@ final class LlamaBackendTraceSinkTests: XCTestCase {
   func test_emitMetric_neitherSink_dispatchesNothing() {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     LlamaMetricTracker.emitMetric(
       from: tracker,

@@ -58,7 +58,9 @@ final class LlamaBackendMetricSinkTests: XCTestCase {
   func test_emitMetric_dispatchesExactlyOneMetricOfExpectedShape() async throws {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
     let sink = StubMetricSink()
 
@@ -88,6 +90,7 @@ final class LlamaBackendMetricSinkTests: XCTestCase {
   func test_emitMetric_nilSink_dispatchesNothing() {
     let tracker = LlamaMetricTracker()
     tracker.start()
+    tracker.recordGeneratedToken()
     tracker.recordToken()
 
     // No sink to observe — the contract under test is "does not crash
