@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.8](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.7...v0.4.8) (2026-09-18)
+
+
+### Bug Fixes
+
+* preserve generation lifetimes and count raw completion tokens ([#203](https://github.com/ManifoldKit/manifold-llama/issues/203)) ([b5d1de6](https://github.com/ManifoldKit/manifold-llama/commit/b5d1de633324f084cb8888d2fef6e3689d6bb722))
+* **tests:** repair llama CLI capture fixtures ([#206](https://github.com/ManifoldKit/manifold-llama/issues/206)) ([6878254](https://github.com/ManifoldKit/manifold-llama/commit/6878254803ac73b3458194cd31cb16e2a7808581))
+
 ## [0.4.7](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.6...v0.4.7) (2026-09-10)
 
 ### Highlights
