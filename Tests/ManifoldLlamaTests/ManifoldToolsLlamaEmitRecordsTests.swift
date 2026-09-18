@@ -39,31 +39,8 @@ final class ManifoldToolsLlamaEmitRecordsTests: XCTestCase {
   private func runCLI(_ arguments: [String]) throws -> (
     exitCode: Int32, stdout: String, stderr: String
   ) {
-    let process = Process()
-    process.executableURL = try binaryURL()
-    process.arguments = arguments
-    // Run from a scratch cwd so the CLI's own relative-path defaults (e.g.
-    // its default --output under tmp/manifold-tools-llama/) never collide
-    // with a concurrent invocation or leave litter in the repo checkout.
-    let cwd = FileManager.default.temporaryDirectory
-      .appendingPathComponent("manifold-tools-llama-tests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
-    process.currentDirectoryURL = cwd
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
-    process.standardOutput = stdoutPipe
-    process.standardError = stderrPipe
-
-    try process.run()
-    process.waitUntilExit()
-
-    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-    return (
-      process.terminationStatus,
-      String(decoding: stdoutData, as: UTF8.self),
-      String(decoding: stderrData, as: UTF8.self)
-    )
+    let result = try CLITestProcess.run(executable: binaryURL(), arguments: arguments)
+    return (result.exitCode, result.stdout, result.stderr)
   }
 
   private func decodeRecords(at url: URL) throws -> [ConformanceRecord] {

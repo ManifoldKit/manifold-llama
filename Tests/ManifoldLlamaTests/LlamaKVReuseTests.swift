@@ -188,13 +188,14 @@ final class LlamaKVReuseTests: XCTestCase {
   /// Asserting this fails closed gives us a regression detector for sampler-
   /// preset changes that swap the system prompt mid-session.
   ///
-  /// Acceptable outcomes: no `.kvCacheReuse` event at all, or one that
-  /// reports zero reused tokens. Anything else means the implementation
-  /// reused tokens that are now at the wrong position.
+  /// The observability event must report exactly the common prefix of the two
+  /// tokenizer outputs. That prefix includes BOS and any template header, and
+  /// can be 10 tokens for Mistral-v0.3, so a fixed numerical ceiling would
+  /// reject a correct cache boundary.
   ///
   /// Sabotage: skip the system-prompt comparison in
-  /// `LlamaGenerationDriver`'s prefix matcher — the test trips with a
-  /// non-zero reuse count.
+  /// `LlamaGenerationDriver`'s prefix matcher — the test observes reuse past
+  /// `sharedPrefixCount` and the exact-boundary assertion trips.
   func test_systemPromptChangeBreaksReuse() async throws {
     guard let modelURL = HardwareRequirements.findGGUFModel() else {
       throw XCTSkip(
@@ -216,13 +217,21 @@ final class LlamaKVReuseTests: XCTestCase {
       systemPrompt: "You are a helpful assistant."
     )
     // Use a second system prompt with zero text overlap so only the
-    // structural template header (<|im_start|>system\n) can be shared.
-    // The prior assertion expected == 0, but real tokenisation always
-    // shares the BOS + template-header tokens (~3–4 tokens) regardless
-    // of system content. "< 10" allows that and rules out content reuse.
+    // tokenizer's structural prefix can be shared.
     let secondFullPrompt = PromptTemplate.chatML.format(
       messages: [(role: "user", content: userPrompt)],
       systemPrompt: "Respond only in formal Latin."
+    )
+    let firstTokenIDs = backend.inputTokenIds(forPrompt: firstFullPrompt)
+    let secondTokenIDs = backend.inputTokenIds(forPrompt: secondFullPrompt)
+    let sharedPrefixCount = zip(firstTokenIDs, secondTokenIDs)
+      .prefix(while: { $0.0 == $0.1 })
+      .count
+    XCTAssertGreaterThan(sharedPrefixCount, 0, "BOS/template framing must form a shared prefix")
+    XCTAssertLessThan(
+      sharedPrefixCount,
+      secondTokenIDs.count,
+      "Changed system instructions must diverge before the complete second prompt"
     )
 
     // Turn 1: builds KV state for the first system prompt + user prompt.
@@ -230,17 +239,19 @@ final class LlamaKVReuseTests: XCTestCase {
     _ = try await drainAllEvents(stream1)
     try await waitForGeneratingFalse(backend)
 
-    // Turn 2: system prompt content has no text overlap with turn 1.
-    // Only BOS + template-header tokens can be shared — not the system body.
+    // Turn 2: the native generation path must report the exact tokenizer
+    // boundary, never a guessed header-token allowance.
     let stream2 = try backend.generate(prompt: secondFullPrompt, systemPrompt: nil, config: config)
     let events2 = try await drainAllEvents(stream2)
 
-    if let reused = kvReuseValue(in: events2) {
-      XCTAssertLessThan(
-        reused, 10,
-        "System-prompt change must not reuse content tokens — saw promptTokensReused=\(reused) (only BOS+header expected)"
-      )
-    }
-    // Either branch (no event, or event with < 10) satisfies the invariant.
+    let reused = try XCTUnwrap(
+      kvReuseValue(in: events2),
+      "A non-empty tokenizer prefix must emit .kvCacheReuse"
+    )
+    XCTAssertEqual(
+      reused,
+      sharedPrefixCount,
+      "KV reuse must stop at the first token changed by the system instruction; saw \(reused), expected \(sharedPrefixCount)"
+    )
   }
 }
