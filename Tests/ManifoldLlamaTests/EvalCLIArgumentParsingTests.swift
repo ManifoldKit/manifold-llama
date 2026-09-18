@@ -40,24 +40,8 @@ final class EvalCLIArgumentParsingTests: XCTestCase {
       )
     }
 
-    let process = Process()
-    process.executableURL = binary
-    process.arguments = arguments
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
-    process.standardOutput = stdoutPipe
-    process.standardError = stderrPipe
-
-    try process.run()
-    process.waitUntilExit()
-
-    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-    return (
-      process.terminationStatus,
-      String(decoding: stdoutData, as: UTF8.self),
-      String(decoding: stderrData, as: UTF8.self)
-    )
+    let result = try CLITestProcess.run(executable: binary, arguments: arguments)
+    return (result.exitCode, result.stdout, result.stderr)
   }
 
   // MARK: - --top-k

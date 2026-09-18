@@ -4,6 +4,7 @@ import ManifoldBackendTestKit
 import ManifoldInference
 import ManifoldLlama
 @_spi(Testing) import ManifoldLlama
+import ManifoldModelCatalog
 import ManifoldPersistenceSwiftData
 import ManifoldRuntime
 import ManifoldTestSupport
@@ -709,18 +710,11 @@ final class LlamaBackendTests: XCTestCase {
   /// the `maxOutputTokens` budget is set generously (256) while the prompt asks
   /// for a brief reply, so any well-behaved model hits EOG before the budget.
   ///
-  /// Per #968: modern instruct models (Qwen3, Llama 3, Gemma) only emit their
-  /// EOG token (`<|im_end|>`, `<|eot_id|>`, `<end_of_turn>`) inside a Jinja
-  /// chat-templated response. Sending a raw prompt produces open-ended text
-  /// that never hits EOG — the model just continues until the budget is
-  /// exhausted. `LlamaBackend.capabilities.requiresPromptTemplate` is `true`
-  /// for exactly this reason; the test honours that contract by formatting
-  /// the prompt with the ChatML template (the most widely supported variant
-  /// across Qwen2/Qwen3/Mistral instruct GGUFs). Llama-3 and Gemma GGUFs
-  /// understand ChatML well enough to still terminate cleanly because the
-  /// `<|im_end|>` token is only consumed as a string terminator — the actual
-  /// EOG token emitted by the model is the one its own tokenizer marked as
-  /// EOG, regardless of which delimiter format wrapped the prompt.
+  /// Modern instruct models only emit their EOG token inside the chat template
+  /// that shipped in their GGUF. The test therefore uses `InferenceService`'s
+  /// production rendering path, which seeds the prompt from the model's
+  /// embedded `tokenizer.chat_template`; a hard-coded ChatML envelope makes
+  /// Mistral-v0.3 run to the budget rather than exercising EOG (#2530).
   ///
   /// Gated on a real GGUF today — per #519, unskipping requires refactoring
   /// `LlamaGenerationDriver` to accept a mockable sampler, which is out of
@@ -730,46 +724,44 @@ final class LlamaBackendTests: XCTestCase {
   /// line in `LlamaGenerationDriver.run`. Generation runs until `maxOutputTokens`
   /// instead of terminating on EOG, so `tokenCount == maxOutputTokens` rather
   /// than strictly less. Alternative sabotage (per #968): replace the
-  /// chat-templated prompt with the raw "Reply with just the word 'ok'."
-  /// string — Qwen3-0.6B-Q4_K_M then exhausts the 256-token budget and the
+  /// production `InferenceService.enqueue(...)` path with a hard-coded ChatML
+  /// prompt — Mistral-v0.3 then exhausts the 256-token budget and the
   /// `tokenCount < maxBudget` assertion fails.
+  @MainActor
   func test_fixture_eogTokenTerminatesStreamBeforeBudget_regression519() async throws {
     guard let modelURL = HardwareRequirements.findGGUFModel() else {
       throw XCTSkip(
         "No GGUF on disk. Set LLAMA_TEST_MODEL=<path> or place a `.gguf` in ~/Documents/Models/ to run this fixture."
       )
     }
+    guard let modelInfo = ModelInfo(ggufURL: modelURL) else {
+      throw XCTSkip("GGUF at \(modelURL.path) could not be read as model metadata.")
+    }
+    try XCTSkipUnless(
+      modelInfo.chatTemplateRaw?.isEmpty == false,
+      "GGUF carries no embedded tokenizer.chat_template; this fixture requires the native render path."
+    )
 
     let backend = LlamaBackend()
-    addTeardownBlock { await backend.unloadAndWait() }
+    let service = InferenceService()
+    service.registerBackendFactory { modelType in
+      guard modelType == .gguf else { return nil }
+      return backend
+    }
+    addTeardownBlock { @MainActor in
+      service.unloadModel()
+      await backend.unloadAndWait()
+    }
 
-    // Flush any pending detached cleanup task left by alphabetically-preceding
-    // GGUF-loading tests (e.g. test_countTokens_*). unloadAndWait() is a
-    // no-op here (nothing is loaded yet) but it awaits the prior test's
-    // cleanup chain before we touch llama.cpp, preventing the Metal pipeline
-    // from being in a partially-freed state when our first decode begins.
-    // The `llama_backend_init` cycle that motivated the (now-removed)
-    // `test-llama-isolated.sh` script is fixed at the source by the
-    // process-scoped latch in `LlamaBackendProcessLifecycle` (#1319).
-    await backend.unloadAndWait()
-
-    try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 512))
+    let plan = ModelLoadPlan.compute(for: modelInfo, requestedContextSize: 512)
+    try await service.loadModel(from: modelInfo, plan: plan)
 
     let maxBudget = 256
-    let config = GenerationConfig(temperature: 0.1, maxOutputTokens: maxBudget)
-    // ChatML-templated prompt (#968). Modern instruct GGUFs only emit their
-    // EOG token at the end of a templated assistant turn — the trailing
-    // `<|im_start|>assistant\n` cues the model to produce a reply and stop.
-    let chatMLPrompt = """
-      <|im_start|>user
-      Reply with just the word 'ok'.<|im_end|>
-      <|im_start|>assistant
-
-      """
-    let stream = try backend.generate(
-      prompt: chatMLPrompt,
-      systemPrompt: nil,
-      config: config
+    let config = GenerationConfig(temperature: 0.1, seed: 0, maxOutputTokens: maxBudget)
+    let (_, stream) = try service.enqueue(
+      messages: [.user("Reply with just the word 'ok'.")],
+      config: config,
+      hints: GenerationRuntimeHints(captureRenderedPrompt: true)
     )
 
     // Accept either `.token` or `.thinkingToken` — the fixture gates on
@@ -777,13 +769,20 @@ final class LlamaBackendTests: XCTestCase {
     // content went to. Reasoning GGUFs emit `<think>` content first which
     // the driver's sniff mode routes to `.thinkingToken`.
     var tokenCount = 0
-    for try await event in stream.events {
+    var renderedPrompt: String?
+    for try await event in stream {
       switch event {
+      case .promptRendered(let prompt): renderedPrompt = prompt
       case .token, .thinkingToken: tokenCount += 1
       default: break
       }
     }
 
+    let prompt = try XCTUnwrap(
+      renderedPrompt,
+      "The production render path must expose the native GGUF-template prompt."
+    )
+    XCTAssertTrue(prompt.contains("Reply with just the word 'ok'."))
     XCTAssertGreaterThan(tokenCount, 0, "EOG fixture must produce at least one token")
     XCTAssertLessThan(
       tokenCount, maxBudget,

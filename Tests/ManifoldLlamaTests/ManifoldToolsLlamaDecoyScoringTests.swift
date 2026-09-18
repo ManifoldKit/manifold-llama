@@ -38,29 +38,8 @@ final class ManifoldToolsLlamaDecoyScoringTests: XCTestCase {
   private func runCLI(_ arguments: [String]) throws -> (
     exitCode: Int32, stdout: String, stderr: String
   ) {
-    let process = Process()
-    process.executableURL = try binaryURL()
-    process.arguments = arguments
-    let cwd = FileManager.default.temporaryDirectory
-      .appendingPathComponent(
-        "manifold-tools-llama-decoy-tests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
-    process.currentDirectoryURL = cwd
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
-    process.standardOutput = stdoutPipe
-    process.standardError = stderrPipe
-
-    try process.run()
-    process.waitUntilExit()
-
-    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-    return (
-      process.terminationStatus,
-      String(decoding: stdoutData, as: UTF8.self),
-      String(decoding: stderrData, as: UTF8.self)
-    )
+    let result = try CLITestProcess.run(executable: binaryURL(), arguments: arguments)
+    return (result.exitCode, result.stdout, result.stderr)
   }
 
   /// Reads the `.prompt` event for `scenario` out of a transcript JSONL —
