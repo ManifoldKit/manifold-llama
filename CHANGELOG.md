@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.8](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.7...v0.4.8) (2026-09-20)
+
+### Highlights
+
+**Align the deployment floor with ManifoldKit 0.79** — manifold-llama now requires iOS 26 or macOS 26. Its CI, model-test, canary, and core-pin-bump jobs use macOS 26 runners, preparing the companion for the upcoming core release; the core dependency still pins to the 0.78 minor line in this release. Apps that still support older systems should stay on manifold-llama 0.4.7 and ManifoldKit 0.78. ([#207](https://github.com/ManifoldKit/manifold-llama/pull/207))
+
+**Preserve generation resources through cancellation and unload** — cancellation retains the generation task until unload can join it, concurrent unloads share cleanup, and vocabulary reads keep their model lock. Completion usage counts raw sampled non-EOG tokens before output filtering; visible-output latency metrics keep their prior meaning. ([#203](https://github.com/ManifoldKit/manifold-llama/pull/203))
+
+### Fixes
+
+* Repair CLI test subprocess capture so verbose model loading cannot block on a full output pipe, and correct Mistral EOG and KV-reuse fixture assumptions. ([#206](https://github.com/ManifoldKit/manifold-llama/pull/206))
+
 ## [0.4.7](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.6...v0.4.7) (2026-09-10)
 
 ### Highlights
