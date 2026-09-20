@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.9](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.8...v0.4.9) (2026-09-20)
+
+### Highlights
+
+**Tracks ManifoldKit 0.79.0** — re-resolved, built, and tested green against the new core.
+
+
+### Dependencies
+
+* Bump ManifoldKit pin to v0.79.0 ([1ab1948](https://github.com/ManifoldKit/manifold-llama/commit/1ab1948aeb6efda26432f8e64356d1b5dcb68c6d))
+
 ## [0.4.8](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.7...v0.4.8) (2026-09-20)
 
 ### Highlights
