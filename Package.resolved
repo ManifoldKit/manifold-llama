@@ -1,5 +1,5 @@
 {
-  "originHash" : "b5b05fe9ffb42308f10d29f13be33b085b8fa04f83219422ae4932da3e1b4434",
+  "originHash" : "0f8e746a28b83fbc3ee0440e563baaaa11a7202f6a142b1a8e0daac17f391da4",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ManifoldKit/ManifoldKit",
       "state" : {
-        "revision" : "73510e826036c4e9062e4b26d35715f8e3cbd1ce",
-        "version" : "0.78.0"
+        "revision" : "610c6a538da3e991eff88a510a1a804327974bca",
+        "version" : "0.79.0"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/huggingface/swift-huggingface.git",
       "state" : {
-        "revision" : "9ebe9cb568ff9ebe2f1bcd3ae7d925fbb45ec8d2",
-        "version" : "0.10.0"
+        "revision" : "b5403ed09403f674601fd1123e07c5b32914d16f",
+        "version" : "0.10.1"
       }
     },
     {
