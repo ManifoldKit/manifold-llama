@@ -546,70 +546,116 @@ import os
   /// `ManifoldHardware`'s `GGUFMetadataReader`, reimplemented here because that
   /// type is `package`-scoped and unreachable across the package boundary.
   @_spi(Testing) public static func readArchitectureFromHeader(at url: URL) -> String? {
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-    defer { try? handle.close() }
+    // Bounds come from the open file, rather than metadata-controlled lengths.
+    // Unknown values are skipped with seeks so tokenizer arrays never need a
+    // second in-memory copy just to find the architecture entry.
+    struct Reader {
+      let handle: FileHandle
+      let fileSize: UInt64
+      var offset: UInt64 = 0
+      var remaining: UInt64 { fileSize - offset }
 
-    // GGUF type-code → fixed scalar byte width. `nil` for string/array,
-    // which are length-prefixed and handled specially.
-    func scalarSize(_ type: UInt32) -> Int? {
-      switch type {
-      case 0, 1, 7: return 1  // uint8/int8/bool
-      case 2, 3: return 2  // uint16/int16
-      case 4, 5, 6: return 4  // uint32/int32/float32
-      case 10, 11, 12: return 8  // uint64/int64/float64
-      default: return nil  // 8 = string, 9 = array
+      mutating func read(_ count: Int) throws -> Data? {
+        guard count >= 0, UInt64(count) <= remaining,
+          let bytes = try handle.read(upToCount: count), bytes.count == count
+        else { return nil }
+        offset += UInt64(count)
+        return bytes
       }
-    }
 
-    // Sequential little-endian readers over the file handle. Any short read
-    // or malformed length aborts the whole parse (returns nil upstream).
-    func read(_ count: Int) -> Data? {
-      guard count >= 0, let d = try? handle.read(upToCount: count), d.count == count else {
+      mutating func skip(_ count: UInt64) throws -> Bool {
+        guard count <= remaining else { return false }
+        let destination = offset + count // bounded by fileSize above
+        try handle.seek(toOffset: destination)
+        offset = destination
+        return true
+      }
+
+      mutating func readU32() throws -> UInt32? {
+        try read(4).map { UInt32(littleEndian: $0.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }) }
+      }
+
+      mutating func readU64() throws -> UInt64? {
+        try read(8).map { UInt64(littleEndian: $0.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }) }
+      }
+
+      mutating func readString() throws -> String? {
+        guard let length = try readU64(), length <= 64 * 1024,
+          let count = Int(exactly: length), let bytes = try read(count)
+        else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+      }
+
+      mutating func skipString() throws -> Bool {
+        guard let length = try readU64(), length <= 64 * 1024 else { return false }
+        return try skip(length)
+      }
+
+      func scalarSize(_ type: UInt32) -> Int? {
+        switch type {
+        case 0, 1, 7: return 1
+        case 2, 3: return 2
+        case 4, 5, 6: return 4
+        case 10, 11, 12: return 8
+        default: return nil
+        }
+      }
+
+      mutating func skipValue(type: UInt32) throws -> Bool {
+        if type == 8 { return try skipString() }
+        if type == 9 {
+          guard let elementType = try readU32(), let count = try readU64() else { return false }
+          if elementType == 8 {
+            // Each string needs at least its UInt64 length, even when empty.
+            guard count <= remaining / 8 else { return false }
+            for _ in 0..<count {
+              guard try skipString() else { return false }
+            }
+            return true
+          }
+          guard let elementSize = scalarSize(elementType), let elementCount = Int(exactly: count)
+          else { return false }
+          let (byteCount, overflow) = elementSize.multipliedReportingOverflow(by: elementCount)
+          guard !overflow else { return false }
+          return try skip(UInt64(byteCount))
+        }
+        guard let size = scalarSize(type) else { return false }
+        return try skip(UInt64(size))
+      }
+
+      mutating func architecture() throws -> String? {
+        guard let magic = try read(4), magic == Data([0x47, 0x47, 0x55, 0x46]),
+          let version = try readU32(), version == 2 || version == 3,
+          try readU64() != nil, // tensor count (unused)
+          let keyValueCount = try readU64(), keyValueCount <= remaining / 12
+        else { return nil }
+
+        for _ in 0..<keyValueCount {
+          guard let key = try readString(), let valueType = try readU32() else { return nil }
+          if key == "general.architecture" {
+            guard valueType == 8 else { return nil }
+            return try readString()
+          }
+          guard try skipValue(type: valueType) else { return nil }
+        }
         return nil
       }
-      return d
-    }
-    func readU32() -> UInt32? {
-      read(4).map { $0.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) } }
-    }
-    func readU64() -> UInt64? {
-      read(8).map { $0.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) } }
-    }
-    func readString() -> String? {
-      guard let len = readU64(), len <= 64 * 1024, let bytes = read(Int(len)) else { return nil }
-      return String(decoding: bytes, as: UTF8.self)
-    }
-    /// Advances past a metadata value of the given type without retaining it.
-    func skipValue(type: UInt32) -> Bool {
-      if type == 8 { return readString() != nil }  // string
-      if type == 9 {  // array
-        guard let elemType = readU32(), let count = readU64() else { return false }
-        if elemType == 8 {
-          for _ in 0..<count where readString() == nil { return false }
-          return true
-        }
-        guard let elemSize = scalarSize(elemType) else { return false }
-        return read(elemSize * Int(count)) != nil
-      }
-      guard let size = scalarSize(type) else { return false }
-      return read(size) != nil
     }
 
-    // "GGUF"
-    guard let magic = read(4), magic == Data([0x47, 0x47, 0x55, 0x46]) else { return nil }
-    guard let version = readU32(), version == 2 || version == 3 else { return nil }
-    guard readU64() != nil else { return nil }  // tensor count (unused)
-    guard let kvCount = readU64() else { return nil }
-
-    for _ in 0..<kvCount {
-      guard let key = readString(), let valueType = readU32() else { return nil }
-      if key == "general.architecture" {
-        guard valueType == 8 else { return nil }  // must be a string
-        return readString()
+    do {
+      let handle = try FileHandle(forReadingFrom: url)
+      defer {
+        do { try handle.close() }
+        catch { logger.debug("Could not close GGUF architecture header: \(error.localizedDescription)") }
       }
-      guard skipValue(type: valueType) else { return nil }
+      let size = try handle.seekToEnd()
+      try handle.seek(toOffset: 0)
+      var reader = Reader(handle: handle, fileSize: size)
+      return try reader.architecture()
+    } catch {
+      logger.debug("Could not read GGUF architecture header: \(error.localizedDescription)")
+      return nil
     }
-    return nil
   }
 
   /// Reads `general.architecture` from the loaded GGUF model's metadata.
