@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.10](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.9...v0.4.10) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** bump ManifoldKit pin to v0.80.0 ([274d5b3](https://github.com/ManifoldKit/manifold-llama/commit/274d5b3b25182e5be489810f953ff23777c7155d))
+* **gguf:** bound architecture header parsing ([#213](https://github.com/ManifoldKit/manifold-llama/issues/213)) ([d8f42cf](https://github.com/ManifoldKit/manifold-llama/commit/d8f42cfd49ca3ff7be4b9917bbab6e0c9b31b451))
+
+
+### Dependencies
+
+* bump ManifoldKit pin to v0.79.1 ([e16dece](https://github.com/ManifoldKit/manifold-llama/commit/e16dece9cf87aba049e7b3c467384585528c4420))
+
 ## [0.4.9](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.8...v0.4.9) (2026-09-20)
 
 ### Highlights
