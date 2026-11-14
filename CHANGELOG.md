@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.10](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.9...v0.4.10) (2026-11-14)
+
+### Highlights
+
+#### Track ManifoldKit 0.80
+
+Update the core dependency to the 0.80 minor line. This release retains the existing iOS 26 and macOS 26 deployment floors and the pinned llama.cpp binary.
+
+#### Read malformed GGUF architecture headers safely
+
+The architecture probe now checks integer conversions and array sizes, bounds reads and seeks by the actual file length, and skips fixed-width metadata arrays without allocating their full contents. Invalid or truncated metadata returns no architecture from the probe instead of triggering an arithmetic trap; this change does not replace llama.cpp's model validation.
+
+### Fixes
+
+- Bound architecture-header parsing for malformed or oversized GGUF metadata ([#213](https://github.com/ManifoldKit/manifold-llama/pull/213)).
+
+### Dependencies
+
+- Advance the ManifoldKit dependency from the published 0.79 line to 0.80.0, including the previously unreleased 0.79.1 pin update.
+
 ## [0.4.9](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.8...v0.4.9) (2026-09-20)
 
 ### Highlights
