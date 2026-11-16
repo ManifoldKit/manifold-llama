@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.11](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.10...v0.4.11) (2026-11-16)
+
+
+### Bug Fixes
+
+* **llama:** accept immediate resend after Stop ([#217](https://github.com/ManifoldKit/manifold-llama/issues/217)) ([2e6fb1a](https://github.com/ManifoldKit/manifold-llama/commit/2e6fb1adcc782dbda863e593c8d81e1727ea5b62))
+
 ## [0.4.10](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.9...v0.4.10) (2026-11-14)
 
 ### Highlights
