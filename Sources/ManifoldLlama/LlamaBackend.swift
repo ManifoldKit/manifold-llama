@@ -26,7 +26,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   // MARK: - State
 
   public private(set) var isModelLoaded = false
-  public private(set) var isGenerating = false
+  public var isGenerating: Bool { withStateLock { _isGenerating } }
+  private var _isGenerating = false
 
   // MARK: - CancellableModelLoading state (guarded by stateLock)
 
@@ -242,15 +243,19 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   /// Accessible to tests via `@_spi(Testing)` for vocabulary-level assertions.
   @_spi(Testing) public internal(set) var vocab: OpaquePointer?
   private var generationTask: Task<Void, Never>?
-  /// Cancellation flag shared between the decode loop (background task) and
-  /// `stopGeneration()` / `unloadModel()` (any thread/actor).
-  ///
-  /// `Atomic<Bool>` (Swift 6 `Synchronization` stdlib) makes every read and
-  /// write sequentially consistent without requiring a lock, eliminating the
-  /// data race that existed when a plain `Bool` was written from the main actor
-  /// and read on a detached background task. This is also safe to write from
-  /// a memory-pressure handler callback (#415) running on an arbitrary thread.
-  private let cancelled = Atomic<Bool>(false)
+  /// Tail of all C-context operations. A stopped generation remains in this
+  /// chain until it actually releases native ownership.
+  private var nativeWorkTask: Task<Void, Never>?
+  private var nativeWorkRevision: UInt64 = 0
+  private var cacheRevision: UInt64 = 0
+
+  private final class GenerationCancellation: Sendable {
+    let requested = Atomic<Bool>(false)
+  }
+
+  /// Replaced on admission; a newer generation must not reset an older
+  /// generation's flag while that generation is still unwinding.
+  private var generationCancellation = GenerationCancellation()
   private var cleanupTask: Task<Void, Never>?
   private var nextLoadToken: UInt64 = 0
   private var activeLoadToken: UInt64 = 0
@@ -276,7 +281,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   /// memory-pressure callback (or `stopGeneration()`) actually flipped the flag
   /// without driving a real decode loop.
   @_spi(Testing) public var isCancelledForTesting: Bool {
-    cancelled.load(ordering: .sequentiallyConsistent)
+    withStateLock { generationCancellation.requested.load(ordering: .sequentiallyConsistent) }
   }
 
   /// Fires the registered memory-pressure callback synchronously so tests can
@@ -426,7 +431,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
   ///
   /// ONLY call this from test targets. Never call in production code.
   @_spi(Testing) public func setIsGeneratingForTesting(_ value: Bool) {
-    withStateLock { isGenerating = value }
+    withStateLock { _isGenerating = value }
   }
 
   // MARK: - Multimodal Projector
@@ -638,11 +643,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     config: GenerationConfig,
     hints: GenerationRuntimeHints
   ) throws -> GenerationStream {
-    // The Task body re-reads context under stateLock below to avoid the
-    // use-after-free window between here and `self.generationTask = task`
-    // install. We only need to verify model is loaded up front — the
-    // captured pointers are accessed through the re-read, not these
-    // outer locals.
     // Reject image-bearing turns before any other state check so the caller
     // gets the actionable xcframework-limitation message regardless of
     // whether a model happens to be loaded. The check is independent of
@@ -671,37 +671,25 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
       )
     }
 
-    guard withStateLock({ isModelLoaded && context != nil && vocab != nil && model != nil }) else {
+    // Tokenization is a vocabulary-only lookup. Hold model ownership through
+    // lookup, preflight, and task publication so unload cannot swap the model
+    // between these steps, and concurrent callers cannot both reserve a turn.
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    guard isModelLoaded, context != nil, let vocab, model != nil else {
       throw InferenceError.inferenceFailure("No model loaded")
     }
-    guard !withStateLock({ isGenerating }) else {
+    guard !_isGenerating else {
       throw InferenceError.alreadyGenerating
     }
-
-    // Tokenize up front (pure vocab lookup — doesn't touch context KV
-    // state) so we can preflight prompt + output against the context
-    // window before flipping `isGenerating`. If we failed this check
-    // after the flip, callers who retry on `.contextExhausted` would see
-    // an unnecessary `.alreadyGenerating` on the next call.
-    //
-    // Vocabulary belongs to the model. A pointer snapshot does not retain it:
-    // hold the lock through the synchronous lookup so pressure-triggered unload
-    // cannot detach/free the model before the generation task exists to join.
-    let preflight = withStateLock { () -> ([llama_token], LlamaGenerationSeam?)? in
-      guard let vocab else { return nil }
-      let seam = _generationSeam
-      let tokens = tokenizePromptLocked(prompt, vocab: vocab)
-      return (tokens, seam)
-    }
-    guard let (tokens, generationSeam) = preflight else {
-      throw InferenceError.inferenceFailure("No model loaded")
-    }
+    let generationSeam = _generationSeam
+    let tokens = tokenizePromptLocked(prompt, vocab: vocab)
     guard !tokens.isEmpty else {
       throw InferenceError.inferenceFailure("Failed to tokenize prompt")
     }
 
     let maxTokens = config.maxOutputTokens ?? 2048
-    let contextSize = Int(withStateLock { _effectiveContextSize })
+    let contextSize = Int(_effectiveContextSize)
     guard
       Self.contextWindowFits(
         promptTokens: tokens.count, maxOutputTokens: maxTokens, contextSize: contextSize
@@ -714,46 +702,14 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
       )
     }
 
-    // Compute how many leading tokens match the previous turn's KV state.
-    // We read sessionKVState here (before the isGenerating flip) because
-    // stopGeneration() never clears it — only unloadModel() and
-    // resetConversation() do — so there is no race between this read and
-    // those two paths under stateLock.
-    //
-    // `reuseLen` is the full count of matching leading tokens. It is surfaced
-    // as `.kvCacheReuse(promptTokensReused:)` AND drives genuine prefix reuse —
-    // but the driver only reuses the prefix up to a `batchSize` boundary so the
-    // chunk producing the sampling-position (N-1) logits keeps a batch shape
-    // bit-identical to the first turn's. That is what guarantees greedy
-    // determinism across non-Qwen architectures (ManifoldKit#1677): the old
-    // -2-cap path (PR #966) could resume mid-chunk, a different batch shape that
-    // flips the argmax on near-tied logits for kernels that reduce differently
-    // across batch sizes. Batch-aligned reuse keeps O(new-tokens) prefill while
-    // remaining deterministic.
-    //
-    // The KV tail trim (`llama_memory_seq_rm`) and the full-clear-vs-keep
-    // decision now both live in the driver, which owns `batchSize`
-    // (`llama_n_batch`) and runs inside the generation Task already serialized
-    // with unloadModel(). See LlamaGenerationDriver.
-    let previousTokens = withStateLock { sessionKVState?.tokens ?? [] }
-    let reuseLen = zip(tokens, previousTokens).prefix(while: { $0.0 == $0.1 }).count
-
-    // Reset the cancellation flag and flip isGenerating atomically under the
-    // same lock that stopGeneration() holds when it touches generationTask.
-    // Keeping both writes inside a single critical section means a concurrent
-    // stopGeneration() call that races this startup cannot observe a window
-    // where cancelled == false but isGenerating == false (not yet set), which
-    // would let it skip the task cancel and leave the loop running uncancelled.
-    withStateLock {
-      cancelled.store(false, ordering: .sequentiallyConsistent)
-      isGenerating = true
-      // Optimistically record the current prompt tokens as the new KV state.
-      // If generation is cancelled mid-stream, this is still safe: the prefix
-      // up to `reuseLen` is intact in the C KV cache, and any tokens decoded
-      // beyond that are the start of the new turn's output — not prompt tokens.
-      // resetConversation() / unloadModel() will wipe this if needed.
-      sessionKVState = SessionKVState(tokens: tokens)
-    }
+    let cancellation = GenerationCancellation()
+    generationCancellation = cancellation
+    _isGenerating = true
+    let predecessor = nativeWorkTask
+    nativeWorkRevision &+= 1
+    let workRevision = nativeWorkRevision
+    let loadToken = activeLoadToken
+    let initialCacheRevision = cacheRevision
     Self.logger.debug("Llama generate started")
 
     let (stream, continuation) = AsyncThrowingStream.makeStream(of: GenerationEvent.self)
@@ -781,36 +737,31 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     // run. When neither is listening we skip them entirely so a generation
     // with no sink attached pays no per-token timing/lock overhead.
     let metricTracker = LlamaMetricTracker()
-    let capturedMetricSink = withStateLock { metricSink }
-    let capturedTraceSink = withStateLock { traceSink }
+    let capturedMetricSink = metricSink
+    let capturedTraceSink = traceSink
     let metricsEnabled = capturedMetricSink != nil || capturedTraceSink != nil
     let promptTokenCount = tokens.count
-    let modelIdentifier = withStateLock { _manifest?.modelIdentifier } ?? "unknown"
+    let modelIdentifier = _manifest?.modelIdentifier ?? "unknown"
 
-    // Hold stateLock across Task creation AND generationTask assignment
-    // (see install block below). The Task body's first action is a
-    // stateLock re-read, which blocks until we release. That guarantees
-    // the Task body cannot observe `self.generationTask == nil` when its
-    // re-read runs — so unloadModel() always either sees the installed
-    // task (and awaits it) or runs entirely before the task's re-read
-    // (and nils `self.context`, causing the task to bail).
-    stateLock.lock()
-    let task = Task { [weak self, generationStream] in
+    let task = Task.detached(priority: .userInitiated) { [weak self, generationStream] in
       guard let self else {
         continuation.finish()
         return
       }
 
-      // Dispatch clock starts here — the earliest point inside the task
-      // that can run before any `.token` event is possible. Must run
-      // before the defer below so even an early bail-out (pointers == nil)
-      // reports a (near-zero) wallClockDuration rather than reusing the
-      // tracker's `init`-time default. Skipped entirely when no sink is
-      // attached (see `metricsEnabled` above).
+      // Include time queued behind a stopped turn in perceived latency.
       if metricsEnabled { metricTracker.start() }
 
       defer {
-        self.withStateLock { self.isGenerating = false }
+        self.withStateLock {
+          if self.generationCancellation === cancellation {
+            self._isGenerating = false
+            self.generationTask = nil
+          }
+          if self.nativeWorkRevision == workRevision {
+            self.nativeWorkTask = nil
+          }
+        }
         Self.logger.debug("Llama generate finished")
         // Emit exactly once per generation, success or failure — this
         // `defer` runs on every exit path of THIS TASK BODY, once the
@@ -832,29 +783,28 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         )
       }
 
-      // Re-acquire context and vocab under stateLock so we serialize
-      // with unloadModel(). The parent installs `generationTask = task`
-      // under stateLock below before releasing; that guarantees either:
-      //   (a) unloadModel() ran first → `self.context` is nil → we bail
-      //       cleanly without touching any freed pointer, or
-      //   (b) the parent installed generationTask first → unloadModel()
-      //       now observes the task and awaits it before calling
-      //       llama_free / llama_model_free on the captured pointers.
-      // Performing all context-touching work (KV clear, decode, sample)
-      // inside this task keeps it under the lifecycle that
-      // unloadModel() already knows how to wait for.
-      let pointers = self.withStateLock { () -> (OpaquePointer, OpaquePointer)? in
-        guard let ctx = self.context, let voc = self.vocab else { return nil }
-        return (ctx, voc)
+      // Admission and native ownership are distinct: a replacement can be
+      // returned to its caller now, but must wait for all prior native work.
+      await predecessor?.value
+      if cancellation.requested.load(ordering: .sequentiallyConsistent) || Task.isCancelled {
+        await MainActor.run { generationStream.setPhase(.done) }
+        continuation.finish()
+        return
       }
-      guard let (context, vocab) = pointers else {
-        // Backend was unloaded out from under this generation before
-        // the driver ever ran. Not a decode/sampler failure, but still
-        // a failed generation from the metric's point of view.
+
+      let state = self.withStateLock {
+        () -> (OpaquePointer, OpaquePointer, [llama_token], ThinkingMarkers?)? in
+        guard self.activeLoadToken == loadToken,
+          let ctx = self.context, let voc = self.vocab
+        else { return nil }
+        return (ctx, voc, self.sessionKVState?.tokens ?? [], self._autoDetectedThinkingMarkers)
+      }
+      guard let (context, vocab, previousTokens, autoDetected) = state else {
         if metricsEnabled { metricTracker.recordError("backendUnloaded") }
         continuation.finish()
         return
       }
+      let reuseLen = zip(tokens, previousTokens).prefix(while: { $0.0 == $0.1 }).count
 
       // The second (and last) llama.cpp touch point in this method —
       // everything the driver does to the C API goes through this
@@ -870,7 +820,6 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
       let driver = LlamaGenerationDriver()
       // Manual override beats auto-detection. When neither is present,
       // markers stays nil and the driver skips ThinkingTransform entirely.
-      let autoDetected = self.withStateLock { self._autoDetectedThinkingMarkers }
       let resolvedMarkers = hints.thinkingMarkers ?? autoDetected
       // Typed out with explicit if/else (rather than a ternary or an
       // inline expression in the call below) to sidestep a compiler
@@ -883,6 +832,8 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         onGeneratedTokenHook = { metricTracker.recordGeneratedToken() }
         onErrorHook = { label in metricTracker.recordError(label) }
       }
+      var prefillStarted = false
+      var promptDecoded = false
       let kvCoherent = await driver.run(
         engine: engine,
         tokens: tokens,
@@ -891,38 +842,49 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
         config: config,
         markers: resolvedMarkers,
         isCancelled: {
-          Task.isCancelled || self.cancelled.load(ordering: .sequentiallyConsistent)
+          Task.isCancelled || cancellation.requested.load(ordering: .sequentiallyConsistent)
         },
         generationStream: generationStream,
         continuation: continuation,
         onPrefillEstimate: { [self] measured in
-          self.withStateLock { self._lastMeasuredBytesPerToken = measured }
+          self.withStateLock {
+            if self.activeLoadToken == loadToken { self._lastMeasuredBytesPerToken = measured }
+          }
         },
         onUsage: { [self] promptTokens, completionTokens in
           self.withStateLock {
+            guard self.activeLoadToken == loadToken,
+              self.generationCancellation === cancellation
+            else { return }
             self._lastUsage = (promptTokens: promptTokens, completionTokens: completionTokens)
           }
         },
+        onPrefillStarted: { prefillStarted = true },
+        onPromptDecoded: { promptDecoded = true },
         onToken: onTokenHook,
         onGeneratedToken: onGeneratedTokenHook,
         onError: onErrorHook
       )
-      // A decode failure leaves the C KV cache in an undefined state.
-      // Clear sessionKVState so the next turn does not attempt prefix reuse
-      // against positions that were never coherently decoded.
-      self.applyKVCoherence(kvCoherent)
+      // A cancelled partial prefill must not advertise tokens the C cache
+      // never consumed. A completely decoded prompt may still be reusable
+      // after stopping in the sampling loop.
+      if !kvCoherent || prefillStarted {
+        self.withStateLock {
+          guard self.activeLoadToken == loadToken,
+            self.cacheRevision == initialCacheRevision
+          else { return }
+          self.sessionKVState = kvCoherent && promptDecoded ? SessionKVState(tokens: tokens) : nil
+        }
+      }
     }
 
-    // Assignment and unlock complete the critical section opened above.
-    // unloadModel() will now observe `generationTask` whenever it beats
-    // the task body to the lock — or, if unloadModel() ran fully before
-    // we acquired the lock, the task body's re-read will see nil context
-    // and bail out without touching freed pointers.
-    self.generationTask = task
-    stateLock.unlock()
-
-    continuation.onTermination = { @Sendable _ in
-      task.cancel()
+    // Publish both handles before unlocking, so Stop reaches this particular
+    // stream and unload joins the whole chain. Stream disposal only cancels
+    // its own task; finishing an older stream cannot cancel a replacement.
+    generationTask = task
+    nativeWorkTask = task
+    continuation.onTermination = { @Sendable reason in
+      if case .cancelled = reason { task.cancel() }
     }
 
     return generationStream
@@ -930,107 +892,95 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
 
   // MARK: - Control
 
-  /// Awaits completion of the in-flight generation task, if any.
-  ///
-  /// `isGenerating` is cleared in the generation task's `defer` block, which
-  /// runs *after* the stream's `continuation.finish()` — so a caller that has
-  /// just drained `generate(...)`'s stream has no happens-before guarantee that
-  /// the flag has flipped back to `false`. Issuing the next `generate(...)`
-  /// immediately can therefore race the defer and trip `.alreadyGenerating`.
-  ///
-  /// Also joins a generation transferred to pending unload cleanup. Cancellation
-  /// and stream termination request a stop; neither proves native quiescence.
-  /// Callers must serialize new generation/load requests with this wait.
-  ///
-  /// Await this between back-to-back generations on the same loaded model when
-  /// deterministic readiness matters (the determinism tests, programmatic
-  /// regenerate loops). It awaits the same `Task` whose `defer` releases the
-  /// guard, so on return `isGenerating == false` is guaranteed without
-  /// unloading the model — unlike ``unloadAndWait()``, the loaded context and
-  /// KV state are preserved for the next turn.
+  /// Joins the currently scheduled native decode, cache clearing, and unload
+  /// work. Stop makes the backend available for a replacement immediately,
+  /// but does not interrupt an in-flight C call or relinquish native ownership.
   public func awaitGenerationSettled() async {
-    let tasks = withStateLock { (generationTask, cleanupTask) }
+    let tasks = withStateLock { (nativeWorkTask, cleanupTask) }
     await tasks.0?.value
     await tasks.1?.value
   }
 
   public func stopGeneration() {
-    // Set the atomic flag first so the decode loop can break on its very next
-    // iteration check — even before the lock is acquired below.
-    cancelled.store(true, ordering: .sequentiallyConsistent)
-    // Cancellation requests do not relinquish ownership. The task may still
-    // be decoding in C; settle and unload must retain a handle they can join.
-    let taskToCancel = withStateLock { generationTask }
+    let taskToCancel = withStateLock {
+      generationCancellation.requested.store(true, ordering: .sequentiallyConsistent)
+      _isGenerating = false
+      return generationTask
+    }
     taskToCancel?.cancel()
   }
 
-  /// Invalidates the KV cache prefix so the next turn starts with a clean
-  /// context rather than attempting to reuse state from a prior conversation.
-  ///
-  /// Call this when the conversation history is cleared or a new session
-  /// begins. `stopGeneration()` intentionally does NOT call this — a
-  /// cancelled turn preserves the prefix so the model can continue from
-  /// where it left off on the next `generate()`.
+  /// Invalidates in-memory KV reuse when clearing or switching conversations.
   public func resetConversation() {
-    // Run the C KV flush inside stateLock alongside the sessionKVState reset.
-    // Snapshotting `context` and releasing the lock before calling
-    // llama_memory_clear() would let a concurrent unloadModel()/secureWipe()
-    // free the context between the read and the C call (use-after-free).
+    clearConversationCache(zeroData: false)
+  }
+
+  /// Zeros the KV tensors, after any native decode already using the context.
+  /// A later generation cannot touch the context until the wipe completes.
+  public func secureWipe() {
+    clearConversationCache(zeroData: true)
+  }
+
+  private func clearConversationCache(zeroData: Bool) {
     withStateLock {
       sessionKVState = nil
-      // Also flush the actual KV cache in the C context so any leftover
-      // positional state is gone before the next turn decodes from position 0.
-      if let ctx = context, let mem = llama_get_memory(ctx) {
-        llama_memory_clear(mem, false)
+      cacheRevision &+= 1
+      guard let context else { return }
+      let seam = _generationSeam
+      guard let predecessor = nativeWorkTask else {
+        Self.clearCache(context: context, zeroData: zeroData, seam: seam)
+        return
+      }
+
+      // The captured context stays alive: unload takes ownership of the tail
+      // and waits for it before freeing the context. Keep the clear itself
+      // out of the caller's thread when native work is already in flight.
+      nativeWorkRevision &+= 1
+      let revision = nativeWorkRevision
+      nativeWorkTask = Task.detached { [weak self] in
+        await predecessor.value
+        Self.clearCache(context: context, zeroData: zeroData, seam: seam)
+        self?.withStateLock {
+          if self?.nativeWorkRevision == revision { self?.nativeWorkTask = nil }
+        }
       }
     }
   }
 
-  /// Zeros the KV tensor data in the active llama.cpp context.
-  ///
-  /// Unlike ``resetConversation()``, which passes `false` to
-  /// `llama_memory_clear` (metadata-only clear), this passes `true` to
-  /// write zeros into the underlying key and value matrices. This closes the
-  /// window during which prior-session KV tensors remain in process memory.
-  ///
-  /// The KV state cache pointer is also nil-ed so the next
-  /// ``generate(_:config:)`` call starts with a fresh context.
-  public func secureWipe() {
-    // C KV zeroing runs inside stateLock with the sessionKVState reset for
-    // the same use-after-free reason as resetConversation(): teardown frees
-    // `context` under this lock.
-    withStateLock {
-      sessionKVState = nil
-      if let ctx = context, let mem = llama_get_memory(ctx) {
-        // true = zero the actual KV tensor data (key + value matrices),
-        // not just the positional/sequence metadata.
-        llama_memory_clear(mem, true)
-      }
+  private static func clearCache(
+    context: OpaquePointer, zeroData: Bool, seam: LlamaGenerationSeam?
+  ) {
+    if let seam {
+      seam.clearCache(zeroData)
+    } else if let memory = llama_get_memory(context) {
+      llama_memory_clear(memory, zeroData)
+      llama_synchronize(context)
     }
   }
 
   public func unloadModel() {
-    // Signal the decode loop to stop before acquiring stateLock. The atomic
-    // write is visible to the background task immediately, so the loop can
-    // break on its next iteration check without waiting for the lock.
-    cancelled.store(true, ordering: .sequentiallyConsistent)
     stateLock.lock()
+    generationCancellation.requested.store(true, ordering: .sequentiallyConsistent)
     nextLoadToken &+= 1
     activeLoadToken = nextLoadToken
+    nativeWorkRevision &+= 1
+    cacheRevision &+= 1
 
     let previousCleanup = cleanupTask
-    let capturedTask = generationTask
+    let taskToCancel = generationTask
+    let capturedTask = nativeWorkTask
     let capturedContext = context
     let capturedModel = model
 
     // Clear state immediately so callers see the backend as unloaded
     // without waiting for C memory deallocation.
     generationTask = nil
+    nativeWorkTask = nil
     context = nil
     model = nil
     vocab = nil
     isModelLoaded = false
-    isGenerating = false
+    _isGenerating = false
     sessionKVState = nil
     _autoDetectedThinkingMarkers = nil
     _manifest = nil
@@ -1086,7 +1036,7 @@ public final class LlamaBackend: InferenceBackend, @unchecked Sendable {
     // the task that still owns them.
     self.cleanupTask = newCleanupTask
     stateLock.unlock()
-    capturedTask?.cancel()
+    taskToCancel?.cancel()
     Self.logger.info("Llama backend unloaded")
   }
 
