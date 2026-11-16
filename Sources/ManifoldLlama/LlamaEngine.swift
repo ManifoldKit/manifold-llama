@@ -130,13 +130,16 @@ import ManifoldInference
   /// `(context, vocab)` pointer pair re-read under `stateLock` inside the
   /// generation Task. Again: sentinel pointers, never dereference them.
   public var makeEngine: @Sendable (OpaquePointer, OpaquePointer) -> any LlamaEngine
+  public var clearCache: @Sendable (_ zeroData: Bool) -> Void
 
   public init(
     tokenize: @escaping @Sendable (String, OpaquePointer) -> [llama_token],
-    makeEngine: @escaping @Sendable (OpaquePointer, OpaquePointer) -> any LlamaEngine
+    makeEngine: @escaping @Sendable (OpaquePointer, OpaquePointer) -> any LlamaEngine,
+    clearCache: @escaping @Sendable (Bool) -> Void = { _ in }
   ) {
     self.tokenize = tokenize
     self.makeEngine = makeEngine
+    self.clearCache = clearCache
   }
 }
 

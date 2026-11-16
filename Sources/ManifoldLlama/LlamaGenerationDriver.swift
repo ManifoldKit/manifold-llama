@@ -177,6 +177,8 @@ import os
     prefillSafetyFactor: Double = 1.5,
     onPrefillEstimate: (@Sendable (UInt64) -> Void)? = nil,
     onUsage: (@Sendable (Int, Int) -> Void)? = nil,
+    onPrefillStarted: (() -> Void)? = nil,
+    onPromptDecoded: (() -> Void)? = nil,
     // Metrics seam (#142): fired synchronously, inline in this loop — never
     // from a detached task — so callers can drive a lock-guarded tracker
     // without ever holding that lock across an `await`. `onToken` fires once
@@ -253,12 +255,6 @@ import os
     // also where the determinism fix lives).
     let alignedReuseLen = Self.alignedKVReuseLength(
       tokenCount: tokens.count, reuseLen: reuseLen, batchSize: batchSize)
-
-    engine.applyKVReuse(alignedPrefixLength: alignedReuseLen)
-
-    if reuseLen > 0 {
-      continuation.yield(.kvCacheReuse(promptTokensReused: reuseLen))
-    }
 
     // MARK: Sampler chain setup
 
@@ -341,6 +337,19 @@ import os
     // Phase gate: starts permissive when gating, flips to strict on the first
     // `.thinkingCompleted`. A no-op (always strict) when not gating.
     var grammarGate = GrammarPhaseGate(gateOnThinking: gateGrammarOnThinking)
+
+    // Rejecting a sampler must not trim a usable previous turn. Only
+    // invalidate or mutate its KV prefix once this turn is ready to decode.
+    if isCancelled() {
+      await MainActor.run { generationStream.setPhase(.done) }
+      continuation.finish()
+      return true
+    }
+    onPrefillStarted?()
+    engine.applyKVReuse(alignedPrefixLength: alignedReuseLen)
+    if reuseLen > 0 {
+      continuation.yield(.kvCacheReuse(promptTokensReused: reuseLen))
+    }
 
     // MARK: Chunked prompt decode
 
@@ -474,6 +483,8 @@ import os
         onError: onError
       )
     }
+
+    if promptPos == tokens.count { onPromptDecoded?() }
 
     // Honour cancellation that fired mid-prompt before entering the
     // generation loop.

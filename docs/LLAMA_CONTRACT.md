@@ -32,16 +32,18 @@ changes before merging.
 
 ## Cancellation, joins, and token usage
 
-`stopGeneration()` requests cancellation; it retains the generation task because
-native decode may still be running. Stream completion alone is not a join.
-Await `awaitGenerationSettled()` before generating again or resetting/wiping KV
-state. It also joins a generation transferred to unload cleanup. Callers must
-serialize new generation/load requests with their wait.
+`stopGeneration()` requests cancellation and makes the backend available for a
+replacement immediately. The replacement can return a stream while the old
+decode drains, but it waits for the native context before beginning. Reset and
+secure wipe use the same ordering, so a later generation cannot decode before
+the requested clear. Use `awaitGenerationSettled()` when the caller needs
+native work to complete, including work transferred to unload cleanup. Finishing
+a stream alone does not establish native quiescence.
 
 `unloadModel()` detaches pointers and publishes the cleanup task under one lock.
 Synchronous preflight, eval-input-token, and token-count vocabulary lookups hold that lock through the C
 call, since a vocabulary pointer snapshot does not retain its owning model.
-Cleanup joins the retained generation before synchronizing, clearing KV,
+Cleanup joins the retained chain of context work before synchronizing, clearing KV,
 synchronizing again, and freeing context/model. Every cleanup waiter retains
 access to the same handle; repeated unloads and reload cannot consume each
 other's join. Memory-pressure warning requests cancellation; critical pressure
@@ -573,15 +575,12 @@ always model as a sequentially-consistent barrier. Additionally,
 a memory-pressure handler), but `NSLock` does not establish the
 sequentially-consistent atomic ordering needed to make that guarantee airtight.
 
-**Fix:** `private let cancelled = Atomic<Bool>(false)` (Swift 6
-`Synchronization`) at `LlamaBackend.swift:97`. Every read and write uses
-`.sequentiallyConsistent` ordering, making `stopGeneration()` safe to call
-from any thread without acquiring `stateLock` for the flag itself. The
-surrounding state (`generationTask`, `context`, `vocab`) is still guarded by
-`stateLock`; see the startup-race comment at `LlamaBackend.swift:388-392` —
-the lock is held across **both** `Task` creation and `generationTask`
-assignment so `stopGeneration()` cannot observe a window where
-`cancelled == false && isGenerating == false` simultaneously.
+**Fix:** each admitted generation has an `Atomic<Bool>` cancellation flag
+(Swift 6 `Synchronization`). The decode loop reads its own flag without
+locking. Admission and Stop hold `stateLock` while publishing or cancelling
+that generation's flag and task. A replacement never resets its predecessor's
+flag, and the predecessor remains in the native work chain until it releases
+the context.
 
 **Detection signal:** Historical TSan reports of a data race on `cancelled`
 between the `stopGeneration()` caller thread and the generation task. Any

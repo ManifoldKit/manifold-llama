@@ -308,6 +308,7 @@ final class LlamaBackendGenerateOrchestrationTests: XCTestCase {
   func test_generate_grammarParseFailure_reportsGrammarParseFailedAndKeepsKVPrefix() async throws {
     let engine = ScriptedLlamaEngine(script: ["never"], samplerBehavior: .grammarParseFailed)
     let backend = makeBackend(engine: engine, promptTokens: [1, 2, 3])
+    backend.seedSessionKVStateForTesting(tokenCount: 6)
     let sink = StubMetricSink()
     backend.metricSink = sink
 
@@ -318,11 +319,12 @@ final class LlamaBackendGenerateOrchestrationTests: XCTestCase {
 
     XCTAssertNotNil(error)
     XCTAssertEqual(engine.samplerRequests, [true], "the strict chain carries the grammar")
+    XCTAssertTrue(engine.kvReusePrefixes.isEmpty, "grammar validation must precede KV mutation")
     let records = await sink.waitForRecords(count: 1)
     let metric = try XCTUnwrap(records.first)
     XCTAssertEqual(metric.errorClass, "grammarParseFailed")
     XCTAssertEqual(
-      backend.sessionKVTokenCountForTesting, 3,
+      backend.sessionKVTokenCountForTesting, 6,
       "no decode ran, so the KV cache is still coherent and the prefix must survive")
   }
 
