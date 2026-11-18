@@ -2,8 +2,13 @@
 
 ## [0.4.11](https://github.com/ManifoldKit/manifold-llama/compare/v0.4.10...v0.4.11) (2026-11-16)
 
+### Highlights
 
-### Bug Fixes
+#### Send the next message immediately after Stop
+
+The next GGUF turn is accepted while the stopped decode finishes releasing its native context. Per-generation cancellation and ordered cache clearing preserve the replacement turn through repeated Stop, reset, wipe and unload.
+
+### Fixes
 
 * **llama:** accept immediate resend after Stop ([#217](https://github.com/ManifoldKit/manifold-llama/issues/217)) ([2e6fb1a](https://github.com/ManifoldKit/manifold-llama/commit/2e6fb1adcc782dbda863e593c8d81e1727ea5b62))
 
